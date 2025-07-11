@@ -1,0 +1,16 @@
+[package]
+name = "aviutl2-gif-export"
+version = "0.0.0"
+edition = "2024"
+
+[lib]
+name = "gif_export_plugin"
+crate-type = ["cdylib"]
+
+[dependencies]
+aviutl = { path = "../aviutl" }
+gif = { version = "0.13" }
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
