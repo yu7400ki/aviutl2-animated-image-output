@@ -21,6 +21,10 @@ fn create_apng_from_video(info: &OutputInfo) -> std::result::Result<(), String> 
         .set_animated(info.n as u32, 0)
         .map_err(|e| format!("APNG設定エラー: {}", e))?;
 
+    encoder
+        .set_frame_delay(info.scale as u16, info.rate as u16)
+        .map_err(|e| format!("フレームレート設定エラー: {}", e))?;
+
     let mut writer = encoder
         .write_header()
         .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
