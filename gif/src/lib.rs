@@ -8,12 +8,16 @@ use std::fs::File;
 use std::sync::LazyLock;
 use windows::{Win32::Foundation::*, Win32::UI::WindowsAndMessaging::*, core::*};
 
-fn create_gif_from_video(info: &OutputInfo) -> std::result::Result<(), Box<dyn std::error::Error>> {
+fn create_gif_from_video(info: &OutputInfo) -> std::result::Result<(), String> {
     let output_path = wide_to_string(info.savefile);
 
-    let output_file = File::create(&output_path)?;
-    let mut encoder = Encoder::new(output_file, info.w as u16, info.h as u16, &[])?;
-    encoder.set_repeat(Repeat::Infinite)?;
+    let output_file =
+        File::create(&output_path).map_err(|e| format!("ファイル作成エラー: {}", e))?;
+    let mut encoder = Encoder::new(output_file, info.w as u16, info.h as u16, &[])
+        .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
+    encoder
+        .set_repeat(Repeat::Infinite)
+        .map_err(|e| format!("リピート設定エラー: {}", e))?;
 
     for frame in 0..info.n {
         if info.is_abort() {
@@ -43,9 +47,11 @@ fn create_gif_from_video(info: &OutputInfo) -> std::result::Result<(), Box<dyn s
 
             // フレームデータを書き込み
             let mut frame = Frame::from_rgb(info.w as u16, info.h as u16, &rgb_data);
-            // フレーム遅延を設定 (1/100秒単位)
-            frame.delay = 10; // 0.1秒 = 10fps
-            encoder.write_frame(&frame)?;
+            let delay = (100.0 * info.scale as f64 / info.rate as f64).round() as u16;
+            frame.delay = delay.max(1);
+            encoder
+                .write_frame(&frame)
+                .map_err(|e| format!("フレーム書き込みエラー: {}", e))?;
         }
 
         info.rest_time_disp(frame, info.n);

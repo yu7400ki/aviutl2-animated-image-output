@@ -7,12 +7,11 @@ use std::ffi::c_void;
 use std::sync::LazyLock;
 use windows::{Win32::Foundation::*, Win32::UI::WindowsAndMessaging::*, core::*};
 
-fn create_apng_from_video(
-    info: &OutputInfo,
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
+fn create_apng_from_video(info: &OutputInfo) -> std::result::Result<(), String> {
     let output_path = wide_to_string(info.savefile);
 
-    let output_file = std::fs::File::create(&output_path)?;
+    let output_file =
+        std::fs::File::create(&output_path).map_err(|e| format!("ファイル作成エラー: {}", e))?;
     let mut encoder = Encoder::new(output_file, info.w as u32, info.h as u32);
     encoder.set_color(ColorType::Rgb);
     encoder.set_depth(BitDepth::Eight);
@@ -22,7 +21,9 @@ fn create_apng_from_video(
         .set_animated(info.n as u32, 0)
         .map_err(|e| format!("APNG設定エラー: {}", e))?;
 
-    let mut writer = encoder.write_header()?;
+    let mut writer = encoder
+        .write_header()
+        .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
 
     for frame in 0..info.n {
         if info.is_abort() {
@@ -50,13 +51,17 @@ fn create_apng_from_video(
             };
 
             // フレームデータを書き込み
-            writer.write_image_data(&rgb_data)?;
+            writer
+                .write_image_data(&rgb_data)
+                .map_err(|e| format!("フレーム書き込みエラー: {}", e))?;
         }
 
         info.rest_time_disp(frame, info.n);
     }
 
-    writer.finish()?;
+    writer
+        .finish()
+        .map_err(|e| format!("エンコーダー終了エラー: {}", e))?;
     Ok(())
 }
 
