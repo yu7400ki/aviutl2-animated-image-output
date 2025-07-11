@@ -1,5 +1,7 @@
 [workspace]
-members = ["aviutl"]
+members = ["aviutl", "apng"]
+default-members = ["apng"]
+resolver = "3"
 
 [workspace.dependencies]
 windows = { version = "0.61" }

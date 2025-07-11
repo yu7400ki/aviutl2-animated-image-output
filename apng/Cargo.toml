@@ -1,0 +1,16 @@
+[package]
+name = "aviutl2-apng-export"
+version = "0.0.0"
+edition = "2024"
+
+[lib]
+name = "apng_export_plugin"
+crate-type = ["cdylib"]
+
+[dependencies]
+aviutl = { path = "../aviutl" }
+png = { version = "0.17" }
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
