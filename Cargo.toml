@@ -1,6 +1,5 @@
-[package]
-name = "aviutl2-animated-image-export"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = ["aviutl"]
 
-[dependencies]
+[workspace.dependencies]
+windows = { version = "0.61" }
