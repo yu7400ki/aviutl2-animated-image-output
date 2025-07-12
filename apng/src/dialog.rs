@@ -1,7 +1,7 @@
-use crate::config::Config;
+use crate::config::{ColorFormat, Config};
 use dialog::{
     Dialog,
-    controls::{Button, Label, TextBox},
+    controls::{Button, ComboBox, Label, TextBox},
 };
 use std::sync::{Arc, Mutex};
 use windows::{
@@ -9,42 +9,72 @@ use windows::{
     core::*,
 };
 
-const LABEL_ID: i32 = 1001;
-const TEXTBOX_ID: i32 = 1002;
-const OK_BUTTON_ID: i32 = 1003;
-const CANCEL_BUTTON_ID: i32 = 1004;
+const REPEAT_LABEL_ID: i32 = 1001;
+const REPEAT_TEXTBOX_ID: i32 = 1002;
+const COLOR_LABEL_ID: i32 = 1003;
+const COLOR_COMBOBOX_ID: i32 = 1004;
+const OK_BUTTON_ID: i32 = 1005;
+const CANCEL_BUTTON_ID: i32 = 1006;
 
 pub fn show_config_dialog(
     parent_hwnd: HWND,
     default_config: Config,
 ) -> std::result::Result<Option<Config>, ()> {
     let result = Arc::new(Mutex::new(None::<Config>));
-    let mut dialog = Dialog::new("出力設定", (300, 160));
+    let mut dialog = Dialog::new("APNG出力設定", (300, 210));
 
-    // ラベルコントロール
-    let label = Label::new(LABEL_ID, (20, 15), (245, 20), "ループ回数 (0=無限ループ)");
-    dialog.add_control(Box::new(label));
+    // リピート回数ラベル
+    let repeat_label = Label::new(
+        REPEAT_LABEL_ID,
+        (20, 15),
+        (245, 20),
+        "リピート回数 (0=無限ループ)",
+    );
+    dialog.add_control(Box::new(repeat_label));
 
-    // テキストボックス
+    // リピート回数テキストボックス
     let textbox = TextBox::new(
-        TEXTBOX_ID,
-        (20, 40),
+        REPEAT_TEXTBOX_ID,
+        (20, 35),
         (245, 20),
         &default_config.repeat.to_string(),
     );
     dialog.add_control(Box::new(textbox.clone()));
 
+    // カラーフォーマットラベル
+    let color_label = Label::new(COLOR_LABEL_ID, (20, 70), (245, 20), "カラーフォーマット");
+    dialog.add_control(Box::new(color_label));
+
+    // カラーフォーマットコンボボックス
+    let color_options = vec!["RGB 24bit", "RGBA 32bit"];
+    let color_combobox = ComboBox::new(COLOR_COMBOBOX_ID, (20, 90), (245, 100), color_options);
+    let initial_index = match default_config.color_format {
+        ColorFormat::Rgb24 => 0,
+        ColorFormat::Rgba32 => 1,
+    };
+    color_combobox.set_selected_index(initial_index);
+    dialog.add_control(Box::new(color_combobox.clone()));
+
     // OKボタン
     let textbox_ok = textbox.clone();
+    let color_combobox_ok = color_combobox.clone();
     let dialog_ok = dialog.clone();
     let result_ok = Arc::clone(&result);
 
-    let mut ok_button = Button::new(OK_BUTTON_ID, (95, 80), (80, 25), "OK");
+    let mut ok_button = Button::new(OK_BUTTON_ID, (95, 130), (80, 25), "OK");
     ok_button.on_click(move || {
         let text = textbox_ok.get_text();
         if let Ok(value) = text.parse::<u32>() {
             if let Ok(mut guard) = result_ok.lock() {
-                *guard = Some(Config { repeat: value });
+                let color_format = match color_combobox_ok.get_selected_index() {
+                    0 => ColorFormat::Rgb24,
+                    1 => ColorFormat::Rgba32,
+                    _ => ColorFormat::Rgb24,
+                };
+                *guard = Some(Config {
+                    repeat: value,
+                    color_format,
+                });
                 dialog_ok.close();
             } else {
                 unsafe {
@@ -73,7 +103,7 @@ pub fn show_config_dialog(
     // キャンセルボタン
     let dialog_cancel = dialog.clone();
 
-    let mut cancel_button = Button::new(CANCEL_BUTTON_ID, (185, 80), (80, 25), "キャンセル");
+    let mut cancel_button = Button::new(CANCEL_BUTTON_ID, (185, 130), (80, 25), "キャンセル");
     cancel_button.on_click(move || {
         dialog_cancel.close();
         Ok(())

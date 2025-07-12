@@ -3,6 +3,7 @@ mod dialog;
 
 use aviutl::{
     output2::{OutputInfo, OutputPluginTable, video_format},
+    patch::{apply_rgba_patch, restore_rgba_patch},
     utils::{to_wide_string, wide_to_string},
 };
 use png::{BitDepth, ColorType, Encoder};
@@ -10,7 +11,7 @@ use std::ffi::c_void;
 use std::sync::{LazyLock, Mutex};
 use windows::{Win32::Foundation::*, Win32::UI::WindowsAndMessaging::*, core::*};
 
-use config::Config;
+use config::{ColorFormat, Config};
 use dialog::show_config_dialog;
 
 static CONFIG: Mutex<Config> = Mutex::new(Config::default());
@@ -21,7 +22,15 @@ fn create_apng_from_video(info: &OutputInfo) -> std::result::Result<(), String> 
     let output_file =
         std::fs::File::create(&output_path).map_err(|e| format!("ファイル作成エラー: {}", e))?;
     let mut encoder = Encoder::new(output_file, info.w as u32, info.h as u32);
-    encoder.set_color(ColorType::Rgb);
+    // カラーフォーマット設定
+    let (color_type, channels) = match CONFIG.lock() {
+        Ok(guard) => match guard.color_format {
+            ColorFormat::Rgb24 => (ColorType::Rgb, 3),
+            ColorFormat::Rgba32 => (ColorType::Rgba, 4),
+        },
+        Err(_) => (ColorType::Rgb, 3), // デフォルト値を使用
+    };
+    encoder.set_color(color_type);
     encoder.set_depth(BitDepth::Eight);
 
     // APNG設定
@@ -45,30 +54,63 @@ fn create_apng_from_video(info: &OutputInfo) -> std::result::Result<(), String> 
         if info.is_abort() {
             return Err("処理が中断されました".into());
         }
-        let frame_data = info.get_video(frame, video_format::BI_RGB);
+        // カラーフォーマットに応じてフレームデータを取得
+        let frame_data = if channels == 4 {
+            // RGBAモード: パッチを適用してRGBA32データを取得
+            info.get_video(frame, video_format::BI_RGB)
+        } else {
+            // RGBモード: 通常のRGB24データを取得
+            info.get_video(frame, video_format::BI_RGB)
+        };
         if let Some(data_ptr) = frame_data {
-            let rgb_data = unsafe {
-                let stride = ((info.w * 3 + 3) / 4) * 4; // 4バイト境界にアライン
-                let data_slice =
-                    std::slice::from_raw_parts(data_ptr as *const u8, (stride * info.h) as usize);
+            let image_data = unsafe {
+                if channels == 4 {
+                    // RGBAモード: RGBA32データを処理
+                    let input_stride = info.w * 4; // RGBA32のストライド
+                    let data_slice = std::slice::from_raw_parts(
+                        data_ptr as *const u8,
+                        (input_stride * info.h) as usize,
+                    );
 
-                // BMPは下から上に格納されているので反転
-                let mut rgb_buffer = Vec::with_capacity((info.w * info.h * 3) as usize);
-                for y in (0..info.h).rev() {
-                    for x in 0..info.w {
-                        let offset = (y * stride + x * 3) as usize;
-                        // BGR -> RGB変換
-                        rgb_buffer.push(data_slice[offset + 2]); // R
-                        rgb_buffer.push(data_slice[offset + 1]); // G
-                        rgb_buffer.push(data_slice[offset]); // B
+                    let mut image_buffer = Vec::with_capacity((info.w * info.h * 4) as usize);
+                    // BMPは下から上に格納されているので反転
+                    for y in (0..info.h).rev() {
+                        for x in 0..info.w {
+                            let offset = (y * input_stride + x * 4) as usize;
+                            // BGRA -> RGBA変換
+                            image_buffer.push(data_slice[offset + 2]); // R
+                            image_buffer.push(data_slice[offset + 1]); // G
+                            image_buffer.push(data_slice[offset]); // B
+                            image_buffer.push(data_slice[offset + 3]); // A
+                        }
                     }
+                    image_buffer
+                } else {
+                    // RGBモード: RGB24データを処理
+                    let input_stride = ((info.w * 3 + 3) / 4) * 4; // RGB24のストライド
+                    let data_slice = std::slice::from_raw_parts(
+                        data_ptr as *const u8,
+                        (input_stride * info.h) as usize,
+                    );
+
+                    let mut image_buffer = Vec::with_capacity((info.w * info.h * 3) as usize);
+                    // BMPは下から上に格納されているので反転
+                    for y in (0..info.h).rev() {
+                        for x in 0..info.w {
+                            let offset = (y * input_stride + x * 3) as usize;
+                            // BGR -> RGB変換
+                            image_buffer.push(data_slice[offset + 2]); // R
+                            image_buffer.push(data_slice[offset + 1]); // G
+                            image_buffer.push(data_slice[offset]); // B
+                        }
+                    }
+                    image_buffer
                 }
-                rgb_buffer
             };
 
             // フレームデータを書き込み
             writer
-                .write_image_data(&rgb_data)
+                .write_image_data(&image_data)
                 .map_err(|e| format!("フレーム書き込みエラー: {}", e))?;
         }
 
@@ -88,7 +130,34 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
             None => return false,
         };
 
-        match create_apng_from_video(info) {
+        // RGBAモードの場合のみパッチを適用
+        let use_rgba = match CONFIG.lock() {
+            Ok(guard) => matches!(guard.color_format, ColorFormat::Rgba32),
+            Err(_) => false,
+        };
+
+        let old_protect = if use_rgba {
+            match apply_rgba_patch(&info) {
+                Ok(protect) => Some(protect),
+                Err(e) => {
+                    let error_msg = format!("メモリパッチ適用エラー: {}", e);
+                    let error_wide = to_wide_string(&error_msg);
+                    let title_wide = to_wide_string("エラー");
+
+                    MessageBoxW(
+                        Some(HWND::default()),
+                        PCWSTR(error_wide.as_ptr()),
+                        PCWSTR(title_wide.as_ptr()),
+                        MB_OK | MB_ICONERROR,
+                    );
+                    return false;
+                }
+            }
+        } else {
+            None
+        };
+
+        let result = match create_apng_from_video(info) {
             Ok(_) => true,
             Err(e) => {
                 let error_msg = format!("APNG出力エラー: {}", e);
@@ -103,7 +172,14 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
                 );
                 false
             }
+        };
+
+        // パッチを復元
+        if let Some(protect) = old_protect {
+            restore_rgba_patch(&info, protect);
         }
+
+        result
     }
 }
 
