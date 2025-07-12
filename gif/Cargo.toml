@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 aviutl = { path = "../aviutl" }
 dialog = { path = "../dialog" }
 gif = { version = "0.13" }
+widestring = { workspace = true }
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",

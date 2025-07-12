@@ -10,6 +10,7 @@ use gif::{Encoder, Frame, Repeat};
 use std::ffi::c_void;
 use std::fs::File;
 use std::sync::{LazyLock, Mutex};
+use widestring::{Utf16Str, utf16str};
 use windows::{Win32::Foundation::*, Win32::UI::WindowsAndMessaging::*, core::*};
 
 use config::{ColorFormat, Config};
@@ -203,14 +204,15 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
     }
 }
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-static PLUGIN_NAME: LazyLock<Vec<u16>> = LazyLock::new(|| to_wide_string("GIF出力プラグイン"));
-static FILE_FILTER: LazyLock<Vec<u16>> =
-    LazyLock::new(|| to_wide_string("GIF Files (*.gif)\0*.gif\0All Files (*)\0*\0"));
-static PLUGIN_INFO: LazyLock<Vec<u16>> =
-    LazyLock::new(|| to_wide_string(&format!("GIF出力プラグイン v{} by yu7400ki", VERSION)));
+static PLUGIN_NAME: &Utf16Str = utf16str!("GIF出力プラグイン\0");
+static FILE_FILTER: &Utf16Str = utf16str!("GIF Files (*.gif)\0*.gif\0All Files (*)\0*\0\0");
+static PLUGIN_INFO: &Utf16Str = utf16str!(concat!(
+    "GIF出力プラグイン v",
+    env!("CARGO_PKG_VERSION"),
+    " by yu7400ki\0"
+));
 
-static mut OUTPUT_PLUGIN_TABLE: Option<OutputPluginTable> = None;
+static OUTPUT_PLUGIN_TABLE: LazyLock<OutputPluginTable> = LazyLock::new(|| init_plugin_table());
 
 fn init_plugin_table() -> OutputPluginTable {
     OutputPluginTable {
@@ -231,11 +233,5 @@ pub unsafe extern "C" fn DllMain(_hinst: HINSTANCE, _reason: u32, _reserved: *mu
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GetOutputPluginTable() -> *mut OutputPluginTable {
-    unsafe {
-        let table_ptr = std::ptr::addr_of_mut!(OUTPUT_PLUGIN_TABLE);
-        if (*table_ptr).is_none() {
-            *table_ptr = Some(init_plugin_table());
-        }
-        (*table_ptr).as_mut().unwrap() as *mut OutputPluginTable
-    }
+    &*OUTPUT_PLUGIN_TABLE as *const OutputPluginTable as *mut OutputPluginTable
 }
