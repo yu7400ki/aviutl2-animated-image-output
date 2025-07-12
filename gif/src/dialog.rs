@@ -1,7 +1,7 @@
 use crate::config::{ColorFormat, Config};
 use dialog::{
     Dialog,
-    controls::{Button, ComboBox, Label, TextBox},
+    controls::{Button, ComboBox, Label, Number},
 };
 use std::sync::{Arc, Mutex};
 use windows::{
@@ -32,44 +32,44 @@ pub fn show_config_dialog(
     );
     dialog.add_control(Box::new(repeat_label));
 
-    // リピート回数テキストボックス
-    let textbox = TextBox::new(
+    // リピート回数数値入力
+    let number_input = Number::new(
         REPEAT_TEXTBOX_ID,
         (20, 35),
         (245, 20),
-        &default_config.repeat.to_string(),
+        default_config.repeat.into(),
+        Some((0, u16::MAX as i32)),
     );
-    dialog.add_control(Box::new(textbox.clone()));
+    dialog.add_control(Box::new(number_input.clone()));
 
     // カラーフォーマットラベル
     let color_label = Label::new(COLOR_LABEL_ID, (20, 70), (245, 20), "カラーフォーマット");
     dialog.add_control(Box::new(color_label));
 
     // カラーフォーマットコンボボックス
-    let color_options = vec!["RGB 24bit", "RGBA 32bit"];
+    let color_options = vec!["パレット化", "透明度あり"];
     let color_combobox = ComboBox::new(COLOR_COMBOBOX_ID, (20, 90), (245, 100), color_options);
     let initial_index = match default_config.color_format {
-        ColorFormat::Rgb24 => 0,
-        ColorFormat::Rgba32 => 1,
+        ColorFormat::Palette => 0,
+        ColorFormat::Transparent => 1,
     };
     color_combobox.set_selected_index(initial_index);
     dialog.add_control(Box::new(color_combobox.clone()));
 
     // OKボタン
-    let textbox_ok = textbox.clone();
+    let number_input_ok = number_input.clone();
     let color_combobox_ok = color_combobox.clone();
     let dialog_ok = dialog.clone();
     let result_ok = Arc::clone(&result);
 
     let mut ok_button = Button::new(OK_BUTTON_ID, (95, 130), (80, 25), "OK");
     ok_button.on_click(move || {
-        let text = textbox_ok.get_text();
-        if let Ok(value) = text.parse::<u16>() {
+        if let Ok(value) = number_input_ok.get_value::<u16>() {
             if let Ok(mut guard) = result_ok.lock() {
                 let color_format = match color_combobox_ok.get_selected_index() {
-                    0 => ColorFormat::Rgb24,
-                    1 => ColorFormat::Rgba32,
-                    _ => ColorFormat::Rgba32,
+                    0 => ColorFormat::Palette,
+                    1 => ColorFormat::Transparent,
+                    _ => ColorFormat::Palette,
                 };
                 *guard = Some(Config {
                     repeat: value,
