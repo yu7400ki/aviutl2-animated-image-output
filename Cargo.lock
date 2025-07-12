@@ -61,6 +61,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog"
+version = "0.0.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
 name = "fdeflate"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,5 +1,5 @@
 [workspace]
-members = ["aviutl", "apng", "gif"]
+members = ["aviutl", "dialog", "apng", "gif"]
 default-members = ["apng", "gif"]
 resolver = "3"
 

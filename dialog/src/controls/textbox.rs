@@ -1,0 +1,126 @@
+use crate::{Control, Result};
+use std::cell::RefCell;
+use std::ffi::c_void;
+use std::rc::Rc;
+use windows::Win32::Foundation::*;
+use windows::Win32::Graphics::Gdi::HFONT;
+use windows::Win32::System::LibraryLoader::*;
+use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::*;
+
+struct TextBoxInner {
+    hwnd: Option<HWND>,
+    id: i32,
+    position: (i32, i32),
+    size: (i32, i32),
+    text: String,
+}
+
+#[derive(Clone)]
+pub struct TextBox {
+    inner: Rc<RefCell<TextBoxInner>>,
+}
+
+impl TextBox {
+    pub fn new(id: i32, position: (i32, i32), size: (i32, i32), text: &str) -> Self {
+        Self {
+            inner: Rc::new(RefCell::new(TextBoxInner {
+                hwnd: None,
+                id,
+                position,
+                size,
+                text: text.to_string(),
+            })),
+        }
+    }
+
+    pub fn get_text(&self) -> String {
+        let inner = self.inner.borrow();
+        match inner.hwnd {
+            Some(hwnd) => unsafe {
+                let mut buffer = [0u16; 256];
+                let len = GetWindowTextW(hwnd, &mut buffer);
+                if len > 0 {
+                    String::from_utf16_lossy(&buffer[..len as usize])
+                } else {
+                    String::new()
+                }
+            },
+            None => String::new(),
+        }
+    }
+
+    pub fn set_text(&self, text: &str) {
+        let inner = self.inner.borrow();
+        if let Some(hwnd) = inner.hwnd {
+            let wide_text = text
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<u16>>();
+            unsafe {
+                SetWindowTextW(hwnd, PCWSTR(wide_text.as_ptr())).ok();
+            }
+        }
+    }
+}
+
+impl Control for TextBox {
+    fn create(&mut self, parent: HWND) -> Result<HWND> {
+        unsafe {
+            let hinstance = GetModuleHandleW(None)?;
+
+            let mut inner = self.inner.borrow_mut();
+
+            let hwnd = CreateWindowExW(
+                WS_EX_CLIENTEDGE,
+                w!("EDIT"),
+                PCWSTR::null(),
+                WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP,
+                inner.position.0,
+                inner.position.1,
+                inner.size.0,
+                inner.size.1,
+                Some(parent),
+                Some(HMENU(inner.id as *mut c_void)),
+                Some(HINSTANCE(hinstance.0)),
+                None,
+            )?;
+
+            let initial_wide = inner
+                .text
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<u16>>();
+            SetWindowTextW(hwnd, PCWSTR(initial_wide.as_ptr())).ok();
+
+            inner.hwnd = Some(hwnd);
+
+            Ok(hwnd)
+        }
+    }
+
+    fn handle_message(&mut self, _msg: u32, _wparam: WPARAM, _lparam: LPARAM) -> Option<LRESULT> {
+        None
+    }
+
+    fn get_id(&self) -> i32 {
+        self.inner.borrow().id
+    }
+
+    fn get_hwnd(&self) -> Option<HWND> {
+        self.inner.borrow().hwnd
+    }
+
+    fn set_font(&self, font: HFONT) {
+        if let Some(hwnd) = self.get_hwnd() {
+            unsafe {
+                SendMessageW(
+                    hwnd,
+                    WM_SETFONT,
+                    Some(WPARAM(font.0 as usize)),
+                    Some(LPARAM(1)),
+                );
+            }
+        }
+    }
+}
