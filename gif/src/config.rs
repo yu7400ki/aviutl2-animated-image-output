@@ -1,12 +1,12 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColorFormat {
-    Rgb24,
-    Rgba32,
+    Palette,     // 通常の256色パレット
+    Transparent, // 透明色ありパレット
 }
 
 impl Default for ColorFormat {
     fn default() -> Self {
-        ColorFormat::Rgba32
+        ColorFormat::Palette
     }
 }
 
@@ -20,7 +20,7 @@ impl Config {
     pub const fn default() -> Self {
         Config {
             repeat: 0,
-            color_format: ColorFormat::Rgb24,
+            color_format: ColorFormat::Palette,
         }
     }
 }

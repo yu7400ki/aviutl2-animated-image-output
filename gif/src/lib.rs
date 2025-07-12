@@ -32,7 +32,7 @@ fn create_gif_from_video(info: &OutputInfo) -> std::result::Result<(), String> {
             } else {
                 Repeat::Finite(guard.repeat)
             };
-            let rgba = matches!(guard.color_format, ColorFormat::Rgba32);
+            let rgba = matches!(guard.color_format, ColorFormat::Transparent);
             (repeat, rgba)
         }
         Err(_) => (Repeat::Infinite, true), // デフォルト値を使用
@@ -150,9 +150,9 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
             None => return false,
         };
 
-        // RGBAモードの場合のみパッチを適用
+        // 透明度ありモードの場合のみパッチを適用
         let use_rgba = match CONFIG.lock() {
-            Ok(guard) => matches!(guard.color_format, ColorFormat::Rgba32),
+            Ok(guard) => matches!(guard.color_format, ColorFormat::Transparent),
             Err(_) => false,
         };
 
