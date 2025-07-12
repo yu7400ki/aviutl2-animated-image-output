@@ -129,6 +129,55 @@ impl OutputInfo {
             f(video_size, audio_size);
         }
     }
+
+    /// BGRフォーマットのフレームデータをRGBに変換して取得
+    pub fn get_video_rgb(&self, frame: i32) -> Option<Vec<u8>> {
+        let data_ptr = self.get_video(frame, video_format::BI_RGB)?;
+
+        unsafe {
+            let input_stride = ((self.w * 3 + 3) / 4) * 4; // RGB24のストライド（4バイト境界アライメント）
+            let data_slice =
+                std::slice::from_raw_parts(data_ptr as *const u8, (input_stride * self.h) as usize);
+
+            let mut image_buffer = Vec::with_capacity((self.w * self.h * 3) as usize);
+            // BMPは下から上に格納されているので反転
+            for y in (0..self.h).rev() {
+                for x in 0..self.w {
+                    let offset = (y * input_stride + x * 3) as usize;
+                    // BGR -> RGB変換
+                    image_buffer.push(data_slice[offset + 2]); // R
+                    image_buffer.push(data_slice[offset + 1]); // G
+                    image_buffer.push(data_slice[offset]); // B
+                }
+            }
+            Some(image_buffer)
+        }
+    }
+
+    /// BGRフォーマットのフレームデータをRGBAに変換して取得（アルファチャンネル付き）
+    pub fn get_video_rgba(&self, frame: i32) -> Option<Vec<u8>> {
+        let data_ptr = self.get_video(frame, video_format::BI_RGB)?;
+
+        unsafe {
+            let input_stride = self.w * 4; // RGBA32のストライド
+            let data_slice =
+                std::slice::from_raw_parts(data_ptr as *const u8, (input_stride * self.h) as usize);
+
+            let mut image_buffer = Vec::with_capacity((self.w * self.h * 4) as usize);
+            // BMPは下から上に格納されているので反転
+            for y in (0..self.h).rev() {
+                for x in 0..self.w {
+                    let offset = (y * input_stride + x * 4) as usize;
+                    // BGRA -> RGBA変換
+                    image_buffer.push(data_slice[offset + 2]); // R
+                    image_buffer.push(data_slice[offset + 1]); // G
+                    image_buffer.push(data_slice[offset]); // B
+                    image_buffer.push(data_slice[offset + 3]); // A
+                }
+            }
+            Some(image_buffer)
+        }
+    }
 }
 
 /// 出力プラグイン構造体

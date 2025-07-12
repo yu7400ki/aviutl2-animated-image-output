@@ -2,7 +2,7 @@ mod config;
 mod dialog;
 
 use aviutl::{
-    output2::{OutputInfo, OutputPluginTable, video_format},
+    output2::{OutputInfo, OutputPluginTable},
     patch::{apply_rgba_patch, restore_rgba_patch},
     utils::{to_wide_string, wide_to_string},
 };
@@ -47,63 +47,22 @@ fn create_gif_from_video(info: &OutputInfo) -> std::result::Result<(), String> {
             return Err("処理が中断されました".into());
         }
 
-        let frame_data = info.get_video(frame, video_format::BI_RGB);
-        if let Some(data_ptr) = frame_data {
-            let gif_frame = unsafe {
-                if use_rgba {
-                    // RGBAモード: RGBA32データを処理
-                    let input_stride = info.w * 4; // RGBA32のストライド
-                    let data_slice = std::slice::from_raw_parts(
-                        data_ptr as *const u8,
-                        (input_stride * info.h) as usize,
-                    );
+        let image_data = if use_rgba {
+            info.get_video_rgba(frame)
+        } else {
+            info.get_video_rgb(frame)
+        };
 
-                    let mut rgba_buffer = Vec::with_capacity((info.w * info.h * 4) as usize);
-                    // BMPは下から上に格納されているので反転
-                    for y in (0..info.h).rev() {
-                        for x in 0..info.w {
-                            let offset = (y * input_stride + x * 4) as usize;
-                            // BGRA -> RGBA変換
-                            rgba_buffer.push(data_slice[offset + 2]); // R
-                            rgba_buffer.push(data_slice[offset + 1]); // G
-                            rgba_buffer.push(data_slice[offset]); // B
-                            rgba_buffer.push(data_slice[offset + 3]); // A
-                        }
-                    }
-
-                    let mut frame =
-                        Frame::from_rgba(info.w as u16, info.h as u16, &mut rgba_buffer);
-                    frame.dispose = gif::DisposalMethod::Background;
-                    let delay = (100.0 * info.scale as f64 / info.rate as f64).round() as u16;
-                    frame.delay = delay.max(1);
-                    frame
-                } else {
-                    // RGBモード: RGB24データを直接使用
-                    let input_stride = ((info.w * 3 + 3) / 4) * 4; // RGB24のストライド
-                    let data_slice = std::slice::from_raw_parts(
-                        data_ptr as *const u8,
-                        (input_stride * info.h) as usize,
-                    );
-
-                    let mut rgb_buffer = Vec::with_capacity((info.w * info.h * 3) as usize);
-                    // BMPは下から上に格納されているので反転
-                    for y in (0..info.h).rev() {
-                        for x in 0..info.w {
-                            let offset = (y * input_stride + x * 3) as usize;
-                            // BGR -> RGB変換
-                            rgb_buffer.push(data_slice[offset + 2]); // R
-                            rgb_buffer.push(data_slice[offset + 1]); // G
-                            rgb_buffer.push(data_slice[offset]); // B
-                        }
-                    }
-
-                    let mut frame = Frame::from_rgb(info.w as u16, info.h as u16, &rgb_buffer);
-                    frame.dispose = gif::DisposalMethod::Background;
-                    let delay = (100.0 * info.scale as f64 / info.rate as f64).round() as u16;
-                    frame.delay = delay.max(1);
-                    frame
-                }
+        if let Some(mut image_data) = image_data {
+            let mut gif_frame = if use_rgba {
+                Frame::from_rgba(info.w as u16, info.h as u16, &mut image_data)
+            } else {
+                Frame::from_rgb(info.w as u16, info.h as u16, &image_data)
             };
+
+            gif_frame.dispose = gif::DisposalMethod::Background;
+            let delay = (100.0 * info.scale as f64 / info.rate as f64).round() as u16;
+            gif_frame.delay = delay.max(1);
 
             encoder
                 .write_frame(&gif_frame)

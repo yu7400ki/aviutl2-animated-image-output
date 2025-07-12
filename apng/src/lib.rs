@@ -2,7 +2,7 @@ mod config;
 mod dialog;
 
 use aviutl::{
-    output2::{OutputInfo, OutputPluginTable, video_format},
+    output2::{OutputInfo, OutputPluginTable},
     patch::{apply_rgba_patch, restore_rgba_patch},
     utils::{to_wide_string, wide_to_string},
 };
@@ -56,59 +56,15 @@ fn create_apng_from_video(info: &OutputInfo) -> std::result::Result<(), String> 
             return Err("処理が中断されました".into());
         }
         // カラーフォーマットに応じてフレームデータを取得
-        let frame_data = if channels == 4 {
+        let image_data = if channels == 4 {
             // RGBAモード: パッチを適用してRGBA32データを取得
-            info.get_video(frame, video_format::BI_RGB)
+            info.get_video_rgba(frame)
         } else {
             // RGBモード: 通常のRGB24データを取得
-            info.get_video(frame, video_format::BI_RGB)
+            info.get_video_rgb(frame)
         };
-        if let Some(data_ptr) = frame_data {
-            let image_data = unsafe {
-                if channels == 4 {
-                    // RGBAモード: RGBA32データを処理
-                    let input_stride = info.w * 4; // RGBA32のストライド
-                    let data_slice = std::slice::from_raw_parts(
-                        data_ptr as *const u8,
-                        (input_stride * info.h) as usize,
-                    );
 
-                    let mut image_buffer = Vec::with_capacity((info.w * info.h * 4) as usize);
-                    // BMPは下から上に格納されているので反転
-                    for y in (0..info.h).rev() {
-                        for x in 0..info.w {
-                            let offset = (y * input_stride + x * 4) as usize;
-                            // BGRA -> RGBA変換
-                            image_buffer.push(data_slice[offset + 2]); // R
-                            image_buffer.push(data_slice[offset + 1]); // G
-                            image_buffer.push(data_slice[offset]); // B
-                            image_buffer.push(data_slice[offset + 3]); // A
-                        }
-                    }
-                    image_buffer
-                } else {
-                    // RGBモード: RGB24データを処理
-                    let input_stride = ((info.w * 3 + 3) / 4) * 4; // RGB24のストライド
-                    let data_slice = std::slice::from_raw_parts(
-                        data_ptr as *const u8,
-                        (input_stride * info.h) as usize,
-                    );
-
-                    let mut image_buffer = Vec::with_capacity((info.w * info.h * 3) as usize);
-                    // BMPは下から上に格納されているので反転
-                    for y in (0..info.h).rev() {
-                        for x in 0..info.w {
-                            let offset = (y * input_stride + x * 3) as usize;
-                            // BGR -> RGB変換
-                            image_buffer.push(data_slice[offset + 2]); // R
-                            image_buffer.push(data_slice[offset + 1]); // G
-                            image_buffer.push(data_slice[offset]); // B
-                        }
-                    }
-                    image_buffer
-                }
-            };
-
+        if let Some(image_data) = image_data {
             // フレームデータを書き込み
             writer
                 .write_image_data(&image_data)
