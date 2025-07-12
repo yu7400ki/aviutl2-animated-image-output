@@ -9,6 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 aviutl = { path = "../aviutl" }
+dialog = { path = "../dialog" }
 gif = { version = "0.13" }
 windows = { workspace = true, features = [
     "Win32_Foundation",

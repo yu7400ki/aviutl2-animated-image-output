@@ -1,3 +1,6 @@
+mod config;
+mod dialog;
+
 use aviutl::{
     output2::{OutputInfo, OutputPluginTable, video_format},
     utils::{to_wide_string, wide_to_string},
@@ -5,8 +8,13 @@ use aviutl::{
 use gif::{Encoder, Frame, Repeat};
 use std::ffi::c_void;
 use std::fs::File;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 use windows::{Win32::Foundation::*, Win32::UI::WindowsAndMessaging::*, core::*};
+
+use config::Config;
+use dialog::show_config_dialog;
+
+static CONFIG: Mutex<Config> = Mutex::new(Config::default());
 
 fn create_gif_from_video(info: &OutputInfo) -> std::result::Result<(), String> {
     let output_path = wide_to_string(info.savefile);
@@ -15,8 +23,19 @@ fn create_gif_from_video(info: &OutputInfo) -> std::result::Result<(), String> {
         File::create(&output_path).map_err(|e| format!("ファイル作成エラー: {}", e))?;
     let mut encoder = Encoder::new(output_file, info.w as u16, info.h as u16, &[])
         .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
+    // リピート設定
+    let repeat_setting = match CONFIG.lock() {
+        Ok(guard) => {
+            if guard.repeat == 0 {
+                Repeat::Infinite
+            } else {
+                Repeat::Finite(guard.repeat)
+            }
+        }
+        Err(_) => Repeat::Infinite, // デフォルト値を使用
+    };
     encoder
-        .set_repeat(Repeat::Infinite)
+        .set_repeat(repeat_setting)
         .map_err(|e| format!("リピート設定エラー: {}", e))?;
 
     for frame in 0..info.n {
@@ -26,7 +45,7 @@ fn create_gif_from_video(info: &OutputInfo) -> std::result::Result<(), String> {
 
         let frame_data = info.get_video(frame, video_format::BI_RGB);
         if let Some(data_ptr) = frame_data {
-            let rgb_data = unsafe {
+            let gif_frame = unsafe {
                 let stride = ((info.w * 3 + 3) / 4) * 4; // 4バイト境界にアライン
                 let data_slice =
                     std::slice::from_raw_parts(data_ptr as *const u8, (stride * info.h) as usize);
@@ -42,22 +61,51 @@ fn create_gif_from_video(info: &OutputInfo) -> std::result::Result<(), String> {
                         rgb_buffer.push(data_slice[offset]); // B
                     }
                 }
-                rgb_buffer
+
+                let mut frame = Frame::from_rgb(info.w as u16, info.h as u16, &rgb_buffer);
+                frame.dispose = gif::DisposalMethod::Background;
+                let delay = (100.0 * info.scale as f64 / info.rate as f64).round() as u16;
+                frame.delay = delay.max(1);
+                frame
             };
 
-            // フレームデータを書き込み
-            let mut frame = Frame::from_rgb(info.w as u16, info.h as u16, &rgb_data);
-            let delay = (100.0 * info.scale as f64 / info.rate as f64).round() as u16;
-            frame.delay = delay.max(1);
             encoder
-                .write_frame(&frame)
+                .write_frame(&gif_frame)
                 .map_err(|e| format!("フレーム書き込みエラー: {}", e))?;
         }
 
         info.rest_time_disp(frame, info.n);
     }
-
     Ok(())
+}
+
+extern "C" fn config_func(hwnd: HWND, _dll_hinst: HINSTANCE) -> bool {
+    let default_config = match CONFIG.lock() {
+        Ok(guard) => guard.clone(),
+        Err(_) => Config::default(),
+    };
+
+    if let Ok(result) = show_config_dialog(hwnd, default_config)
+        && let Ok(mut guard) = CONFIG.lock()
+    {
+        match result {
+            Some(config) => {
+                *guard = config;
+                true
+            }
+            None => false,
+        }
+    } else {
+        unsafe {
+            MessageBoxW(
+                Some(hwnd),
+                w!("設定の取得に失敗しました。"),
+                w!("エラー"),
+                MB_OK | MB_ICONERROR,
+            );
+        }
+        false
+    }
 }
 
 extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
@@ -102,7 +150,7 @@ fn init_plugin_table() -> OutputPluginTable {
         filefilter: FILE_FILTER.as_ptr(),
         information: PLUGIN_INFO.as_ptr(),
         func_output: Some(output_func),
-        func_config: None,
+        func_config: Some(config_func),
         func_get_config_text: None,
     }
 }

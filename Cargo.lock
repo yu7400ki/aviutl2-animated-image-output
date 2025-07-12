@@ -30,6 +30,7 @@ name = "aviutl2-gif-export"
 version = "0.0.0"
 dependencies = [
  "aviutl",
+ "dialog",
  "gif",
  "windows",
 ]
