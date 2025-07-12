@@ -20,6 +20,7 @@ name = "aviutl2-apng-export"
 version = "0.0.0"
 dependencies = [
  "aviutl",
+ "dialog",
  "png",
  "windows",
 ]

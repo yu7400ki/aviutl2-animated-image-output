@@ -1,11 +1,19 @@
+mod config;
+mod dialog;
+
 use aviutl::{
     output2::{OutputInfo, OutputPluginTable, video_format},
     utils::{to_wide_string, wide_to_string},
 };
 use png::{BitDepth, ColorType, Encoder};
 use std::ffi::c_void;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 use windows::{Win32::Foundation::*, Win32::UI::WindowsAndMessaging::*, core::*};
+
+use config::Config;
+use dialog::show_config_dialog;
+
+static CONFIG: Mutex<Config> = Mutex::new(Config::default());
 
 fn create_apng_from_video(info: &OutputInfo) -> std::result::Result<(), String> {
     let output_path = wide_to_string(info.savefile);
@@ -17,8 +25,12 @@ fn create_apng_from_video(info: &OutputInfo) -> std::result::Result<(), String> 
     encoder.set_depth(BitDepth::Eight);
 
     // APNG設定
+    let repeat_count = match CONFIG.lock() {
+        Ok(guard) => guard.repeat,
+        Err(_) => 0, // デフォルト値を使用
+    };
     encoder
-        .set_animated(info.n as u32, 0)
+        .set_animated(info.n as u32, repeat_count)
         .map_err(|e| format!("APNG設定エラー: {}", e))?;
 
     encoder
@@ -95,6 +107,35 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
     }
 }
 
+extern "C" fn config_func(hwnd: HWND, _dll_hinst: HINSTANCE) -> bool {
+    let default_config = match CONFIG.lock() {
+        Ok(guard) => guard.clone(),
+        Err(_) => Config::default(),
+    };
+
+    if let Ok(result) = show_config_dialog(hwnd, default_config)
+        && let Ok(mut guard) = CONFIG.lock()
+    {
+        match result {
+            Some(config) => {
+                *guard = config;
+                true
+            }
+            None => false,
+        }
+    } else {
+        unsafe {
+            MessageBoxW(
+                Some(hwnd),
+                w!("設定の取得に失敗しました。"),
+                w!("エラー"),
+                MB_OK | MB_ICONERROR,
+            );
+        }
+        false
+    }
+}
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 static PLUGIN_NAME: LazyLock<Vec<u16>> = LazyLock::new(|| to_wide_string("APNG出力プラグイン"));
 static FILE_FILTER: LazyLock<Vec<u16>> =
@@ -111,7 +152,7 @@ fn init_plugin_table() -> OutputPluginTable {
         filefilter: FILE_FILTER.as_ptr(),
         information: PLUGIN_INFO.as_ptr(),
         func_output: Some(output_func),
-        func_config: None,
+        func_config: Some(config_func),
         func_get_config_text: None,
     }
 }
