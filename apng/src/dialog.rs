@@ -23,16 +23,16 @@ pub fn show_config_dialog(
     let result = Arc::new(Mutex::new(None::<Config>));
     let mut dialog = Dialog::new("APNG出力設定", (300, 210));
 
-    // リピート回数ラベル
+    // ループ回数ラベル
     let repeat_label = Label::new(
         REPEAT_LABEL_ID,
         (20, 15),
         (245, 20),
-        "リピート回数 (0=無限ループ)",
+        "ループ回数 (0=無限ループ)",
     );
     dialog.add_control(Box::new(repeat_label));
 
-    // リピート回数数値入力
+    // ループ回数数値入力
     let number_input = Number::new(
         REPEAT_TEXTBOX_ID,
         (20, 35),

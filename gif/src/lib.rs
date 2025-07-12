@@ -39,7 +39,7 @@ fn create_gif_from_video(info: &OutputInfo) -> std::result::Result<(), String> {
     };
     encoder
         .set_repeat(repeat_setting)
-        .map_err(|e| format!("リピート設定エラー: {}", e))?;
+        .map_err(|e| format!("ループ設定エラー: {}", e))?;
 
     for frame in 0..info.n {
         if info.is_abort() {
