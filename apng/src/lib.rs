@@ -4,12 +4,11 @@ mod dialog;
 use aviutl::{
     output2::{OutputInfo, OutputPluginTable},
     patch::{apply_rgba_patch, restore_rgba_patch},
-    utils::{to_wide_string, wide_to_string},
 };
 use png::{BitDepth, ColorType, Encoder};
 use std::ffi::c_void;
 use std::sync::{LazyLock, Mutex};
-use widestring::{Utf16Str, utf16str};
+use widestring::{U16CStr, Utf16Str, utf16str};
 use windows::{Win32::Foundation::*, Win32::UI::WindowsAndMessaging::*, core::*};
 
 use config::{ColorFormat, Config};
@@ -18,7 +17,7 @@ use dialog::show_config_dialog;
 static CONFIG: Mutex<Config> = Mutex::new(Config::default());
 
 fn create_apng_from_video(info: &OutputInfo) -> std::result::Result<(), String> {
-    let output_path = wide_to_string(info.savefile);
+    let output_path = unsafe { U16CStr::from_ptr_str(info.savefile).to_string_lossy() };
 
     let output_file =
         std::fs::File::create(&output_path).map_err(|e| format!("ファイル作成エラー: {}", e))?;
@@ -98,13 +97,13 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
                 Ok(protect) => Some(protect),
                 Err(e) => {
                     let error_msg = format!("メモリパッチ適用エラー: {}", e);
-                    let error_wide = to_wide_string(&error_msg);
-                    let title_wide = to_wide_string("エラー");
+                    let error_wide =
+                        widestring::U16CString::from_str(&error_msg).unwrap_or_default();
 
                     MessageBoxW(
                         Some(HWND::default()),
                         PCWSTR(error_wide.as_ptr()),
-                        PCWSTR(title_wide.as_ptr()),
+                        w!("エラー"),
                         MB_OK | MB_ICONERROR,
                     );
                     return false;
@@ -118,13 +117,12 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
             Ok(_) => true,
             Err(e) => {
                 let error_msg = format!("APNG出力エラー: {}", e);
-                let error_wide = to_wide_string(&error_msg);
-                let title_wide = to_wide_string("エラー");
+                let error_wide = widestring::U16CString::from_str(&error_msg).unwrap_or_default();
 
                 MessageBoxW(
                     Some(HWND::default()),
                     PCWSTR(error_wide.as_ptr()),
-                    PCWSTR(title_wide.as_ptr()),
+                    w!("エラー"),
                     MB_OK | MB_ICONERROR,
                 );
                 false

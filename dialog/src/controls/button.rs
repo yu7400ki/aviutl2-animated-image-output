@@ -2,6 +2,7 @@ use crate::{Control, ControlId, Result};
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::rc::Rc;
+use widestring::U16CString;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::HFONT;
 use windows::Win32::System::LibraryLoader::*;
@@ -61,12 +62,12 @@ impl Control for Button {
             let hinstance = GetModuleHandleW(None)?;
 
             let mut inner = self.inner.borrow_mut();
-            let wide_text: Vec<u16> = inner.label.encode_utf16().chain([0]).collect();
+            let wide_text = U16CString::from_str(&inner.label).unwrap_or_default();
 
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 w!("BUTTON"),
-                PCWSTR::from_raw(wide_text.as_ptr()),
+                PCWSTR(wide_text.as_ptr()),
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_DEFPUSHBUTTON as u32),
                 inner.position.0,
                 inner.position.1,

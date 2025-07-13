@@ -2,6 +2,7 @@ use crate::{Control, ControlId, Result};
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::rc::Rc;
+use widestring::U16CString;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::HFONT;
 use windows::Win32::System::LibraryLoader::*;
@@ -68,10 +69,7 @@ impl TextBox {
     pub fn set_text(&self, text: &str) {
         let inner = self.inner.borrow();
         if let Some(hwnd) = inner.hwnd {
-            let wide_text = text
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect::<Vec<u16>>();
+            let wide_text = U16CString::from_str(text).unwrap_or_default();
             unsafe {
                 SetWindowTextW(hwnd, PCWSTR(wide_text.as_ptr())).ok();
             }
@@ -101,11 +99,7 @@ impl Control for TextBox {
                 None,
             )?;
 
-            let initial_wide = inner
-                .text
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect::<Vec<u16>>();
+            let initial_wide = U16CString::from_str(&inner.text).unwrap_or_default();
             SetWindowTextW(hwnd, PCWSTR(initial_wide.as_ptr())).ok();
 
             inner.hwnd = Some(hwnd);

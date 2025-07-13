@@ -2,6 +2,7 @@ use crate::{Control, ControlId, Result};
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::rc::Rc;
+use widestring::U16CString;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::HFONT;
 use windows::Win32::System::LibraryLoader::*;
@@ -110,7 +111,7 @@ impl Control for ComboBox {
 
             // Add items to combobox
             for item in &inner.items {
-                let wide_text: Vec<u16> = item.encode_utf16().chain([0]).collect();
+                let wide_text = U16CString::from_str(item).unwrap_or_default();
                 SendMessageW(
                     hwnd,
                     CB_ADDSTRING,

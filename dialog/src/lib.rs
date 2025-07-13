@@ -4,6 +4,7 @@ use std::ffi::c_void;
 use std::mem;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicI32, Ordering};
+use widestring::U16CString;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::*;
@@ -143,9 +144,9 @@ impl Dialog {
 
             RegisterClassExW(&wc);
 
-            let title_wide: Vec<u16> = {
+            let title_wide = {
                 let inner = self.inner.borrow();
-                inner.title.encode_utf16().chain([0]).collect()
+                U16CString::from_str(&inner.title).unwrap_or_default()
             };
             let size = {
                 let inner = self.inner.borrow();
@@ -155,7 +156,7 @@ impl Dialog {
             let dialog_hwnd = CreateWindowExW(
                 WS_EX_DLGMODALFRAME,
                 dialog_class,
-                PCWSTR::from_raw(title_wide.as_ptr()),
+                PCWSTR(title_wide.as_ptr()),
                 WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
                 0,
                 0,

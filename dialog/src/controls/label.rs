@@ -2,6 +2,7 @@ use crate::{Control, ControlId, Result};
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::rc::Rc;
+use widestring::U16CString;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::HFONT;
 use windows::Win32::System::LibraryLoader::*;
@@ -48,9 +49,9 @@ impl Label {
         let mut inner = self.inner.borrow_mut();
         inner.label = text.to_string();
         if let Some(hwnd) = inner.hwnd {
-            let wide_text: Vec<u16> = text.encode_utf16().chain([0]).collect();
+            let wide_text = U16CString::from_str(text).unwrap_or_default();
             unsafe {
-                let _ = SetWindowTextW(hwnd, PCWSTR::from_raw(wide_text.as_ptr()));
+                let _ = SetWindowTextW(hwnd, PCWSTR(wide_text.as_ptr()));
             }
         }
     }
@@ -62,12 +63,12 @@ impl Control for Label {
             let hinstance = GetModuleHandleW(None)?;
 
             let mut inner = self.inner.borrow_mut();
-            let wide_text: Vec<u16> = inner.label.encode_utf16().chain([0]).collect();
+            let wide_text = U16CString::from_str(&inner.label).unwrap_or_default();
 
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 w!("STATIC"),
-                PCWSTR::from_raw(wide_text.as_ptr()),
+                PCWSTR(wide_text.as_ptr()),
                 WS_CHILD | WS_VISIBLE,
                 inner.position.0,
                 inner.position.1,
