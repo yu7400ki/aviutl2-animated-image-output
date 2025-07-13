@@ -7,26 +7,18 @@ use aviutl::{
 };
 use png::{BitDepth, ColorType, Encoder};
 use std::ffi::c_void;
-use std::sync::Mutex;
 use widestring::{U16CStr, Utf16Str, utf16str};
 use windows::{Win32::Foundation::*, Win32::UI::WindowsAndMessaging::*, core::*};
 
 use config::{ColorFormat, Config};
 use dialog::show_config_dialog;
 
-static CONFIG: Mutex<Config> = Mutex::new(Config::default());
-
-fn create_apng_from_video(info: &OutputInfo) -> std::result::Result<(), String> {
+fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
     let output_path = unsafe { U16CStr::from_ptr_str(info.savefile).to_string_lossy() };
 
     let output_file =
         std::fs::File::create(&output_path).map_err(|e| format!("ファイル作成エラー: {}", e))?;
     let mut encoder = Encoder::new(output_file, info.w as u32, info.h as u32);
-
-    let config = match CONFIG.lock() {
-        Ok(guard) => guard.clone(),
-        Err(_) => Config::default(),
-    };
 
     let (color_type, channels) = match config.color_format {
         ColorFormat::Rgb24 => (ColorType::Rgb, 3),
@@ -87,11 +79,11 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
             None => return false,
         };
 
+        // 設定を読み込み
+        let config = Config::load();
+
         // RGBAモードの場合のみパッチを適用
-        let use_rgba = match CONFIG.lock() {
-            Ok(guard) => matches!(guard.color_format, ColorFormat::Rgba32),
-            Err(_) => false,
-        };
+        let use_rgba = matches!(config.color_format, ColorFormat::Rgba32);
 
         let old_protect = if use_rgba {
             match apply_rgba_patch(&info) {
@@ -114,7 +106,7 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
             None
         };
 
-        let result = match create_apng_from_video(info) {
+        let result = match create_apng_from_video(info, &config) {
             Ok(_) => true,
             Err(e) => {
                 let error_msg = format!("APNG出力エラー: {}", e);
@@ -140,17 +132,26 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
 }
 
 extern "C" fn config_func(hwnd: HWND, _dll_hinst: HINSTANCE) -> bool {
-    let default_config = match CONFIG.lock() {
-        Ok(guard) => guard.clone(),
-        Err(_) => Config::default(),
-    };
+    let default_config = Config::load();
 
-    if let Ok(result) = show_config_dialog(hwnd, default_config)
-        && let Ok(mut guard) = CONFIG.lock()
-    {
+    if let Ok(result) = show_config_dialog(hwnd, default_config) {
         match result {
             Some(config) => {
-                *guard = config;
+                // 設定を保存
+                if let Err(e) = config.save() {
+                    let error_msg = format!("設定保存エラー: {}", e);
+                    let error_wide =
+                        widestring::U16CString::from_str(&error_msg).unwrap_or_default();
+
+                    unsafe {
+                        MessageBoxW(
+                            Some(hwnd),
+                            PCWSTR(error_wide.as_ptr()),
+                            w!("警告"),
+                            MB_OK | MB_ICONWARNING,
+                        );
+                    }
+                }
                 true
             }
             None => false,

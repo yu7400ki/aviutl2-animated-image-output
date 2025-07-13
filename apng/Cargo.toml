@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 aviutl = { path = "../aviutl" }
 dialog = { path = "../dialog" }
 png = { version = "0.17" }
+rust-ini = { workspace = true }
 widestring = { workspace = true }
 windows = { workspace = true, features = [
     "Win32_Foundation",
