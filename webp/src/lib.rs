@@ -8,7 +8,7 @@ use aviutl::{
     patch::{apply_rgba_patch, restore_rgba_patch},
 };
 use std::ffi::c_void;
-use std::sync::{LazyLock, Mutex};
+use std::sync::Mutex;
 use widestring::{U16CStr, Utf16Str, utf16str};
 use windows::{Win32::Foundation::*, Win32::UI::WindowsAndMessaging::*, core::*};
 
@@ -177,9 +177,7 @@ static PLUGIN_INFO: &Utf16Str = utf16str!(concat!(
     " by yu7400ki\0"
 ));
 
-static OUTPUT_PLUGIN_TABLE: LazyLock<OutputPluginTable> = LazyLock::new(init_plugin_table);
-
-fn init_plugin_table() -> OutputPluginTable {
+const fn init_plugin_table() -> OutputPluginTable {
     OutputPluginTable {
         flag: OutputPluginTable::FLAG_VIDEO,
         name: PLUGIN_NAME.as_ptr(),
@@ -191,6 +189,8 @@ fn init_plugin_table() -> OutputPluginTable {
     }
 }
 
+static OUTPUT_PLUGIN_TABLE: OutputPluginTable = init_plugin_table();
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn DllMain(_hinst: HINSTANCE, _reason: u32, _reserved: *mut c_void) -> BOOL {
     TRUE
@@ -198,5 +198,5 @@ pub unsafe extern "C" fn DllMain(_hinst: HINSTANCE, _reason: u32, _reserved: *mu
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GetOutputPluginTable() -> *mut OutputPluginTable {
-    &*OUTPUT_PLUGIN_TABLE as *const OutputPluginTable as *mut OutputPluginTable
+    &OUTPUT_PLUGIN_TABLE as *const OutputPluginTable as *mut OutputPluginTable
 }
