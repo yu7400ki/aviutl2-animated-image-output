@@ -1,0 +1,18 @@
+[package]
+name = "aviutl2-webp-export"
+version = "0.0.0"
+edition = "2024"
+
+[lib]
+name = "webp_export_plugin"
+crate-type = ["cdylib"]
+
+[dependencies]
+aviutl = { path = "../aviutl" }
+dialog = { path = "../dialog" }
+libwebp-sys = { version = "0.12" }
+widestring = { workspace = true }
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
