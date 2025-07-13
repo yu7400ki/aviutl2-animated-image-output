@@ -1,4 +1,4 @@
-use crate::{Control, Result};
+use crate::{Control, ControlId, Result};
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::rc::Rc;
@@ -10,7 +10,7 @@ use windows::core::*;
 
 struct LabelInner {
     hwnd: Option<HWND>,
-    id: i32,
+    id: ControlId,
     position: (i32, i32),
     size: (i32, i32),
     label: String,
@@ -22,16 +22,26 @@ pub struct Label {
 }
 
 impl Label {
-    pub fn new(id: i32, position: (i32, i32), size: (i32, i32), label: &str) -> Self {
+    pub fn new(text: &str) -> Self {
         Self {
             inner: Rc::new(RefCell::new(LabelInner {
                 hwnd: None,
-                id,
-                position,
-                size,
-                label: label.to_string(),
+                id: ControlId::new(),
+                position: (0, 0),
+                size: (100, 20),
+                label: text.to_string(),
             })),
         }
+    }
+
+    pub fn position(self, x: i32, y: i32) -> Self {
+        self.inner.borrow_mut().position = (x, y);
+        self
+    }
+
+    pub fn size(self, width: i32, height: i32) -> Self {
+        self.inner.borrow_mut().size = (width, height);
+        self
     }
 
     pub fn set_label(&self, text: &str) {
@@ -64,7 +74,7 @@ impl Control for Label {
                 inner.size.0,
                 inner.size.1,
                 Some(parent),
-                Some(HMENU(inner.id as *mut c_void)),
+                Some(HMENU(inner.id.as_raw() as *mut c_void)),
                 Some(HINSTANCE(hinstance.0)),
                 None,
             )?;
@@ -78,7 +88,7 @@ impl Control for Label {
         None
     }
 
-    fn get_id(&self) -> i32 {
+    fn get_id(&self) -> ControlId {
         self.inner.borrow().id
     }
 

@@ -1,4 +1,4 @@
-use crate::{Control, Result};
+use crate::{Control, ControlId, Result};
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::rc::Rc;
@@ -10,7 +10,7 @@ use windows::core::*;
 
 struct TextBoxInner {
     hwnd: Option<HWND>,
-    id: i32,
+    id: ControlId,
     position: (i32, i32),
     size: (i32, i32),
     text: String,
@@ -22,16 +22,31 @@ pub struct TextBox {
 }
 
 impl TextBox {
-    pub fn new(id: i32, position: (i32, i32), size: (i32, i32), text: &str) -> Self {
+    pub fn new() -> Self {
         Self {
             inner: Rc::new(RefCell::new(TextBoxInner {
                 hwnd: None,
-                id,
-                position,
-                size,
-                text: text.to_string(),
+                id: ControlId::new(),
+                position: (0, 0),
+                size: (150, 25),
+                text: String::new(),
             })),
         }
+    }
+
+    pub fn position(self, x: i32, y: i32) -> Self {
+        self.inner.borrow_mut().position = (x, y);
+        self
+    }
+
+    pub fn size(self, width: i32, height: i32) -> Self {
+        self.inner.borrow_mut().size = (width, height);
+        self
+    }
+
+    pub fn text(self, txt: &str) -> Self {
+        self.inner.borrow_mut().text = txt.to_string();
+        self
     }
 
     pub fn get_text(&self) -> String {
@@ -81,7 +96,7 @@ impl Control for TextBox {
                 inner.size.0,
                 inner.size.1,
                 Some(parent),
-                Some(HMENU(inner.id as *mut c_void)),
+                Some(HMENU(inner.id.as_raw() as *mut c_void)),
                 Some(HINSTANCE(hinstance.0)),
                 None,
             )?;
@@ -103,7 +118,7 @@ impl Control for TextBox {
         None
     }
 
-    fn get_id(&self) -> i32 {
+    fn get_id(&self) -> ControlId {
         self.inner.borrow().id
     }
 

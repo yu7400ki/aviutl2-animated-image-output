@@ -1,4 +1,4 @@
-use crate::{Control, Result};
+use crate::{Control, ControlId, Result};
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::rc::Rc;
@@ -10,7 +10,7 @@ use windows::core::*;
 
 struct ComboBoxInner {
     hwnd: Option<HWND>,
-    id: i32,
+    id: ControlId,
     position: (i32, i32),
     size: (i32, i32),
     items: Vec<String>,
@@ -23,17 +23,32 @@ pub struct ComboBox {
 }
 
 impl ComboBox {
-    pub fn new(id: i32, position: (i32, i32), size: (i32, i32), items: Vec<&str>) -> Self {
+    pub fn new(items: Vec<&str>) -> Self {
         Self {
             inner: Rc::new(RefCell::new(ComboBoxInner {
                 hwnd: None,
-                id,
-                position,
-                size,
+                id: ControlId::new(),
+                position: (0, 0),
+                size: (150, 100),
                 items: items.into_iter().map(|s| s.to_string()).collect(),
                 selected_index: 0,
             })),
         }
+    }
+
+    pub fn position(self, x: i32, y: i32) -> Self {
+        self.inner.borrow_mut().position = (x, y);
+        self
+    }
+
+    pub fn size(self, width: i32, height: i32) -> Self {
+        self.inner.borrow_mut().size = (width, height);
+        self
+    }
+
+    pub fn selected(self, index: i32) -> Self {
+        self.inner.borrow_mut().selected_index = index;
+        self
     }
 
     pub fn get_selected_index(&self) -> i32 {
@@ -88,7 +103,7 @@ impl Control for ComboBox {
                 inner.size.0,
                 inner.size.1,
                 Some(parent),
-                Some(HMENU(inner.id as *mut c_void)),
+                Some(HMENU(inner.id.as_raw() as *mut c_void)),
                 Some(HINSTANCE(hinstance.0)),
                 None,
             )?;
@@ -132,7 +147,7 @@ impl Control for ComboBox {
         None
     }
 
-    fn get_id(&self) -> i32 {
+    fn get_id(&self) -> ControlId {
         self.inner.borrow().id
     }
 

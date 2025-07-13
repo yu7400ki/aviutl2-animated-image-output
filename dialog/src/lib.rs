@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::mem;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicI32, Ordering};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::*;
@@ -11,6 +12,24 @@ use windows::core::*;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ControlId(i32);
+
+impl ControlId {
+    pub fn new() -> Self {
+        static COUNTER: AtomicI32 = AtomicI32::new(1000);
+        Self(COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub fn from_raw(id: i32) -> Self {
+        Self(id)
+    }
+
+    pub fn as_raw(&self) -> i32 {
+        self.0
+    }
+}
+
 fn loword(dword: u32) -> u16 {
     (dword & 0xFFFF) as u16
 }
@@ -18,7 +37,7 @@ fn loword(dword: u32) -> u16 {
 pub trait Control {
     fn create(&mut self, parent: HWND) -> Result<HWND>;
     fn handle_message(&mut self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT>;
-    fn get_id(&self) -> i32;
+    fn get_id(&self) -> ControlId;
     fn get_hwnd(&self) -> Option<HWND>;
     fn set_font(&self, font: HFONT);
 }
@@ -27,7 +46,7 @@ struct DialogInner {
     hwnd: Option<HWND>,
     title: String,
     size: (i32, i32),
-    controls: HashMap<i32, Box<dyn Control>>,
+    controls: HashMap<ControlId, Box<dyn Control>>,
     font: Option<HFONT>,
 }
 
@@ -49,9 +68,14 @@ impl Dialog {
         }
     }
 
-    pub fn add_control(&mut self, control: Box<dyn Control>) {
+    fn add_control(&mut self, control: Box<dyn Control>) {
         let id = control.get_id();
         self.inner.borrow_mut().controls.insert(id, control);
+    }
+
+    pub fn with_control<C: Control + 'static>(mut self, control: C) -> Self {
+        self.add_control(Box::new(control));
+        self
     }
 
     pub fn close(&self) {
@@ -96,7 +120,7 @@ impl Dialog {
         }
     }
 
-    pub fn show_modal(&mut self, parent: HWND) -> Result<()> {
+    pub fn open(&mut self, parent: HWND) -> Result<()> {
         unsafe {
             let hinstance = GetModuleHandleW(None)?;
 
@@ -219,6 +243,19 @@ impl Dialog {
     }
 }
 
+impl Dialog {
+    /// Create dialog with fluent interface
+    pub fn create(title: &str) -> Self {
+        Self::new(title, (400, 300))
+    }
+
+    /// Set dialog size
+    pub fn size(self, width: i32, height: i32) -> Self {
+        self.inner.borrow_mut().size = (width, height);
+        self
+    }
+}
+
 unsafe extern "system" fn dialog_window_proc(
     hwnd: HWND,
     msg: u32,
@@ -233,7 +270,7 @@ unsafe extern "system" fn dialog_window_proc(
 
             match msg {
                 WM_COMMAND => {
-                    let control_id = loword(wparam.0 as u32) as i32;
+                    let control_id = ControlId::from_raw(loword(wparam.0 as u32) as i32);
                     if let Some(control) = dialog_inner.controls.get_mut(&control_id) {
                         if let Some(result) = control.handle_message(msg, wparam, lparam) {
                             return result;

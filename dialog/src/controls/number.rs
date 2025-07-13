@@ -1,4 +1,4 @@
-use crate::{Control, Result};
+use crate::{Control, ControlId, Result};
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::rc::Rc;
@@ -10,7 +10,7 @@ use windows::core::*;
 
 struct NumberInner {
     hwnd: Option<HWND>,
-    id: i32,
+    id: ControlId,
     position: (i32, i32),
     size: (i32, i32),
     value: i32,
@@ -23,23 +23,37 @@ pub struct Number {
 }
 
 impl Number {
-    pub fn new(
-        id: i32,
-        position: (i32, i32),
-        size: (i32, i32),
-        value: i32,
-        range: Option<(i32, i32)>,
-    ) -> Self {
+    pub fn new() -> Self {
         Self {
             inner: Rc::new(RefCell::new(NumberInner {
                 hwnd: None,
-                id,
-                position,
-                size,
-                value,
-                range,
+                id: ControlId::new(),
+                position: (0, 0),
+                size: (100, 25),
+                value: 0,
+                range: None,
             })),
         }
+    }
+
+    pub fn position(self, x: i32, y: i32) -> Self {
+        self.inner.borrow_mut().position = (x, y);
+        self
+    }
+
+    pub fn size(self, width: i32, height: i32) -> Self {
+        self.inner.borrow_mut().size = (width, height);
+        self
+    }
+
+    pub fn value(self, val: i32) -> Self {
+        self.inner.borrow_mut().value = val;
+        self
+    }
+
+    pub fn range(self, min: i32, max: i32) -> Self {
+        self.inner.borrow_mut().range = Some((min, max));
+        self
     }
 
     pub fn get_text(&self) -> String {
@@ -97,7 +111,7 @@ impl Control for Number {
                 inner.size.0,
                 inner.size.1,
                 Some(parent),
-                Some(HMENU(inner.id as *mut c_void)),
+                Some(HMENU(inner.id.as_raw() as *mut c_void)),
                 Some(HINSTANCE(hinstance.0)),
                 None,
             )?;
@@ -116,7 +130,7 @@ impl Control for Number {
                 0,
                 inner.size.1,
                 Some(parent),
-                Some(HMENU((inner.id + 1000) as *mut c_void)),
+                Some(HMENU((inner.id.as_raw() + 1000) as *mut c_void)),
                 Some(HINSTANCE(hinstance.0)),
                 None,
             )?;
@@ -137,13 +151,6 @@ impl Control for Number {
                 Some(LPARAM(0)),
             );
 
-            // // 0~100
-            // SendMessageW(
-            //     hwnd_updown,
-            //     UDM_SETRANGE32,
-            //     Some(WPARAM(0)),
-            //     Some(LPARAM(100)),
-            // );
             if let Some((min, max)) = inner.range {
                 SendMessageW(
                     hwnd_updown,
@@ -163,7 +170,7 @@ impl Control for Number {
         None
     }
 
-    fn get_id(&self) -> i32 {
+    fn get_id(&self) -> ControlId {
         self.inner.borrow().id
     }
 
