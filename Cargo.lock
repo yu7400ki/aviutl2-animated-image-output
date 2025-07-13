@@ -9,14 +9,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "aviutl"
-version = "0.0.0"
-dependencies = [
- "windows",
-]
-
-[[package]]
-name = "aviutl2-apng-export"
+name = "apng_export"
 version = "0.0.0"
 dependencies = [
  "aviutl",
@@ -27,24 +20,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "aviutl2-gif-export"
+name = "aviutl"
 version = "0.0.0"
 dependencies = [
- "aviutl",
- "dialog",
- "gif",
- "widestring",
- "windows",
-]
-
-[[package]]
-name = "aviutl2-webp-export"
-version = "0.0.0"
-dependencies = [
- "aviutl",
- "dialog",
- "libwebp-sys",
- "widestring",
  "windows",
 ]
 
@@ -139,6 +117,17 @@ checksum = "4ae047235e33e2829703574b54fdec96bfbad892062d97fed2f76022287de61b"
 dependencies = [
  "color_quant",
  "weezl",
+]
+
+[[package]]
+name = "gif_export"
+version = "0.0.0"
+dependencies = [
+ "aviutl",
+ "dialog",
+ "gif",
+ "widestring",
+ "windows",
 ]
 
 [[package]]
@@ -263,6 +252,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9683f9a5a998d873c0d21fcbe3c083009670149a8fab228644b8bd36b2c48cb3"
 dependencies = [
  "wit-bindgen-rt",
+]
+
+[[package]]
+name = "webp_export"
+version = "0.0.0"
+dependencies = [
+ "aviutl",
+ "dialog",
+ "libwebp-sys",
+ "widestring",
+ "windows",
 ]
 
 [[package]]

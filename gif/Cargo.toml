@@ -1,10 +1,10 @@
 [package]
-name = "aviutl2-gif-export"
+name = "gif_export"
 version = "0.0.0"
 edition = "2024"
 
 [lib]
-name = "gif_export_plugin"
+name = "gif_export"
 crate-type = ["cdylib"]
 
 [dependencies]

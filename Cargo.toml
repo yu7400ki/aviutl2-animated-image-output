@@ -1,6 +1,6 @@
 [workspace]
 members = ["aviutl", "dialog", "apng", "gif", "webp"]
-default-members = ["apng", "gif"]
+default-members = ["apng", "gif", "webp"]
 resolver = "3"
 
 [workspace.dependencies]
