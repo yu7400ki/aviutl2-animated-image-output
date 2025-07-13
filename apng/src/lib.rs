@@ -169,7 +169,7 @@ extern "C" fn config_func(hwnd: HWND, _dll_hinst: HINSTANCE) -> bool {
 }
 
 static PLUGIN_NAME: &Utf16Str = utf16str!("APNG出力プラグイン\0");
-static FILE_FILTER: &Utf16Str = utf16str!("PNG Files (*.png)\0*.png\0All Files (*)\0*\0");
+static FILE_FILTER: &Utf16Str = utf16str!("PNG Files (*.png)\0*.png\0All Files (*)\0*\0\0");
 static PLUGIN_INFO: &Utf16Str = utf16str!(concat!(
     "APNG出力プラグイン v",
     env!("CARGO_PKG_VERSION"),
