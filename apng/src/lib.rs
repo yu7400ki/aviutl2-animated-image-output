@@ -22,24 +22,25 @@ fn create_apng_from_video(info: &OutputInfo) -> std::result::Result<(), String> 
     let output_file =
         std::fs::File::create(&output_path).map_err(|e| format!("ファイル作成エラー: {}", e))?;
     let mut encoder = Encoder::new(output_file, info.w as u32, info.h as u32);
-    // カラーフォーマット設定
-    let (color_type, channels) = match CONFIG.lock() {
-        Ok(guard) => match guard.color_format {
-            ColorFormat::Rgb24 => (ColorType::Rgb, 3),
-            ColorFormat::Rgba32 => (ColorType::Rgba, 4),
-        },
-        Err(_) => (ColorType::Rgb, 3), // デフォルト値を使用
+
+    let config = match CONFIG.lock() {
+        Ok(guard) => guard.clone(),
+        Err(_) => Config::default(),
     };
+
+    let (color_type, channels) = match config.color_format {
+        ColorFormat::Rgb24 => (ColorType::Rgb, 3),
+        ColorFormat::Rgba32 => (ColorType::Rgba, 4),
+    };
+
     encoder.set_color(color_type);
     encoder.set_depth(BitDepth::Eight);
+    encoder.set_compression(config.compression_type.into());
+    encoder.set_filter(config.filter_type.into());
 
     // APNG設定
-    let repeat_count = match CONFIG.lock() {
-        Ok(guard) => guard.repeat,
-        Err(_) => 0, // デフォルト値を使用
-    };
     encoder
-        .set_animated(info.n as u32, repeat_count)
+        .set_animated(info.n as u32, config.repeat)
         .map_err(|e| format!("APNG設定エラー: {}", e))?;
 
     encoder
