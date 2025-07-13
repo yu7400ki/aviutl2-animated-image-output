@@ -10,6 +10,24 @@ impl Default for ColorFormat {
     }
 }
 
+impl Into<png::ColorType> for ColorFormat {
+    fn into(self) -> png::ColorType {
+        match self {
+            ColorFormat::Rgb24 => png::ColorType::Rgb,
+            ColorFormat::Rgba32 => png::ColorType::Rgba,
+        }
+    }
+}
+
+impl Into<&'static str> for ColorFormat {
+    fn into(self) -> &'static str {
+        match self {
+            ColorFormat::Rgb24 => "RGB 24bit",
+            ColorFormat::Rgba32 => "RGBA 32bit",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompressionType {
     Default,
@@ -96,7 +114,7 @@ impl Config {
             repeat: 0,
             color_format: ColorFormat::Rgb24,
             compression_type: CompressionType::Default,
-            filter_type: FilterType::None,
+            filter_type: FilterType::Sub,
         }
     }
 }

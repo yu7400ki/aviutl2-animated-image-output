@@ -31,7 +31,7 @@ pub fn show_config_dialog(
     let color_label = Label::new("カラーフォーマット")
         .position(20, 70)
         .size(245, 20);
-    let color_options = vec!["RGB 24bit", "RGBA 32bit"];
+    let color_options = vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()];
     let color_combobox = ComboBox::new(color_options)
         .position(20, 90)
         .size(245, 20)
