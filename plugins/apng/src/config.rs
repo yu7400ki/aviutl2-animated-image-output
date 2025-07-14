@@ -1,19 +1,11 @@
 use ini::Ini;
 use std::path::PathBuf;
 use std::str::FromStr;
-
-fn get_config_file_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let path = PathBuf::from(std::env::var("ProgramData")?)
-        .join("aviutl2")
-        .join("Plugin");
-
-    if !path.is_dir() {}
-
-    match path.is_dir() {
-        true => Ok(path.join(concat!(env!("CARGO_PKG_NAME"), ".ini"))),
-        false => Err("Config directory does not exist".into()),
-    }
-}
+use windows::Win32::Foundation::{HMODULE, MAX_PATH};
+use windows::Win32::System::LibraryLoader::{
+    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GetModuleFileNameW, GetModuleHandleExW,
+};
+use windows::core::PCWSTR;
 
 #[derive(Copy, Clone, PartialEq)]
 pub enum ColorFormat {
@@ -197,6 +189,34 @@ pub struct Config {
 }
 
 impl Config {
+    fn config_file_path() -> Result<PathBuf, String> {
+        let (buffer, len) = unsafe {
+            let mut hmodule: HMODULE = HMODULE::default();
+            GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                PCWSTR(Self::config_file_path as *const () as *const u16),
+                &mut hmodule as *mut HMODULE,
+            )
+            .map_err(|e| format!("GetModuleHandleExW failed: {}", e))?;
+
+            let mut buffer = [0u16; MAX_PATH as usize];
+            let len = GetModuleFileNameW(Some(hmodule), &mut buffer);
+
+            (buffer, len)
+        };
+
+        if len > 0 {
+            let dll_path = String::from_utf16_lossy(&buffer[..len as usize]);
+            let dll_path = PathBuf::from(&dll_path);
+            let dll_dir = dll_path
+                .parent()
+                .ok_or("プラグインのディレクトリが取得できません")?;
+            Ok(dll_dir.join(concat!(env!("CARGO_PKG_NAME"), ".ini")))
+        } else {
+            Err("GetModuleFileNameW failed".to_string())
+        }
+    }
+
     pub const fn default() -> Self {
         Config {
             repeat: 0,
@@ -207,13 +227,12 @@ impl Config {
     }
 
     pub fn load() -> Self {
-        let config_path = get_config_file_path();
+        let config_path = match Self::config_file_path() {
+            Ok(path) => path,
+            Err(_) => return Self::default(),
+        };
 
-        if !config_path.is_ok() {
-            return Self::default();
-        }
-
-        if let Ok(ini) = Ini::load_from_file(&config_path.unwrap()) {
+        if let Ok(ini) = Ini::load_from_file(&config_path) {
             if let Some(section) = ini.section(Some("Config")) {
                 let repeat = section
                     .get("repeat")
@@ -249,7 +268,7 @@ impl Config {
         }
     }
 
-    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save(&self) -> Result<(), String> {
         let mut ini = Ini::new();
 
         ini.with_section(Some("Config"))
@@ -261,9 +280,8 @@ impl Config {
             )
             .set("filter_type", self.filter_type.to_index().to_string());
 
-        let config_path = get_config_file_path()?;
-        ini.write_to_file(&config_path)?;
-        Ok(())
+        let config_path = Self::config_file_path()?;
+        ini.write_to_file(&config_path).map_err(|e| e.to_string())
     }
 }
 
