@@ -1,0 +1,21 @@
+[package]
+name = "avif_export"
+version = "0.0.0"
+edition = "2024"
+
+[lib]
+name = "avif_export"
+crate-type = ["cdylib"]
+
+[dependencies]
+aviutl = { path = "../../libs/aviutl" }
+dialog = { path = "../../libs/dialog" }
+libavif = { version = "0.14.0", default-features = false, features = [
+    "codec-rav1e",
+], git = "https://github.com/njaard/libavif-rs.git", rev = "18304417e422120835c358cdd0721ee43e4c6d7c" }
+rust-ini = { workspace = true }
+widestring = { workspace = true }
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
