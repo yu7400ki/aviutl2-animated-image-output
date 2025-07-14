@@ -7,6 +7,9 @@ edition = "2024"
 name = "avif_export"
 crate-type = ["cdylib"]
 
+[features]
+rgba = []
+
 [dependencies]
 aviutl = { path = "../../libs/aviutl" }
 dialog = { path = "../../libs/dialog" }

@@ -29,13 +29,20 @@ pub fn show_config_dialog(
     let color_combo_label = Label::new("カラーフォーマット")
         .position(20, 70)
         .size(245, 20);
-    let color_options = vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()];
+    let color_options = vec![
+        ColorFormat::Rgb24.into(),
+        #[cfg(feature = "rgba")]
+        ColorFormat::Rgba32.into(),
+    ];
     let color_combobox = ComboBox::new(color_options)
         .position(20, 90)
         .size(245, 100)
         .selected(match default_config.color_format {
             ColorFormat::Rgb24 => 0,
+            #[cfg(feature = "rgba")]
             ColorFormat::Rgba32 => 1,
+            #[cfg(not(feature = "rgba"))]
+            ColorFormat::Rgba32 => 0,
         });
 
     let quality_label = Label::new("品質 (0-100)").position(20, 155).size(245, 20);
@@ -80,6 +87,7 @@ pub fn show_config_dialog(
             if let Ok(value) = number_input.get_value::<i32>() {
                 let color_format = match color_combobox.get_selected_index() {
                     0 => ColorFormat::Rgb24,
+                    #[cfg(feature = "rgba")]
                     1 => ColorFormat::Rgba32,
                     _ => ColorFormat::Rgb24,
                 };

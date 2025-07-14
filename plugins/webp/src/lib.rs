@@ -3,10 +3,9 @@ mod dialog;
 mod encoder;
 
 use crate::encoder::{AnimEncoder, AnimFrame, WebPConfig};
-use aviutl::{
-    output2::{OutputInfo, OutputPluginTable},
-    patch::{apply_rgba_patch, restore_rgba_patch},
-};
+use aviutl::output2::{OutputInfo, OutputPluginTable};
+#[cfg(feature = "rgba")]
+use aviutl::patch::{apply_rgba_patch, restore_rgba_patch};
 use std::ffi::c_void;
 use widestring::{U16CStr, Utf16Str, utf16str};
 use windows::{Win32::Foundation::*, Win32::UI::WindowsAndMessaging::*, core::*};
@@ -43,7 +42,10 @@ fn create_webp_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
 
         let image_data = match config.color_format {
             ColorFormat::Rgb24 => info.get_video_rgb(frame),
+            #[cfg(feature = "rgba")]
             ColorFormat::Rgba32 => info.get_video_rgba(frame),
+            #[cfg(not(feature = "rgba"))]
+            ColorFormat::Rgba32 => info.get_video_rgb(frame),
         };
 
         if let Some(pixel_data) = image_data {
@@ -51,8 +53,13 @@ fn create_webp_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
                 ColorFormat::Rgb24 => {
                     AnimFrame::from_rgb(&pixel_data, info.w as u32, info.h as u32, timestamp)
                 }
+                #[cfg(feature = "rgba")]
                 ColorFormat::Rgba32 => {
                     AnimFrame::from_rgba(&pixel_data, info.w as u32, info.h as u32, timestamp)
+                }
+                #[cfg(not(feature = "rgba"))]
+                ColorFormat::Rgba32 => {
+                    AnimFrame::from_rgb(&pixel_data, info.w as u32, info.h as u32, timestamp)
                 }
             };
 
@@ -82,9 +89,11 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
         let config = Config::load();
 
         // RGBAモードの場合のみパッチを適用
+        #[cfg(feature = "rgba")]
         let use_rgba = matches!(config.color_format, ColorFormat::Rgba32);
 
-        let old_protect = if use_rgba {
+        #[cfg(feature = "rgba")]
+        let old_protect: Option<u32> = if use_rgba {
             match apply_rgba_patch(&info) {
                 Ok(protect) => Some(protect),
                 Err(e) => {
@@ -122,6 +131,7 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
         };
 
         // パッチを復元
+        #[cfg(feature = "rgba")]
         if let Some(protect) = old_protect {
             restore_rgba_patch(&info, protect);
         }

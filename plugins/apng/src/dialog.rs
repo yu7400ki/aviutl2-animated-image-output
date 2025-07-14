@@ -31,13 +31,19 @@ pub fn show_config_dialog(
     let color_label = Label::new("カラーフォーマット")
         .position(20, 70)
         .size(245, 20);
+    #[cfg(feature = "rgba")]
     let color_options = vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()];
+    #[cfg(not(feature = "rgba"))]
+    let color_options = vec![ColorFormat::Rgb24.into()];
     let color_combobox = ComboBox::new(color_options)
         .position(20, 90)
         .size(245, 20)
         .selected(match default_config.color_format {
             ColorFormat::Rgb24 => 0,
+            #[cfg(feature = "rgba")]
             ColorFormat::Rgba32 => 1,
+            #[cfg(not(feature = "rgba"))]
+            ColorFormat::Rgba32 => 0,
         });
 
     // 圧縮設定
@@ -87,6 +93,7 @@ pub fn show_config_dialog(
             if let Ok(repeat) = repeat_input.get_value::<u32>() {
                 let color_format = match color_combobox.get_selected_index() {
                     0 => ColorFormat::Rgb24,
+                    #[cfg(feature = "rgba")]
                     1 => ColorFormat::Rgba32,
                     _ => Default::default(),
                 };

@@ -29,13 +29,20 @@ pub fn show_config_dialog(
     let color_combo_label = Label::new("カラーフォーマット")
         .position(20, 70)
         .size(245, 20);
-    let color_options = vec![ColorFormat::Palette.into(), ColorFormat::Transparent.into()];
+    let color_options = vec![
+        ColorFormat::Palette.into(),
+        #[cfg(feature = "rgba")]
+        ColorFormat::Transparent.into(),
+    ];
     let color_combobox = ComboBox::new(color_options)
         .position(20, 90)
         .size(245, 100)
         .selected(match default_config.color_format {
             ColorFormat::Palette => 0,
+            #[cfg(feature = "rgba")]
             ColorFormat::Transparent => 1,
+            #[cfg(not(feature = "rgba"))]
+            ColorFormat::Transparent => 0,
         });
 
     let ok_button = Button::new("OK").position(95, 130).size(80, 25).on_click({
@@ -47,6 +54,7 @@ pub fn show_config_dialog(
             if let Ok(value) = number_input.get_value::<u16>() {
                 let color_format = match color_combobox.get_selected_index() {
                     0 => ColorFormat::Palette,
+                    #[cfg(feature = "rgba")]
                     1 => ColorFormat::Transparent,
                     _ => ColorFormat::Palette,
                 };

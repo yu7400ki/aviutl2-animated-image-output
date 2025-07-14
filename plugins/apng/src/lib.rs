@@ -1,10 +1,9 @@
 mod config;
 mod dialog;
 
-use aviutl::{
-    output2::{OutputInfo, OutputPluginTable},
-    patch::{apply_rgba_patch, restore_rgba_patch},
-};
+use aviutl::output2::{OutputInfo, OutputPluginTable};
+#[cfg(feature = "rgba")]
+use aviutl::patch::{apply_rgba_patch, restore_rgba_patch};
 use png::{BitDepth, ColorType, Encoder};
 use std::ffi::c_void;
 use widestring::{U16CStr, Utf16Str, utf16str};
@@ -50,7 +49,14 @@ fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
         // カラーフォーマットに応じてフレームデータを取得
         let image_data = if channels == 4 {
             // RGBAモード: パッチを適用してRGBA32データを取得
-            info.get_video_rgba(frame)
+            #[cfg(feature = "rgba")]
+            {
+                info.get_video_rgba(frame)
+            }
+            #[cfg(not(feature = "rgba"))]
+            {
+                info.get_video_rgb(frame)
+            }
         } else {
             // RGBモード: 通常のRGB24データを取得
             info.get_video_rgb(frame)
@@ -83,9 +89,11 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
         let config = Config::load();
 
         // RGBAモードの場合のみパッチを適用
+        #[cfg(feature = "rgba")]
         let use_rgba = matches!(config.color_format, ColorFormat::Rgba32);
 
-        let old_protect = if use_rgba {
+        #[cfg(feature = "rgba")]
+        let old_protect: Option<u32> = if use_rgba {
             match apply_rgba_patch(&info) {
                 Ok(protect) => Some(protect),
                 Err(e) => {
@@ -123,6 +131,7 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
         };
 
         // パッチを復元
+        #[cfg(feature = "rgba")]
         if let Some(protect) = old_protect {
             restore_rgba_patch(&info, protect);
         }

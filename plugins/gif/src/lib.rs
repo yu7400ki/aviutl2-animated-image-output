@@ -1,10 +1,9 @@
 mod config;
 mod dialog;
 
-use aviutl::{
-    output2::{OutputInfo, OutputPluginTable},
-    patch::{apply_rgba_patch, restore_rgba_patch},
-};
+use aviutl::output2::{OutputInfo, OutputPluginTable};
+#[cfg(feature = "rgba")]
+use aviutl::patch::{apply_rgba_patch, restore_rgba_patch};
 use gif::{Encoder, Frame, Repeat};
 use std::ffi::c_void;
 use std::fs::File;
@@ -39,14 +38,23 @@ fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Res
 
         let image_data = match config.color_format {
             ColorFormat::Palette => info.get_video_rgb(frame),
+            #[cfg(feature = "rgba")]
             ColorFormat::Transparent => info.get_video_rgba(frame),
+            #[cfg(not(feature = "rgba"))]
+            ColorFormat::Transparent => info.get_video_rgb(frame),
         };
 
+        #[allow(unused_mut)]
         if let Some(mut image_data) = image_data {
             let mut gif_frame = match config.color_format {
                 ColorFormat::Palette => Frame::from_rgb(info.w as u16, info.h as u16, &image_data),
+                #[cfg(feature = "rgba")]
                 ColorFormat::Transparent => {
                     Frame::from_rgba(info.w as u16, info.h as u16, &mut image_data)
+                }
+                #[cfg(not(feature = "rgba"))]
+                ColorFormat::Transparent => {
+                    Frame::from_rgb(info.w as u16, info.h as u16, &image_data)
                 }
             };
 
@@ -112,9 +120,11 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
         let config = Config::load();
 
         // 透明度ありモードの場合のみパッチを適用
+        #[cfg(feature = "rgba")]
         let use_rgba = matches!(config.color_format, ColorFormat::Transparent);
 
-        let old_protect = if use_rgba {
+        #[cfg(feature = "rgba")]
+        let old_protect: Option<u32> = if use_rgba {
             match apply_rgba_patch(&info) {
                 Ok(protect) => Some(protect),
                 Err(e) => {
@@ -154,6 +164,7 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
         };
 
         // パッチを復元
+        #[cfg(feature = "rgba")]
         if let Some(protect) = old_protect {
             restore_rgba_patch(&info, protect);
         }
