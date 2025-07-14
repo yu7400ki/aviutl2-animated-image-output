@@ -8,16 +8,13 @@ use aviutl::{
 use gif::{Encoder, Frame, Repeat};
 use std::ffi::c_void;
 use std::fs::File;
-use std::sync::Mutex;
 use widestring::{U16CStr, Utf16Str, utf16str};
 use windows::{Win32::Foundation::*, Win32::UI::WindowsAndMessaging::*, core::*};
 
 use config::{ColorFormat, Config};
 use dialog::show_config_dialog;
 
-static CONFIG: Mutex<Config> = Mutex::new(Config::default());
-
-fn create_gif_from_video(info: &OutputInfo) -> std::result::Result<(), String> {
+fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
     let output_path = unsafe { U16CStr::from_ptr_str(info.savefile).to_string_lossy() };
 
     let output_file =
@@ -25,18 +22,12 @@ fn create_gif_from_video(info: &OutputInfo) -> std::result::Result<(), String> {
     let mut encoder = Encoder::new(output_file, info.w as u16, info.h as u16, &[])
         .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
     // 設定を取得
-    let (repeat_setting, use_rgba) = match CONFIG.lock() {
-        Ok(guard) => {
-            let repeat = if guard.repeat == 0 {
-                Repeat::Infinite
-            } else {
-                Repeat::Finite(guard.repeat)
-            };
-            let rgba = matches!(guard.color_format, ColorFormat::Transparent);
-            (repeat, rgba)
-        }
-        Err(_) => (Repeat::Infinite, true), // デフォルト値を使用
+    let repeat_setting = if config.repeat == 0 {
+        Repeat::Infinite
+    } else {
+        Repeat::Finite(config.repeat)
     };
+
     encoder
         .set_repeat(repeat_setting)
         .map_err(|e| format!("ループ設定エラー: {}", e))?;
@@ -46,17 +37,17 @@ fn create_gif_from_video(info: &OutputInfo) -> std::result::Result<(), String> {
             return Err("処理が中断されました".into());
         }
 
-        let image_data = if use_rgba {
-            info.get_video_rgba(frame)
-        } else {
-            info.get_video_rgb(frame)
+        let image_data = match config.color_format {
+            ColorFormat::Palette => info.get_video_rgb(frame),
+            ColorFormat::Transparent => info.get_video_rgba(frame),
         };
 
         if let Some(mut image_data) = image_data {
-            let mut gif_frame = if use_rgba {
-                Frame::from_rgba(info.w as u16, info.h as u16, &mut image_data)
-            } else {
-                Frame::from_rgb(info.w as u16, info.h as u16, &image_data)
+            let mut gif_frame = match config.color_format {
+                ColorFormat::Palette => Frame::from_rgb(info.w as u16, info.h as u16, &image_data),
+                ColorFormat::Transparent => {
+                    Frame::from_rgba(info.w as u16, info.h as u16, &mut image_data)
+                }
             };
 
             gif_frame.dispose = gif::DisposalMethod::Background;
@@ -74,17 +65,26 @@ fn create_gif_from_video(info: &OutputInfo) -> std::result::Result<(), String> {
 }
 
 extern "C" fn config_func(hwnd: HWND, _dll_hinst: HINSTANCE) -> bool {
-    let default_config = match CONFIG.lock() {
-        Ok(guard) => guard.clone(),
-        Err(_) => Config::default(),
-    };
+    let default_config = Config::load();
 
-    if let Ok(result) = show_config_dialog(hwnd, default_config)
-        && let Ok(mut guard) = CONFIG.lock()
-    {
+    if let Ok(result) = show_config_dialog(hwnd, default_config) {
         match result {
             Some(config) => {
-                *guard = config;
+                // 設定を保存
+                if let Err(e) = config.save() {
+                    let error_msg = format!("設定保存エラー: {}", e);
+                    let error_wide =
+                        widestring::U16CString::from_str(&error_msg).unwrap_or_default();
+
+                    unsafe {
+                        MessageBoxW(
+                            Some(hwnd),
+                            PCWSTR(error_wide.as_ptr()),
+                            w!("警告"),
+                            MB_OK | MB_ICONWARNING,
+                        );
+                    }
+                }
                 true
             }
             None => false,
@@ -109,11 +109,10 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
             None => return false,
         };
 
+        let config = Config::load();
+
         // 透明度ありモードの場合のみパッチを適用
-        let use_rgba = match CONFIG.lock() {
-            Ok(guard) => matches!(guard.color_format, ColorFormat::Transparent),
-            Err(_) => false,
-        };
+        let use_rgba = matches!(config.color_format, ColorFormat::Transparent);
 
         let old_protect = if use_rgba {
             match apply_rgba_patch(&info) {
@@ -137,7 +136,7 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
             None
         };
 
-        let result = match create_gif_from_video(info) {
+        let result = match create_gif_from_video(info, &config) {
             Ok(_) => true,
             Err(e) => {
                 let error_msg = format!("GIF出力エラー: {}", e);

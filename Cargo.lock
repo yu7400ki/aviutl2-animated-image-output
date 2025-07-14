@@ -194,6 +194,7 @@ dependencies = [
  "aviutl",
  "dialog",
  "gif",
+ "rust-ini",
  "widestring",
  "windows",
 ]

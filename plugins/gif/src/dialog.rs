@@ -29,7 +29,7 @@ pub fn show_config_dialog(
     let color_combo_label = Label::new("カラーフォーマット")
         .position(20, 70)
         .size(245, 20);
-    let color_options = vec!["パレット化", "透明度あり"];
+    let color_options = vec![ColorFormat::Palette.into(), ColorFormat::Transparent.into()];
     let color_combobox = ComboBox::new(color_options)
         .position(20, 90)
         .size(245, 100)
