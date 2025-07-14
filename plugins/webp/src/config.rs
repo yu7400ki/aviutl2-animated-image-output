@@ -126,7 +126,7 @@ impl Config {
             Err(_) => return default,
         };
 
-        let section = ini.section(Some("WebP"));
+        let section = ini.section(Some("Config"));
 
         let repeat = section
             .and_then(|s| s.get("repeat"))
@@ -168,7 +168,7 @@ impl Config {
         let config_path = Self::config_file_path()?;
         let mut ini = Ini::new();
 
-        ini.with_section(Some("WebP"))
+        ini.with_section(Some("Config"))
             .set("repeat", self.repeat.to_string())
             .set("color_format", self.color_format.to_index().to_string())
             .set("lossless", self.lossless.to_string())

@@ -114,7 +114,7 @@ impl Config {
             Err(_) => return default,
         };
 
-        let section = ini.section(Some("AVIF"));
+        let section = ini.section(Some("Config"));
 
         let quality = section
             .and_then(|s| s.get("quality"))
@@ -150,7 +150,7 @@ impl Config {
         let config_path = Self::config_file_path()?;
         let mut ini = Ini::new();
 
-        ini.with_section(Some("AVIF"))
+        ini.with_section(Some("Config"))
             .set("quality", self.quality.to_string())
             .set("speed", self.speed.to_string())
             .set("color_format", self.color_format.to_index().to_string())
