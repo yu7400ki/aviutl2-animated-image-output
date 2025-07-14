@@ -402,6 +402,7 @@ dependencies = [
  "aviutl",
  "dialog",
  "libwebp-sys",
+ "rust-ini",
  "widestring",
  "windows",
 ]

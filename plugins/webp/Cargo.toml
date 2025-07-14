@@ -10,9 +10,11 @@ crate-type = ["cdylib"]
 [dependencies]
 aviutl = { path = "../../libs/aviutl" }
 dialog = { path = "../../libs/dialog" }
+rust-ini = { workspace = true }
 libwebp-sys = { version = "0.12" }
 widestring = { workspace = true }
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
 ] }

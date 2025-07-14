@@ -6,7 +6,9 @@ use widestring::U16CString;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::HFONT;
 use windows::Win32::System::LibraryLoader::*;
-use windows::Win32::UI::{Controls::*, WindowsAndMessaging::*};
+use windows::Win32::UI::{
+    Controls::*, Input::KeyboardAndMouse::EnableWindow, WindowsAndMessaging::*,
+};
 use windows::core::*;
 
 struct NumberInner {
@@ -16,6 +18,7 @@ struct NumberInner {
     size: (i32, i32),
     value: i32,
     range: Option<(i32, i32)>,
+    enabled: bool,
 }
 
 #[derive(Clone)]
@@ -33,6 +36,7 @@ impl Number {
                 size: (100, 25),
                 value: 0,
                 range: None,
+                enabled: true,
             })),
         }
     }
@@ -90,6 +94,24 @@ impl Number {
     pub fn set_value<T: ToString>(&self, value: T) {
         self.set_text(&value.to_string());
     }
+
+    pub fn enabled(self, enabled: bool) -> Self {
+        self.inner.borrow_mut().enabled = enabled;
+        self
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.inner.borrow_mut().enabled = enabled;
+        if let Some(hwnd) = self.get_hwnd() {
+            unsafe {
+                let _ = EnableWindow(hwnd, enabled);
+            }
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.inner.borrow().enabled
+    }
 }
 
 impl Control for Number {
@@ -113,6 +135,8 @@ impl Control for Number {
                 Some(HINSTANCE(hinstance.0)),
                 None,
             )?;
+
+            let _ = EnableWindow(hwnd_edit, inner.enabled);
 
             let hwnd_updown = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
