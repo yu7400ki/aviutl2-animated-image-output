@@ -34,7 +34,7 @@ pub fn show_config_dialog(
     let color_combo_label = Label::new("カラーフォーマット")
         .position(20, 125)
         .size(245, 20);
-    let color_options = vec!["RGB 24bit", "RGBA 32bit"];
+    let color_options = vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()];
     let color_combobox = ComboBox::new(color_options)
         .position(20, 145)
         .size(245, 100)
@@ -64,6 +64,7 @@ pub fn show_config_dialog(
                         quality: quality.clamp(0, 100) as u8,
                         speed: speed.clamp(0, 10) as u8,
                         color_format,
+                        threads: Config::default().threads,
                     });
                     dialog.close();
                 } else {

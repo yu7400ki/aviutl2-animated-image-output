@@ -20,6 +20,7 @@ fn create_avif_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
     encoder.set_timescale(info.rate as u64);
     encoder.set_quality(config.quality);
     encoder.set_speed(config.speed);
+    encoder.set_max_threads(config.threads);
 
     let width = info.w as u32;
     let height = info.h as u32;
@@ -39,7 +40,7 @@ fn create_avif_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
             let rgb_pixels = RgbPixels::new(width, height, &pixel_data)
                 .map_err(|e| format!("RGBピクセル作成エラー: {}", e))?;
 
-            let image = rgb_pixels.to_image(YuvFormat::Yuv444);
+            let image = rgb_pixels.to_image(YuvFormat::Yuv420);
 
             encoder
                 .add_image(&image, info.scale as u64, Default::default())

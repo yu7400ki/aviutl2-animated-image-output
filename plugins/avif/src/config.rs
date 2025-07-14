@@ -1,30 +1,69 @@
 use ini::Ini;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use windows::Win32::Foundation::{HMODULE, MAX_PATH};
 use windows::Win32::System::LibraryLoader::{
     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GetModuleFileNameW, GetModuleHandleExW,
 };
 use windows::core::PCWSTR;
 
-#[derive(Debug, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 pub enum ColorFormat {
     Rgb24,
     Rgba32,
 }
 
-#[derive(Debug, Clone)]
+impl Default for ColorFormat {
+    fn default() -> Self {
+        ColorFormat::Rgb24
+    }
+}
+
+impl Into<&'static str> for ColorFormat {
+    fn into(self) -> &'static str {
+        match self {
+            ColorFormat::Rgb24 => "RGB 24bit",
+            ColorFormat::Rgba32 => "RGBA 32bit",
+        }
+    }
+}
+
+impl FromStr for ColorFormat {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.parse::<u32>() {
+            Ok(0) => Ok(ColorFormat::Rgb24),
+            Ok(1) => Ok(ColorFormat::Rgba32),
+            _ => Err(()),
+        }
+    }
+}
+
+impl ColorFormat {
+    fn to_index(&self) -> u32 {
+        match self {
+            ColorFormat::Rgb24 => 0,
+            ColorFormat::Rgba32 => 1,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Config {
     pub quality: u8,
     pub speed: u8,
     pub color_format: ColorFormat,
+    pub threads: usize,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            quality: 80,
-            speed: 8,
+            quality: 75,
+            speed: 10,
             color_format: ColorFormat::Rgb24,
+            threads: std::thread::available_parallelism().map_or(1, |p| p.get()),
         }
     }
 }
@@ -59,18 +98,20 @@ impl Config {
     }
 
     pub fn load() -> Self {
+        let default = Self::default();
+
         let config_path = match Self::config_file_path() {
             Ok(path) => path,
-            Err(_) => return Self::default(),
+            Err(_) => return default,
         };
 
         if !Path::new(&config_path).exists() {
-            return Self::default();
+            return default;
         }
 
         let ini = match Ini::load_from_file(&config_path) {
             Ok(ini) => ini,
-            Err(_) => return Self::default(),
+            Err(_) => return default,
         };
 
         let section = ini.section(Some("AVIF"));
@@ -78,27 +119,30 @@ impl Config {
         let quality = section
             .and_then(|s| s.get("quality"))
             .and_then(|s| s.parse::<u8>().ok())
-            .unwrap_or(80)
+            .unwrap_or(default.quality)
             .clamp(0, 100);
 
         let speed = section
             .and_then(|s| s.get("speed"))
             .and_then(|s| s.parse::<u8>().ok())
-            .unwrap_or(8)
+            .unwrap_or(default.speed)
             .clamp(0, 10);
 
         let color_format = section
             .and_then(|s| s.get("color_format"))
-            .map(|s| match s {
-                "rgba32" => ColorFormat::Rgba32,
-                _ => ColorFormat::Rgb24,
-            })
-            .unwrap_or(ColorFormat::Rgb24);
+            .and_then(|s| s.parse::<ColorFormat>().ok())
+            .unwrap_or_default();
+
+        let threads = section
+            .and_then(|s| s.get("threads"))
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(default.threads);
 
         Self {
             quality,
             speed,
             color_format,
+            threads,
         }
     }
 
@@ -106,15 +150,11 @@ impl Config {
         let config_path = Self::config_file_path()?;
         let mut ini = Ini::new();
 
-        let color_format_str = match self.color_format {
-            ColorFormat::Rgb24 => "rgb24",
-            ColorFormat::Rgba32 => "rgba32",
-        };
-
         ini.with_section(Some("AVIF"))
             .set("quality", self.quality.to_string())
             .set("speed", self.speed.to_string())
-            .set("color_format", color_format_str);
+            .set("color_format", self.color_format.to_index().to_string())
+            .set("threads", self.threads.to_string());
 
         ini.write_to_file(&config_path).map_err(|e| e.to_string())
     }
