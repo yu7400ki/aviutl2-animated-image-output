@@ -1,17 +1,16 @@
 [package]
-name = "apng_export"
+name = "gif_export"
 version = "0.0.0"
 edition = "2024"
 
 [lib]
-name = "apng_export"
+name = "gif_export"
 crate-type = ["cdylib"]
 
 [dependencies]
-aviutl = { path = "../aviutl" }
-dialog = { path = "../dialog" }
-png = { version = "0.17" }
-rust-ini = { workspace = true }
+aviutl = { path = "../../libs/aviutl" }
+dialog = { path = "../../libs/dialog" }
+gif = { version = "0.13" }
 widestring = { workspace = true }
 windows = { workspace = true, features = [
     "Win32_Foundation",

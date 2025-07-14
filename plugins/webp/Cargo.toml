@@ -1,16 +1,16 @@
 [package]
-name = "gif_export"
+name = "webp_export"
 version = "0.0.0"
 edition = "2024"
 
 [lib]
-name = "gif_export"
+name = "webp_export"
 crate-type = ["cdylib"]
 
 [dependencies]
-aviutl = { path = "../aviutl" }
-dialog = { path = "../dialog" }
-gif = { version = "0.13" }
+aviutl = { path = "../../libs/aviutl" }
+dialog = { path = "../../libs/dialog" }
+libwebp-sys = { version = "0.12" }
 widestring = { workspace = true }
 windows = { workspace = true, features = [
     "Win32_Foundation",
