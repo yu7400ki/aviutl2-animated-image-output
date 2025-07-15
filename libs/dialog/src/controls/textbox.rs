@@ -6,7 +6,7 @@ use widestring::U16CString;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::HFONT;
 use windows::Win32::System::LibraryLoader::*;
-use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::Win32::UI::{Input::KeyboardAndMouse::EnableWindow, WindowsAndMessaging::*};
 use windows::core::*;
 
 struct TextBoxInner {
@@ -15,6 +15,7 @@ struct TextBoxInner {
     position: (i32, i32),
     size: (i32, i32),
     text: String,
+    enabled: bool,
 }
 
 #[derive(Clone)]
@@ -31,6 +32,7 @@ impl TextBox {
                 position: (0, 0),
                 size: (150, 25),
                 text: String::new(),
+                enabled: true,
             })),
         }
     }
@@ -75,6 +77,24 @@ impl TextBox {
             }
         }
     }
+
+    pub fn enabled(self, enabled: bool) -> Self {
+        self.inner.borrow_mut().enabled = enabled;
+        self
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.inner.borrow_mut().enabled = enabled;
+        if let Some(hwnd) = self.get_hwnd() {
+            unsafe {
+                let _ = EnableWindow(hwnd, enabled);
+            }
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.inner.borrow().enabled
+    }
 }
 
 impl Control for TextBox {
@@ -101,6 +121,8 @@ impl Control for TextBox {
 
             let initial_wide = U16CString::from_str(&inner.text).unwrap_or_default();
             SetWindowTextW(hwnd, PCWSTR(initial_wide.as_ptr())).ok();
+
+            let _ = EnableWindow(hwnd, inner.enabled);
 
             inner.hwnd = Some(hwnd);
 
