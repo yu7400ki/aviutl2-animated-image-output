@@ -1,14 +1,11 @@
 use crate::config::{ColorFormat, Config, KeyColor};
+pub use dialog::MessageBox;
 use dialog::{
     Dialog,
     controls::{Button, CheckBox, ComboBox, Label, Number, TextBox},
 };
 use std::sync::{Arc, Mutex};
-use widestring;
-use windows::{
-    Win32::{Foundation::*, UI::WindowsAndMessaging::*},
-    core::*,
-};
+use windows::Win32::Foundation::*;
 
 pub fn show_config_dialog(
     parent_hwnd: HWND,
@@ -132,16 +129,7 @@ pub fn show_config_dialog(
                 let chroma_key_color = match KeyColor::parse(&chroma_key_color_textbox.get_text()) {
                     Ok(color) => color,
                     Err(e) => {
-                        unsafe {
-                            let error_msg =
-                                widestring::U16CString::from_str(&e).unwrap_or_default();
-                            MessageBoxW(
-                                Some(parent_hwnd),
-                                PCWSTR(error_msg.as_ptr()),
-                                w!("エラー"),
-                                MB_OK | MB_ICONERROR,
-                            );
-                        }
+                        MessageBox::error(Some(parent_hwnd), &e, "エラー");
                         return Ok(());
                     }
                 };
@@ -149,14 +137,11 @@ pub fn show_config_dialog(
                 let chroma_key_hue_range = match hue_range_textbox.get_value::<u16>() {
                     Ok(value) => value,
                     Err(_) => {
-                        unsafe {
-                            MessageBoxW(
-                                Some(parent_hwnd),
-                                w!("色相範囲の値が無効です。0-360の値を入力してください。"),
-                                w!("エラー"),
-                                MB_OK | MB_ICONERROR,
-                            );
-                        }
+                        MessageBox::error(
+                            Some(parent_hwnd),
+                            "色相範囲の値が無効です。0-360の値を入力してください。",
+                            "エラー",
+                        );
                         return Ok(());
                     }
                 };
@@ -164,14 +149,11 @@ pub fn show_config_dialog(
                 let chroma_key_saturation_range = match saturation_range_textbox.get_value::<u8>() {
                     Ok(value) => value,
                     Err(_) => {
-                        unsafe {
-                            MessageBoxW(
-                                Some(parent_hwnd),
-                                w!("彩度範囲の値が無効です。0-100の値を入力してください。"),
-                                w!("エラー"),
-                                MB_OK | MB_ICONERROR,
-                            );
-                        }
+                        MessageBox::error(
+                            Some(parent_hwnd),
+                            "彩度範囲の値が無効です。0-100の値を入力してください。",
+                            "エラー",
+                        );
                         return Ok(());
                     }
                 };
@@ -188,24 +170,18 @@ pub fn show_config_dialog(
                     });
                     dialog.close();
                 } else {
-                    unsafe {
-                        MessageBoxW(
-                            Some(parent_hwnd),
-                            w!("内部エラー: 設定の保存に失敗しました。"),
-                            w!("エラー"),
-                            MB_OK | MB_ICONERROR,
-                        );
-                    }
-                }
-            } else {
-                unsafe {
-                    MessageBoxW(
+                    MessageBox::error(
                         Some(parent_hwnd),
-                        w!("無効な数値です。有効な範囲内の整数を入力してください。"),
-                        w!("エラー"),
-                        MB_OK | MB_ICONERROR,
+                        "内部エラー: 設定の保存に失敗しました。",
+                        "エラー",
                     );
                 }
+            } else {
+                MessageBox::error(
+                    Some(parent_hwnd),
+                    "無効な数値です。有効な範囲内の整数を入力してください。",
+                    "エラー",
+                );
             }
             Ok(())
         }

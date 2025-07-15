@@ -291,3 +291,38 @@ unsafe extern "system" fn dialog_window_proc(
 }
 
 pub mod controls;
+
+/// MessageBox wrapper for displaying messages with proper icon types
+pub struct MessageBox;
+
+impl MessageBox {
+    /// Show an error message box
+    pub fn error(parent: Option<HWND>, message: &str, title: &str) {
+        Self::show_message(parent, message, title, MB_OK | MB_ICONERROR);
+    }
+
+    /// Show a warning message box
+    pub fn warning(parent: Option<HWND>, message: &str, title: &str) {
+        Self::show_message(parent, message, title, MB_OK | MB_ICONWARNING);
+    }
+
+    /// Show an info message box
+    pub fn info(parent: Option<HWND>, message: &str, title: &str) {
+        Self::show_message(parent, message, title, MB_OK | MB_ICONINFORMATION);
+    }
+
+    /// Show a message box with custom flags
+    pub fn show_message(parent: Option<HWND>, message: &str, title: &str, flags: MESSAGEBOX_STYLE) {
+        let message_wide = U16CString::from_str(message).unwrap_or_default();
+        let title_wide = U16CString::from_str(title).unwrap_or_default();
+
+        unsafe {
+            MessageBoxW(
+                parent,
+                PCWSTR(message_wide.as_ptr()),
+                PCWSTR(title_wide.as_ptr()),
+                flags,
+            );
+        }
+    }
+}

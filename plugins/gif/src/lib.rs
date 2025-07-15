@@ -5,11 +5,12 @@ use aviutl::output2::{OutputInfo, OutputPluginTable};
 #[cfg(feature = "rgba")]
 use aviutl::patch::{apply_rgba_patch, restore_rgba_patch};
 use chroma_key::apply_chroma_key;
+pub use dialog::MessageBox;
 use gif::{Encoder, Frame, Repeat};
 use std::ffi::c_void;
 use std::fs::File;
 use widestring::{U16CStr, Utf16Str, utf16str};
-use windows::{Win32::Foundation::*, Win32::UI::WindowsAndMessaging::*, core::*};
+use windows::{Win32::Foundation::*, core::*};
 
 use config::{ColorFormat, Config};
 use dialog::show_config_dialog;
@@ -137,31 +138,14 @@ extern "C" fn config_func(hwnd: HWND, _dll_hinst: HINSTANCE) -> bool {
                 // 設定を保存
                 if let Err(e) = config.save() {
                     let error_msg = format!("設定保存エラー: {}", e);
-                    let error_wide =
-                        widestring::U16CString::from_str(&error_msg).unwrap_or_default();
-
-                    unsafe {
-                        MessageBoxW(
-                            Some(hwnd),
-                            PCWSTR(error_wide.as_ptr()),
-                            w!("警告"),
-                            MB_OK | MB_ICONWARNING,
-                        );
-                    }
+                    MessageBox::warning(Some(hwnd), &error_msg, "警告");
                 }
                 true
             }
             None => false,
         }
     } else {
-        unsafe {
-            MessageBoxW(
-                Some(hwnd),
-                w!("設定の取得に失敗しました。"),
-                w!("エラー"),
-                MB_OK | MB_ICONERROR,
-            );
-        }
+        MessageBox::error(Some(hwnd), "設定の取得に失敗しました。", "エラー");
         false
     }
 }
@@ -185,16 +169,7 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
                 Ok(protect) => Some(protect),
                 Err(e) => {
                     let error_msg = format!("メモリパッチ適用エラー: {}", e);
-                    let error_wide =
-                        widestring::U16CString::from_str(&error_msg).unwrap_or_default();
-                    let title_wide = widestring::U16CString::from_str("エラー").unwrap_or_default();
-
-                    MessageBoxW(
-                        Some(HWND::default()),
-                        PCWSTR(error_wide.as_ptr()),
-                        PCWSTR(title_wide.as_ptr()),
-                        MB_OK | MB_ICONERROR,
-                    );
+                    MessageBox::error(None, &error_msg, "エラー");
                     return false;
                 }
             }
@@ -206,15 +181,7 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
             Ok(_) => true,
             Err(e) => {
                 let error_msg = format!("GIF出力エラー: {}", e);
-                let error_wide = widestring::U16CString::from_str(&error_msg).unwrap_or_default();
-                let title_wide = widestring::U16CString::from_str("エラー").unwrap_or_default();
-
-                MessageBoxW(
-                    Some(HWND::default()),
-                    PCWSTR(error_wide.as_ptr()),
-                    PCWSTR(title_wide.as_ptr()),
-                    MB_OK | MB_ICONERROR,
-                );
+                MessageBox::error(None, &error_msg, "エラー");
                 false
             }
         };
