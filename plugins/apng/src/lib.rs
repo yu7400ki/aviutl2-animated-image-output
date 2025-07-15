@@ -1,3 +1,4 @@
+mod chroma_key;
 mod config;
 mod dialog;
 
@@ -9,6 +10,7 @@ use std::ffi::c_void;
 use widestring::{U16CStr, Utf16Str, utf16str};
 use windows::{Win32::Foundation::*, Win32::UI::WindowsAndMessaging::*, core::*};
 
+use chroma_key::apply_chroma_key;
 use config::{ColorFormat, Config};
 use dialog::show_config_dialog;
 
@@ -19,9 +21,10 @@ fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
         std::fs::File::create(&output_path).map_err(|e| format!("ファイル作成エラー: {}", e))?;
     let mut encoder = Encoder::new(output_file, info.w as u32, info.h as u32);
 
-    let (color_type, channels) = match config.color_format {
-        ColorFormat::Rgb24 => (ColorType::Rgb, 3),
-        ColorFormat::Rgba32 => (ColorType::Rgba, 4),
+    let color_type = if config.color_format == ColorFormat::Rgba32 || config.chroma_key_enabled {
+        ColorType::Rgba
+    } else {
+        ColorType::Rgb
     };
 
     encoder.set_color(color_type);
@@ -47,7 +50,7 @@ fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
             return Err("処理が中断されました".into());
         }
         // カラーフォーマットに応じてフレームデータを取得
-        let image_data = if channels == 4 {
+        let frame_data = if config.color_format == ColorFormat::Rgba32 {
             // RGBAモード: パッチを適用してRGBA32データを取得
             #[cfg(feature = "rgba")]
             {
@@ -55,17 +58,34 @@ fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
             }
             #[cfg(not(feature = "rgba"))]
             {
-                info.get_video_rgb(frame)
+                if config.chroma_key_enabled {
+                    info.get_video_rgb_4ch(frame)
+                } else {
+                    info.get_video_rgb(frame)
+                }
             }
         } else {
-            // RGBモード: 通常のRGB24データを取得
-            info.get_video_rgb(frame)
+            if config.chroma_key_enabled {
+                info.get_video_rgb_4ch(frame)
+            } else {
+                info.get_video_rgb(frame)
+            }
         };
 
-        if let Some(image_data) = image_data {
+        if let Some(mut data) = frame_data {
+            // クロマキー処理を適用
+            if config.chroma_key_enabled {
+                apply_chroma_key(
+                    &mut data,
+                    config.chroma_key_target_color.to_array(),
+                    config.chroma_key_hue_range as f32, // 0-360度
+                    config.chroma_key_saturation_range as f32 / 100.0, // 0-100 → 0.0-1.0
+                );
+            }
+
             // フレームデータを書き込み
             writer
-                .write_image_data(&image_data)
+                .write_image_data(&data)
                 .map_err(|e| format!("フレーム書き込みエラー: {}", e))?;
         }
 

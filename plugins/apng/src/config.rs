@@ -7,6 +7,45 @@ use windows::Win32::System::LibraryLoader::{
 };
 use windows::core::PCWSTR;
 
+#[derive(Clone, Debug)]
+pub struct TargetColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl Default for TargetColor {
+    fn default() -> Self {
+        TargetColor { r: 0, g: 255, b: 0 } // デフォルト: 緑色
+    }
+}
+
+impl TargetColor {
+    pub fn parse(color_str: &str) -> Result<Self, String> {
+        let color_str = color_str.trim_start_matches('#');
+        if color_str.len() != 6 {
+            return Err("無効なカラーコードです。6桁の16進数で指定してください。".to_string());
+        }
+        let r = u8::from_str_radix(&color_str[0..2], 16)
+            .map_err(|_| "無効なカラーコードです。".to_string())?;
+        let g = u8::from_str_radix(&color_str[2..4], 16)
+            .map_err(|_| "無効なカラーコードです。".to_string())?;
+        let b = u8::from_str_radix(&color_str[4..6], 16)
+            .map_err(|_| "無効なカラーコードです。".to_string())?;
+        Ok(TargetColor { r, g, b })
+    }
+
+    pub fn to_array(&self) -> [u8; 3] {
+        [self.r, self.g, self.b]
+    }
+}
+
+impl ToString for TargetColor {
+    fn to_string(&self) -> String {
+        format!("#{:02X}{:02X}{:02X}", self.r, self.g, self.b)
+    }
+}
+
 #[derive(Copy, Clone, PartialEq)]
 pub enum ColorFormat {
     Rgb24,
@@ -186,6 +225,10 @@ pub struct Config {
     pub color_format: ColorFormat,
     pub compression_type: CompressionType,
     pub filter_type: FilterType,
+    pub chroma_key_enabled: bool,
+    pub chroma_key_target_color: TargetColor,
+    pub chroma_key_hue_range: u16,
+    pub chroma_key_saturation_range: u8,
 }
 
 impl Config {
@@ -223,13 +266,19 @@ impl Config {
             color_format: ColorFormat::Rgb24,
             compression_type: CompressionType::Default,
             filter_type: FilterType::Sub,
+            chroma_key_enabled: false,
+            chroma_key_target_color: TargetColor { r: 0, g: 0, b: 255 },
+            chroma_key_hue_range: 20,        // 20度
+            chroma_key_saturation_range: 35, // 35%
         }
     }
 
     pub fn load() -> Self {
+        let default = Self::default();
+
         let config_path = match Self::config_file_path() {
             Ok(path) => path,
-            Err(_) => return Self::default(),
+            Err(_) => return default,
         };
 
         if let Ok(ini) = Ini::load_from_file(&config_path) {
@@ -237,34 +286,58 @@ impl Config {
                 let repeat = section
                     .get("repeat")
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
+                    .unwrap_or(default.repeat);
 
                 let color_format = section
                     .get("color_format")
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or_default();
+                    .unwrap_or(default.color_format);
 
                 let compression_type = section
                     .get("compression_type")
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or_default();
+                    .unwrap_or(default.compression_type);
 
                 let filter_type = section
                     .get("filter_type")
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or_default();
+                    .unwrap_or(default.filter_type);
+
+                let chroma_key_enabled = section
+                    .get("chroma_key_enabled")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(default.chroma_key_enabled);
+
+                let chroma_key_target_color = section
+                    .get("chroma_key_target_color")
+                    .and_then(|s| TargetColor::parse(s).ok())
+                    .unwrap_or(default.chroma_key_target_color);
+
+                let chroma_key_hue_range = section
+                    .get("chroma_key_hue_range")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(default.chroma_key_hue_range);
+
+                let chroma_key_saturation_range = section
+                    .get("chroma_key_saturation_range")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(default.chroma_key_saturation_range);
 
                 Config {
                     repeat,
                     color_format,
                     compression_type,
                     filter_type,
+                    chroma_key_enabled,
+                    chroma_key_target_color,
+                    chroma_key_hue_range,
+                    chroma_key_saturation_range,
                 }
             } else {
-                Self::default()
+                default
             }
         } else {
-            Self::default()
+            default
         }
     }
 
@@ -278,7 +351,20 @@ impl Config {
                 "compression_type",
                 self.compression_type.to_index().to_string(),
             )
-            .set("filter_type", self.filter_type.to_index().to_string());
+            .set("filter_type", self.filter_type.to_index().to_string())
+            .set("chroma_key_enabled", self.chroma_key_enabled.to_string())
+            .set(
+                "chroma_key_target_color",
+                self.chroma_key_target_color.to_string(),
+            )
+            .set(
+                "chroma_key_hue_range",
+                self.chroma_key_hue_range.to_string(),
+            )
+            .set(
+                "chroma_key_saturation_range",
+                self.chroma_key_saturation_range.to_string(),
+            );
 
         let config_path = Self::config_file_path()?;
         ini.write_to_file(&config_path).map_err(|e| e.to_string())
