@@ -4,6 +4,7 @@ mod dialog;
 use aviutl::output2::{OutputInfo, OutputPluginTable};
 #[cfg(feature = "rgba")]
 use aviutl::patch::{apply_rgba_patch, restore_rgba_patch};
+use chroma_key::apply_chroma_key;
 use gif::{Encoder, Frame, Repeat};
 use std::ffi::c_void;
 use std::fs::File;
@@ -37,18 +38,54 @@ fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Res
         }
 
         let image_data = match config.color_format {
-            ColorFormat::Palette => info.get_video_rgb(frame),
+            ColorFormat::Palette => {
+                if config.chroma_key_enabled {
+                    info.get_video_rgb_4ch(frame)
+                } else {
+                    info.get_video_rgb(frame)
+                }
+            }
             #[cfg(feature = "rgba")]
             ColorFormat::Transparent => info.get_video_rgba(frame),
             #[cfg(not(feature = "rgba"))]
-            ColorFormat::Transparent => info.get_video_rgb(frame),
+            ColorFormat::Transparent => {
+                if config.chroma_key_enabled {
+                    info.get_video_rgb_4ch(frame)
+                } else {
+                    info.get_video_rgb(frame)
+                }
+            }
         };
 
         #[allow(unused_mut)]
         if let Some(mut image_data) = image_data {
+            // クロマキー処理を適用
+            if config.chroma_key_enabled {
+                apply_chroma_key(
+                    &mut image_data,
+                    config.chroma_key_target_color.to_array(),
+                    config.chroma_key_hue_range as f32,
+                    config.chroma_key_saturation_range as f32 / 100.0,
+                );
+            }
+
             let mut gif_frame = match config.color_format {
                 ColorFormat::Palette => {
-                    Frame::from_rgb_speed(info.w as u16, info.h as u16, &image_data, config.speed)
+                    if config.chroma_key_enabled {
+                        Frame::from_rgba_speed(
+                            info.w as u16,
+                            info.h as u16,
+                            &mut image_data,
+                            config.speed,
+                        )
+                    } else {
+                        Frame::from_rgb_speed(
+                            info.w as u16,
+                            info.h as u16,
+                            &image_data,
+                            config.speed,
+                        )
+                    }
                 }
                 #[cfg(feature = "rgba")]
                 ColorFormat::Transparent => Frame::from_rgba_speed(
@@ -59,7 +96,21 @@ fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Res
                 ),
                 #[cfg(not(feature = "rgba"))]
                 ColorFormat::Transparent => {
-                    Frame::from_rgb_speed(info.w as u16, info.h as u16, &image_data, config.speed)
+                    if config.chroma_key_enabled {
+                        Frame::from_rgba_speed(
+                            info.w as u16,
+                            info.h as u16,
+                            &mut image_data,
+                            config.speed,
+                        )
+                    } else {
+                        Frame::from_rgb_speed(
+                            info.w as u16,
+                            info.h as u16,
+                            &image_data,
+                            config.speed,
+                        )
+                    }
                 }
             };
 

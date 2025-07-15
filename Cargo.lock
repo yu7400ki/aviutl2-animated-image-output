@@ -41,6 +41,7 @@ name = "avif_output"
 version = "0.0.0"
 dependencies = [
  "aviutl",
+ "chroma_key",
  "dialog",
  "libavif",
  "rust-ini",
@@ -227,6 +228,7 @@ name = "gif_output"
 version = "0.0.0"
 dependencies = [
  "aviutl",
+ "chroma_key",
  "dialog",
  "gif",
  "rust-ini",
@@ -532,6 +534,7 @@ name = "webp_output"
 version = "0.0.0"
 dependencies = [
  "aviutl",
+ "chroma_key",
  "dialog",
  "libwebp-sys",
  "rust-ini",

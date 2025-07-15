@@ -4,6 +4,7 @@ mod dialog;
 use aviutl::output2::{OutputInfo, OutputPluginTable};
 #[cfg(feature = "rgba")]
 use aviutl::patch::{apply_rgba_patch, restore_rgba_patch};
+use chroma_key::apply_chroma_key;
 use libavif::{Encoder, RgbPixels, YuvFormat};
 use std::ffi::c_void;
 use widestring::{U16CStr, Utf16Str, utf16str};
@@ -31,14 +32,36 @@ fn create_avif_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
         }
 
         let image_data = match config.color_format {
-            ColorFormat::Rgb24 => info.get_video_rgb(frame as i32),
+            ColorFormat::Rgb24 => {
+                if config.chroma_key_enabled {
+                    info.get_video_rgb_4ch(frame as i32)
+                } else {
+                    info.get_video_rgb(frame as i32)
+                }
+            }
             #[cfg(feature = "rgba")]
             ColorFormat::Rgba32 => info.get_video_rgba(frame as i32),
             #[cfg(not(feature = "rgba"))]
-            ColorFormat::Rgba32 => info.get_video_rgb(frame as i32),
+            ColorFormat::Rgba32 => {
+                if config.chroma_key_enabled {
+                    info.get_video_rgb_4ch(frame as i32)
+                } else {
+                    info.get_video_rgb(frame as i32)
+                }
+            }
         };
 
-        if let Some(pixel_data) = image_data {
+        if let Some(mut pixel_data) = image_data {
+            // クロマキー処理を適用
+            if config.chroma_key_enabled {
+                apply_chroma_key(
+                    &mut pixel_data,
+                    config.chroma_key_target_color.to_array(),
+                    config.chroma_key_hue_range as f32,
+                    config.chroma_key_saturation_range as f32 / 100.0,
+                );
+            }
+
             let rgb_pixels = RgbPixels::new(width, height, &pixel_data)
                 .map_err(|e| format!("RGBピクセル作成エラー: {}", e))?;
 

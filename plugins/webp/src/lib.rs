@@ -6,6 +6,7 @@ use crate::encoder::{AnimEncoder, AnimFrame, WebPConfig};
 use aviutl::output2::{OutputInfo, OutputPluginTable};
 #[cfg(feature = "rgba")]
 use aviutl::patch::{apply_rgba_patch, restore_rgba_patch};
+use chroma_key::apply_chroma_key;
 use std::ffi::c_void;
 use widestring::{U16CStr, Utf16Str, utf16str};
 use windows::{Win32::Foundation::*, Win32::UI::WindowsAndMessaging::*, core::*};
@@ -41,17 +42,43 @@ fn create_webp_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
         }
 
         let image_data = match config.color_format {
-            ColorFormat::Rgb24 => info.get_video_rgb(frame),
+            ColorFormat::Rgb24 => {
+                if config.chroma_key_enabled {
+                    info.get_video_rgb_4ch(frame)
+                } else {
+                    info.get_video_rgb(frame)
+                }
+            }
             #[cfg(feature = "rgba")]
             ColorFormat::Rgba32 => info.get_video_rgba(frame),
             #[cfg(not(feature = "rgba"))]
-            ColorFormat::Rgba32 => info.get_video_rgb(frame),
+            ColorFormat::Rgba32 => {
+                if config.chroma_key_enabled {
+                    info.get_video_rgb_4ch(frame)
+                } else {
+                    info.get_video_rgb(frame)
+                }
+            }
         };
 
-        if let Some(pixel_data) = image_data {
+        if let Some(mut pixel_data) = image_data {
+            // クロマキー処理を適用
+            if config.chroma_key_enabled {
+                apply_chroma_key(
+                    &mut pixel_data,
+                    config.chroma_key_target_color.to_array(),
+                    config.chroma_key_hue_range as f32,
+                    config.chroma_key_saturation_range as f32 / 100.0,
+                );
+            }
+
             let anim_frame = match config.color_format {
                 ColorFormat::Rgb24 => {
-                    AnimFrame::from_rgb(&pixel_data, info.w as u32, info.h as u32, timestamp)
+                    if config.chroma_key_enabled {
+                        AnimFrame::from_rgba(&pixel_data, info.w as u32, info.h as u32, timestamp)
+                    } else {
+                        AnimFrame::from_rgb(&pixel_data, info.w as u32, info.h as u32, timestamp)
+                    }
                 }
                 #[cfg(feature = "rgba")]
                 ColorFormat::Rgba32 => {
@@ -59,7 +86,11 @@ fn create_webp_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
                 }
                 #[cfg(not(feature = "rgba"))]
                 ColorFormat::Rgba32 => {
-                    AnimFrame::from_rgb(&pixel_data, info.w as u32, info.h as u32, timestamp)
+                    if config.chroma_key_enabled {
+                        AnimFrame::from_rgba(&pixel_data, info.w as u32, info.h as u32, timestamp)
+                    } else {
+                        AnimFrame::from_rgb(&pixel_data, info.w as u32, info.h as u32, timestamp)
+                    }
                 }
             };
 
