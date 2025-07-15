@@ -38,7 +38,7 @@ fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Res
         }
 
         let image_data = match config.color_format {
-            ColorFormat::Palette => {
+            ColorFormat::Rgb24 => {
                 if config.chroma_key_enabled {
                     info.get_video_rgb_4ch(frame)
                 } else {
@@ -46,9 +46,9 @@ fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Res
                 }
             }
             #[cfg(feature = "rgba")]
-            ColorFormat::Transparent => info.get_video_rgba(frame),
+            ColorFormat::Rgba32 => info.get_video_rgba(frame),
             #[cfg(not(feature = "rgba"))]
-            ColorFormat::Transparent => {
+            ColorFormat::Rgba32 => {
                 if config.chroma_key_enabled {
                     info.get_video_rgb_4ch(frame)
                 } else {
@@ -70,7 +70,7 @@ fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Res
             }
 
             let mut gif_frame = match config.color_format {
-                ColorFormat::Palette => {
+                ColorFormat::Rgb24 => {
                     if config.chroma_key_enabled {
                         Frame::from_rgba_speed(
                             info.w as u16,
@@ -88,14 +88,14 @@ fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Res
                     }
                 }
                 #[cfg(feature = "rgba")]
-                ColorFormat::Transparent => Frame::from_rgba_speed(
+                ColorFormat::Rgba32 => Frame::from_rgba_speed(
                     info.w as u16,
                     info.h as u16,
                     &mut image_data,
                     config.speed,
                 ),
                 #[cfg(not(feature = "rgba"))]
-                ColorFormat::Transparent => {
+                ColorFormat::Rgba32 => {
                     if config.chroma_key_enabled {
                         Frame::from_rgba_speed(
                             info.w as u16,
@@ -175,9 +175,9 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
 
         let config = Config::load();
 
-        // 透明度ありモードの場合のみパッチを適用
+        // RGBAモードの場合のみパッチを適用
         #[cfg(feature = "rgba")]
-        let use_rgba = matches!(config.color_format, ColorFormat::Transparent);
+        let use_rgba = matches!(config.color_format, ColorFormat::Rgba32);
 
         #[cfg(feature = "rgba")]
         let old_protect: Option<u32> = if use_rgba {

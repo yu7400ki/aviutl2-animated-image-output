@@ -40,19 +40,19 @@ pub fn show_config_dialog(
         .position(20, 125)
         .size(245, 20);
     let color_options = vec![
-        ColorFormat::Palette.into(),
+        ColorFormat::Rgb24.into(),
         #[cfg(feature = "rgba")]
-        ColorFormat::Transparent.into(),
+        ColorFormat::Rgba32.into(),
     ];
     let color_combobox = ComboBox::new(color_options)
         .position(20, 145)
         .size(245, 100)
         .selected(match default_config.color_format {
-            ColorFormat::Palette => 0,
+            ColorFormat::Rgb24 => 0,
             #[cfg(feature = "rgba")]
-            ColorFormat::Transparent => 1,
+            ColorFormat::Rgba32 => 1,
             #[cfg(not(feature = "rgba"))]
-            ColorFormat::Transparent => 0,
+            ColorFormat::Rgba32 => 0,
         });
 
     // クロマキー設定
@@ -121,10 +121,10 @@ pub fn show_config_dialog(
                 speed_input.get_value::<i32>(),
             ) {
                 let color_format = match color_combobox.get_selected_index() {
-                    0 => ColorFormat::Palette,
+                    0 => ColorFormat::Rgb24,
                     #[cfg(feature = "rgba")]
-                    1 => ColorFormat::Transparent,
-                    _ => ColorFormat::Palette,
+                    1 => ColorFormat::Rgba32,
+                    _ => ColorFormat::Rgb24,
                 };
 
                 let chroma_key_enabled = chroma_key_enabled_checkbox.is_checked();

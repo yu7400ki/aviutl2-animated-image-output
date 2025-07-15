@@ -48,21 +48,21 @@ impl ToString for KeyColor {
 
 #[derive(Copy, Clone, PartialEq)]
 pub enum ColorFormat {
-    Palette,     // 通常の256色パレット
-    Transparent, // 透明色ありパレット
+    Rgb24,  // RGB 24bit
+    Rgba32, // RGBA 32bit
 }
 
 impl Default for ColorFormat {
     fn default() -> Self {
-        ColorFormat::Palette
+        ColorFormat::Rgb24
     }
 }
 
 impl Into<&'static str> for ColorFormat {
     fn into(self) -> &'static str {
         match self {
-            ColorFormat::Palette => "パレット化",
-            ColorFormat::Transparent => "透明度あり",
+            ColorFormat::Rgb24 => "RGB 24bit",
+            ColorFormat::Rgba32 => "RGBA 32bit",
         }
     }
 }
@@ -72,8 +72,8 @@ impl FromStr for ColorFormat {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.parse::<u32>() {
-            Ok(0) => Ok(ColorFormat::Palette),
-            Ok(1) => Ok(ColorFormat::Transparent),
+            Ok(0) => Ok(ColorFormat::Rgb24),
+            Ok(1) => Ok(ColorFormat::Rgba32),
             _ => Err(()),
         }
     }
@@ -82,8 +82,8 @@ impl FromStr for ColorFormat {
 impl ColorFormat {
     fn to_index(&self) -> u32 {
         match self {
-            ColorFormat::Palette => 0,
-            ColorFormat::Transparent => 1,
+            ColorFormat::Rgb24 => 0,
+            ColorFormat::Rgba32 => 1,
         }
     }
 }
@@ -103,7 +103,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             repeat: 0,
-            color_format: ColorFormat::Palette,
+            color_format: ColorFormat::default(),
             speed: 10,
             chroma_key_enabled: false,
             chroma_key_color: KeyColor::default(),
