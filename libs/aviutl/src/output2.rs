@@ -131,6 +131,7 @@ impl OutputInfo {
     }
 
     /// BGRフォーマットのフレームデータをRGBに変換して取得
+    #[inline(always)]
     pub fn get_video_rgb(&self, frame: i32) -> Option<Vec<u8>> {
         let data_ptr = self.get_video(frame, video_format::BI_RGB)?;
 
@@ -155,6 +156,7 @@ impl OutputInfo {
     }
 
     /// BGRフォーマットのフレームデータをRGBAに変換して取得（アルファチャンネル付き）
+    #[inline(always)]
     pub fn get_video_rgba(&self, frame: i32) -> Option<Vec<u8>> {
         let data_ptr = self.get_video(frame, video_format::BI_RGB)?;
 
@@ -173,6 +175,32 @@ impl OutputInfo {
                     image_buffer.push(data_slice[offset + 1]); // G
                     image_buffer.push(data_slice[offset]); // B
                     image_buffer.push(data_slice[offset + 3]); // A
+                }
+            }
+            Some(image_buffer)
+        }
+    }
+
+    /// RGBフォーマットのフレームデータをRGBAに変換して取得（アルファチャンネル付き）
+    #[inline(always)]
+    pub fn get_video_rgb_4ch(&self, frame: i32) -> Option<Vec<u8>> {
+        let data_ptr = self.get_video(frame, video_format::BI_RGB)?;
+
+        unsafe {
+            let input_stride = ((self.w * 3 + 3) / 4) * 4; // RGB24のストライド（4バイト境界アライメント）
+            let data_slice =
+                std::slice::from_raw_parts(data_ptr as *const u8, (input_stride * self.h) as usize);
+
+            let mut image_buffer = Vec::with_capacity((self.w * self.h * 4) as usize);
+            // BMPは下から上に格納されているので反転
+            for y in (0..self.h).rev() {
+                for x in 0..self.w {
+                    let offset = (y * input_stride + x * 3) as usize;
+                    // BGR -> RGBA変換（アルファは255で初期化）
+                    image_buffer.push(data_slice[offset + 2]); // R
+                    image_buffer.push(data_slice[offset + 1]); // G
+                    image_buffer.push(data_slice[offset]); // B
+                    image_buffer.push(255); // A（不透明）
                 }
             }
             Some(image_buffer)
