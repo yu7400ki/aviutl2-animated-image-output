@@ -105,12 +105,12 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             repeat: 0,
-            color_format: ColorFormat::Rgb24,
+            color_format: ColorFormat::default(),
             lossless: false,
             quality: 75.0,
             method: 4,
             chroma_key_enabled: false,
-            chroma_key_color: KeyColor { r: 0, g: 0, b: 255 },
+            chroma_key_color: KeyColor::default(),
             chroma_key_hue_range: 20,
             chroma_key_saturation_range: 35,
         }

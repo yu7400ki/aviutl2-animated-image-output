@@ -164,7 +164,7 @@ pub enum FilterType {
 
 impl Default for FilterType {
     fn default() -> Self {
-        FilterType::None
+        FilterType::Sub
     }
 }
 
@@ -231,6 +231,21 @@ pub struct Config {
     pub chroma_key_saturation_range: u8,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            repeat: 0,
+            color_format: ColorFormat::default(),
+            compression_type: CompressionType::default(),
+            filter_type: FilterType::default(),
+            chroma_key_enabled: false,
+            chroma_key_color: KeyColor::default(),
+            chroma_key_hue_range: 20,
+            chroma_key_saturation_range: 35,
+        }
+    }
+}
+
 impl Config {
     fn config_file_path() -> Result<PathBuf, String> {
         let (buffer, len) = unsafe {
@@ -268,8 +283,8 @@ impl Config {
             filter_type: FilterType::Sub,
             chroma_key_enabled: false,
             chroma_key_color: KeyColor { r: 0, g: 0, b: 255 },
-            chroma_key_hue_range: 20,        // 20度
-            chroma_key_saturation_range: 35, // 35%
+            chroma_key_hue_range: 20,
+            chroma_key_saturation_range: 35,
         }
     }
 
@@ -365,11 +380,5 @@ impl Config {
 
         let config_path = Self::config_file_path()?;
         ini.write_to_file(&config_path).map_err(|e| e.to_string())
-    }
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self::default()
     }
 }
