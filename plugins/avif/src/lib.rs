@@ -56,7 +56,7 @@ fn create_avif_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
             if config.chroma_key_enabled {
                 apply_chroma_key(
                     &mut pixel_data,
-                    config.chroma_key_target_color.to_array(),
+                    config.chroma_key_color.to_array(),
                     config.chroma_key_hue_range as f32,
                     config.chroma_key_saturation_range as f32 / 100.0,
                 );

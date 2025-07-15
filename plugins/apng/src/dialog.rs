@@ -1,4 +1,4 @@
-use crate::config::{ColorFormat, CompressionType, Config, FilterType, TargetColor};
+use crate::config::{ColorFormat, CompressionType, Config, FilterType, KeyColor};
 use dialog::{
     Dialog,
     controls::{Button, CheckBox, ComboBox, Label, Number, TextBox},
@@ -94,7 +94,7 @@ pub fn show_config_dialog(
     let chroma_key_color_textbox = TextBox::new()
         .position(20, 290)
         .size(245, 20)
-        .text(&default_config.chroma_key_target_color.to_string())
+        .text(&default_config.chroma_key_color.to_string())
         .enabled(default_config.chroma_key_enabled);
 
     let hue_range_label = Label::new("色相範囲（0-360）")
@@ -168,7 +168,7 @@ pub fn show_config_dialog(
                 let chroma_key_enabled = chroma_key_enabled_checkbox.is_checked();
 
                 let chroma_key_target_color =
-                    match TargetColor::parse(&chroma_key_color_textbox.get_text()) {
+                    match KeyColor::parse(&chroma_key_color_textbox.get_text()) {
                         Ok(color) => color,
                         Err(e) => {
                             unsafe {
@@ -222,7 +222,7 @@ pub fn show_config_dialog(
                         compression_type,
                         filter_type,
                         chroma_key_enabled,
-                        chroma_key_target_color,
+                        chroma_key_color: chroma_key_target_color,
                         chroma_key_hue_range,
                         chroma_key_saturation_range,
                     });

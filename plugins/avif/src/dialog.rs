@@ -1,4 +1,4 @@
-use crate::config::{ColorFormat, Config, TargetColor};
+use crate::config::{ColorFormat, Config, KeyColor};
 use dialog::{
     Dialog,
     controls::{Button, CheckBox, ComboBox, Label, Number, TextBox},
@@ -64,7 +64,7 @@ pub fn show_config_dialog(
     let chroma_key_color_textbox = TextBox::new()
         .position(20, 230)
         .size(245, 20)
-        .text(&default_config.chroma_key_target_color.to_string())
+        .text(&default_config.chroma_key_color.to_string())
         .enabled(default_config.chroma_key_enabled);
 
     let hue_range_label = Label::new("色相範囲（0-360）")
@@ -125,23 +125,22 @@ pub fn show_config_dialog(
 
                 let chroma_key_enabled = chroma_key_enabled_checkbox.is_checked();
 
-                let chroma_key_target_color =
-                    match TargetColor::parse(&chroma_key_color_textbox.get_text()) {
-                        Ok(color) => color,
-                        Err(e) => {
-                            unsafe {
-                                let error_msg =
-                                    widestring::U16CString::from_str(&e).unwrap_or_default();
-                                MessageBoxW(
-                                    Some(parent_hwnd),
-                                    PCWSTR(error_msg.as_ptr()),
-                                    w!("エラー"),
-                                    MB_OK | MB_ICONERROR,
-                                );
-                            }
-                            return Ok(());
+                let chroma_key_color = match KeyColor::parse(&chroma_key_color_textbox.get_text()) {
+                    Ok(color) => color,
+                    Err(e) => {
+                        unsafe {
+                            let error_msg =
+                                widestring::U16CString::from_str(&e).unwrap_or_default();
+                            MessageBoxW(
+                                Some(parent_hwnd),
+                                PCWSTR(error_msg.as_ptr()),
+                                w!("エラー"),
+                                MB_OK | MB_ICONERROR,
+                            );
                         }
-                    };
+                        return Ok(());
+                    }
+                };
 
                 let chroma_key_hue_range = match hue_range_textbox.get_value::<u16>() {
                     Ok(value) => value,
@@ -180,7 +179,7 @@ pub fn show_config_dialog(
                         color_format,
                         threads: Config::default().threads,
                         chroma_key_enabled,
-                        chroma_key_target_color,
+                        chroma_key_color,
                         chroma_key_hue_range,
                         chroma_key_saturation_range,
                     });
