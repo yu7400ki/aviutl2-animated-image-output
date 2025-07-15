@@ -13,8 +13,8 @@ name = "apng_output"
 version = "0.0.0"
 dependencies = [
  "aviutl",
+ "chroma_key",
  "dialog",
- "palette",
  "png",
  "rust-ini",
  "widestring",
@@ -89,6 +89,13 @@ name = "cfg-if"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9555578bc9e57714c812a1f84e4fc5b4d21fcb063490c624de019f7464c91268"
+
+[[package]]
+name = "chroma_key"
+version = "0.0.0"
+dependencies = [
+ "palette",
+]
 
 [[package]]
 name = "cmake"

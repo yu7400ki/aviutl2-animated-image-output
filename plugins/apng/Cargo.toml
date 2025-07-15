@@ -13,7 +13,7 @@ rgba = []
 [dependencies]
 aviutl = { path = "../../libs/aviutl" }
 dialog = { path = "../../libs/dialog" }
-palette = { version = "0.7" }
+chroma_key = { path = "../../libs/chroma_key" }
 png = { version = "0.17" }
 rust-ini = { workspace = true }
 widestring = { workspace = true }
