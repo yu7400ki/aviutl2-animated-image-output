@@ -1,10 +1,10 @@
 [package]
-name = "avif_export"
+name = "avif_output"
 version = "0.0.0"
 edition = "2024"
 
 [lib]
-name = "avif_export"
+name = "avif_output"
 crate-type = ["cdylib"]
 
 [features]

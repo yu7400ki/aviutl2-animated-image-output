@@ -1,10 +1,10 @@
 [package]
-name = "apng_export"
+name = "apng_output"
 version = "0.0.0"
 edition = "2024"
 
 [lib]
-name = "apng_export"
+name = "apng_output"
 crate-type = ["cdylib"]
 
 [features]

@@ -15,9 +15,9 @@ AviUtl ExEdit2 で動画をアニメーション画像として出力できる�
 
 ## インストール
 
-1. [Release](https://github.com/yu7400ki/aviutl2-animated-image-export/releases) から最新版のプラグインファイルをダウンロード
+1. [Release](https://github.com/yu7400ki/aviutl2-animated-image-output/releases) から最新版のプラグインファイルをダウンロード
 2. ダウンロードした auo2 ファイルを `%ProgramData%\aviutl2\Plugin` フォルダにコピー
-   - 例: `C:\ProgramData\aviutl2\Plugin\apng_export.auo2`
+   - 例: `C:\ProgramData\aviutl2\Plugin\apng_output.auo2`
 3. AviUtl2 を再起動
 
 ## 使い方

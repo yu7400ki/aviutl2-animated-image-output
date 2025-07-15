@@ -1,10 +1,10 @@
 [package]
-name = "gif_export"
+name = "gif_output"
 version = "0.0.0"
 edition = "2024"
 
 [lib]
-name = "gif_export"
+name = "gif_output"
 crate-type = ["cdylib"]
 
 [features]

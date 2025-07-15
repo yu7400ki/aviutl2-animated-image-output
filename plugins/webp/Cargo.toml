@@ -1,10 +1,10 @@
 [package]
-name = "webp_export"
+name = "webp_output"
 version = "0.0.0"
 edition = "2024"
 
 [lib]
-name = "webp_export"
+name = "webp_output"
 crate-type = ["cdylib"]
 
 [features]
