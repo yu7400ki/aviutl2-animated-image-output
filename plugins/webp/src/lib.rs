@@ -7,13 +7,12 @@ use aviutl::output2::{OutputInfo, OutputPluginTable};
 #[cfg(feature = "rgba")]
 use aviutl::patch::{apply_rgba_patch, restore_rgba_patch};
 use chroma_key::apply_chroma_key;
-use dialog::MessageBox;
-use std::ffi::c_void;
-use widestring::{U16CStr, Utf16Str, utf16str};
-use windows::{Win32::Foundation::*, core::*};
-
 use config::{ColorFormat, Config};
 use dialog::show_config_dialog;
+use std::ffi::c_void;
+use widestring::{U16CStr, Utf16Str, utf16str};
+use win32_dialog::MessageBox;
+use windows::{Win32::Foundation::*, core::*};
 
 fn create_webp_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
     let output_path = unsafe { U16CStr::from_ptr_str(info.savefile).to_string_lossy() };

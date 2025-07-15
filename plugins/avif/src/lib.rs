@@ -5,10 +5,10 @@ use aviutl::output2::{OutputInfo, OutputPluginTable};
 #[cfg(feature = "rgba")]
 use aviutl::patch::{apply_rgba_patch, restore_rgba_patch};
 use chroma_key::apply_chroma_key;
-pub use dialog::MessageBox;
 use libavif::{Encoder, RgbPixels, YuvFormat};
 use std::ffi::c_void;
 use widestring::{U16CStr, Utf16Str, utf16str};
+use win32_dialog::MessageBox;
 use windows::{Win32::Foundation::*, core::*};
 
 use config::{ColorFormat, Config};

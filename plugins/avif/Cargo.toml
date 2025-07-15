@@ -12,7 +12,7 @@ rgba = []
 
 [dependencies]
 aviutl = { path = "../../libs/aviutl" }
-dialog = { path = "../../libs/dialog" }
+win32_dialog = { path = "../../libs/dialog" }
 chroma_key = { path = "../../libs/chroma_key" }
 libavif = { version = "0.14.0", default-features = false, features = [
     "codec-aom",

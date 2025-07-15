@@ -1,9 +1,9 @@
 use crate::config::{ColorFormat, CompressionType, Config, FilterType, KeyColor};
-use dialog::{
+use std::sync::{Arc, Mutex};
+use win32_dialog::{
     Dialog, MessageBox,
     controls::{Button, CheckBox, ComboBox, Label, Number, TextBox},
 };
-use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::*;
 
 pub fn show_config_dialog(

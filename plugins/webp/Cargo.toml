@@ -12,7 +12,7 @@ rgba = []
 
 [dependencies]
 aviutl = { path = "../../libs/aviutl" }
-dialog = { path = "../../libs/dialog" }
+win32_dialog = { path = "../../libs/dialog" }
 chroma_key = { path = "../../libs/chroma_key" }
 rust-ini = { workspace = true }
 libwebp-sys = { version = "0.12" }

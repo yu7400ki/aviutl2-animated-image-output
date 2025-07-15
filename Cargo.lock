@@ -14,10 +14,10 @@ version = "0.0.0"
 dependencies = [
  "aviutl",
  "chroma_key",
- "dialog",
  "png",
  "rust-ini",
  "widestring",
+ "win32_dialog",
  "windows",
 ]
 
@@ -42,10 +42,10 @@ version = "0.0.0"
 dependencies = [
  "aviutl",
  "chroma_key",
- "dialog",
  "libavif",
  "rust-ini",
  "widestring",
+ "win32_dialog",
  "windows",
 ]
 
@@ -149,14 +149,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
-name = "dialog"
-version = "0.0.0"
-dependencies = [
- "widestring",
- "windows",
-]
-
-[[package]]
 name = "dlv-list"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -229,10 +221,10 @@ version = "0.0.0"
 dependencies = [
  "aviutl",
  "chroma_key",
- "dialog",
  "gif",
  "rust-ini",
  "widestring",
+ "win32_dialog",
  "windows",
 ]
 
@@ -535,10 +527,10 @@ version = "0.0.0"
 dependencies = [
  "aviutl",
  "chroma_key",
- "dialog",
  "libwebp-sys",
  "rust-ini",
  "widestring",
+ "win32_dialog",
  "windows",
 ]
 
@@ -553,6 +545,14 @@ name = "widestring"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd7cf3379ca1aac9eea11fba24fd7e315d621f8dfe35c8d7d2be8b793726e07d"
+
+[[package]]
+name = "win32_dialog"
+version = "0.0.0"
+dependencies = [
+ "widestring",
+ "windows",
+]
 
 [[package]]
 name = "windows"
