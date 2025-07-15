@@ -47,14 +47,19 @@ fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Res
         #[allow(unused_mut)]
         if let Some(mut image_data) = image_data {
             let mut gif_frame = match config.color_format {
-                ColorFormat::Palette => Frame::from_rgb(info.w as u16, info.h as u16, &image_data),
-                #[cfg(feature = "rgba")]
-                ColorFormat::Transparent => {
-                    Frame::from_rgba(info.w as u16, info.h as u16, &mut image_data)
+                ColorFormat::Palette => {
+                    Frame::from_rgb_speed(info.w as u16, info.h as u16, &image_data, config.speed)
                 }
+                #[cfg(feature = "rgba")]
+                ColorFormat::Transparent => Frame::from_rgba_speed(
+                    info.w as u16,
+                    info.h as u16,
+                    &mut image_data,
+                    config.speed,
+                ),
                 #[cfg(not(feature = "rgba"))]
                 ColorFormat::Transparent => {
-                    Frame::from_rgb(info.w as u16, info.h as u16, &image_data)
+                    Frame::from_rgb_speed(info.w as u16, info.h as u16, &image_data, config.speed)
                 }
             };
 

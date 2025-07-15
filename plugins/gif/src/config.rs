@@ -53,6 +53,7 @@ impl ColorFormat {
 pub struct Config {
     pub repeat: u16,
     pub color_format: ColorFormat,
+    pub speed: i32,
 }
 
 impl Default for Config {
@@ -60,6 +61,7 @@ impl Default for Config {
         Self {
             repeat: 0,
             color_format: ColorFormat::Palette,
+            speed: 10,
         }
     }
 }
@@ -69,6 +71,7 @@ impl Config {
         Self {
             repeat: 0,
             color_format: ColorFormat::Palette,
+            speed: 10,
         }
     }
 
@@ -129,9 +132,15 @@ impl Config {
             .and_then(|s| s.parse::<ColorFormat>().ok())
             .unwrap_or_default();
 
+        let speed = section
+            .and_then(|s| s.get("speed"))
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(default.speed);
+
         Self {
             repeat,
             color_format,
+            speed,
         }
     }
 
@@ -141,7 +150,8 @@ impl Config {
 
         ini.with_section(Some("Config"))
             .set("repeat", self.repeat.to_string())
-            .set("color_format", self.color_format.to_index().to_string());
+            .set("color_format", self.color_format.to_index().to_string())
+            .set("speed", self.speed.to_string());
 
         ini.write_to_file(&config_path).map_err(|e| e.to_string())
     }
