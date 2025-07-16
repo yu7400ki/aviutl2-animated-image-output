@@ -239,9 +239,6 @@ impl OutputPluginTable {
     pub const FLAG_AUDIO: c_int = 2;
 }
 
-unsafe impl Send for OutputPluginTable {}
-unsafe impl Sync for OutputPluginTable {}
-
 /// 画像フォーマット定数
 pub mod video_format {
     use crate::types::DWORD;

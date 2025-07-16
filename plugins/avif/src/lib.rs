@@ -152,9 +152,9 @@ extern "C" fn config_func(hwnd: HWND, _dll_hinst: HINSTANCE) -> bool {
     }
 }
 
-static PLUGIN_NAME: &Utf16Str = utf16str!("AVIF出力プラグイン\0");
-static FILE_FILTER: &Utf16Str = utf16str!("AVIF Files (*.avif)\0*.avif\0All Files (*)\0*\0\0");
-static PLUGIN_INFO: &Utf16Str = utf16str!(concat!(
+const PLUGIN_NAME: &Utf16Str = utf16str!("AVIF出力プラグイン\0");
+const FILE_FILTER: &Utf16Str = utf16str!("AVIF Files (*.avif)\0*.avif\0All Files (*)\0*\0\0");
+const PLUGIN_INFO: &Utf16Str = utf16str!(concat!(
     "AVIF出力プラグイン v",
     env!("CARGO_PKG_VERSION"),
     " by yu7400ki\0"
@@ -172,7 +172,7 @@ const fn init_plugin_table() -> OutputPluginTable {
     }
 }
 
-static OUTPUT_PLUGIN_TABLE: OutputPluginTable = init_plugin_table();
+const OUTPUT_PLUGIN_TABLE: OutputPluginTable = init_plugin_table();
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn DllMain(_hinst: HINSTANCE, _reason: u32, _reserved: *mut c_void) -> BOOL {

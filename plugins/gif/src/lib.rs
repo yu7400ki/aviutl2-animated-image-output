@@ -196,9 +196,9 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
     }
 }
 
-static PLUGIN_NAME: &Utf16Str = utf16str!("GIF出力プラグイン\0");
-static FILE_FILTER: &Utf16Str = utf16str!("GIF Files (*.gif)\0*.gif\0All Files (*)\0*\0\0");
-static PLUGIN_INFO: &Utf16Str = utf16str!(concat!(
+const PLUGIN_NAME: &Utf16Str = utf16str!("GIF出力プラグイン\0");
+const FILE_FILTER: &Utf16Str = utf16str!("GIF Files (*.gif)\0*.gif\0All Files (*)\0*\0\0");
+const PLUGIN_INFO: &Utf16Str = utf16str!(concat!(
     "GIF出力プラグイン v",
     env!("CARGO_PKG_VERSION"),
     " by yu7400ki\0"
@@ -216,7 +216,7 @@ const fn init_plugin_table() -> OutputPluginTable {
     }
 }
 
-static OUTPUT_PLUGIN_TABLE: OutputPluginTable = init_plugin_table();
+const OUTPUT_PLUGIN_TABLE: OutputPluginTable = init_plugin_table();
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn DllMain(_hinst: HINSTANCE, _reason: u32, _reserved: *mut c_void) -> BOOL {
