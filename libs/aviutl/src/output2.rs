@@ -141,14 +141,15 @@ impl OutputInfo {
                 std::slice::from_raw_parts(data_ptr as *const u8, (input_stride * self.h) as usize);
 
             let mut image_buffer = Vec::with_capacity((self.w * self.h * 3) as usize);
-            // BMPは下から上に格納されているので反転
+
+            // BMPは下から上に格納されているので反転してBGR→RGB変換
             for y in (0..self.h).rev() {
-                for x in 0..self.w {
-                    let offset = (y * input_stride + x * 3) as usize;
-                    // BGR -> RGB変換
-                    image_buffer.push(data_slice[offset + 2]); // R
-                    image_buffer.push(data_slice[offset + 1]); // G
-                    image_buffer.push(data_slice[offset]); // B
+                let row_start = (y * input_stride) as usize;
+                let row_end = row_start + (self.w * 3) as usize;
+                for bgr_pixel in data_slice[row_start..row_end].chunks_exact(3) {
+                    image_buffer.push(bgr_pixel[2]); // R
+                    image_buffer.push(bgr_pixel[1]); // G
+                    image_buffer.push(bgr_pixel[0]); // B
                 }
             }
             Some(image_buffer)
@@ -166,15 +167,16 @@ impl OutputInfo {
                 std::slice::from_raw_parts(data_ptr as *const u8, (input_stride * self.h) as usize);
 
             let mut image_buffer = Vec::with_capacity((self.w * self.h * 4) as usize);
-            // BMPは下から上に格納されているので反転
+
+            // BMPは下から上に格納されているので反転してBGR→RGBA変換
             for y in (0..self.h).rev() {
-                for x in 0..self.w {
-                    let offset = (y * input_stride + x * 4) as usize;
-                    // BGRA -> RGBA変換
-                    image_buffer.push(data_slice[offset + 2]); // R
-                    image_buffer.push(data_slice[offset + 1]); // G
-                    image_buffer.push(data_slice[offset]); // B
-                    image_buffer.push(data_slice[offset + 3]); // A
+                let row_start = (y * input_stride) as usize;
+                let row_end = row_start + (self.w * 4) as usize;
+                for bgra_pixel in data_slice[row_start..row_end].chunks_exact(4) {
+                    image_buffer.push(bgra_pixel[2]); // R
+                    image_buffer.push(bgra_pixel[1]); // G
+                    image_buffer.push(bgra_pixel[0]); // B
+                    image_buffer.push(bgra_pixel[3]); // A
                 }
             }
             Some(image_buffer)
@@ -192,14 +194,14 @@ impl OutputInfo {
                 std::slice::from_raw_parts(data_ptr as *const u8, (input_stride * self.h) as usize);
 
             let mut image_buffer = Vec::with_capacity((self.w * self.h * 4) as usize);
-            // BMPは下から上に格納されているので反転
+            // BMPは下から上に格納されているので反転してBGR→RGBA変換
             for y in (0..self.h).rev() {
-                for x in 0..self.w {
-                    let offset = (y * input_stride + x * 3) as usize;
-                    // BGR -> RGBA変換（アルファは255で初期化）
-                    image_buffer.push(data_slice[offset + 2]); // R
-                    image_buffer.push(data_slice[offset + 1]); // G
-                    image_buffer.push(data_slice[offset]); // B
+                let row_start = (y * input_stride) as usize;
+                let row_end = row_start + (self.w * 3) as usize;
+                for bgr_pixel in data_slice[row_start..row_end].chunks_exact(3) {
+                    image_buffer.push(bgr_pixel[2]); // R
+                    image_buffer.push(bgr_pixel[1]); // G
+                    image_buffer.push(bgr_pixel[0]); // B
                     image_buffer.push(255); // A（不透明）
                 }
             }
