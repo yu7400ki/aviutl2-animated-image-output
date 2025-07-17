@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "apng_output"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "aviutl",
  "chroma_key",
@@ -44,7 +44,7 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "avif_output"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "aviutl",
  "chroma_key",
@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "gif_output"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "aviutl",
  "chroma_key",
@@ -582,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "webp_output"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "aviutl",
  "chroma_key",
