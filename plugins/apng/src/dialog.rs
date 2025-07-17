@@ -2,7 +2,8 @@ use crate::config::{ColorFormat, CompressionType, Config, FilterType, KeyColor};
 use std::sync::{Arc, Mutex};
 use win32_dialog::{
     Dialog, MessageBox,
-    controls::{Button, CheckBox, ComboBox, Label, Number, TextBox},
+    layout::{FlexLayout, JustifyContent, SizeValue},
+    widget::{Button, ButtonEvent, CheckBox, CheckBoxEvent, ComboBox, Label, Number, TextBox},
 };
 use windows::Win32::Foundation::*;
 
@@ -12,55 +13,36 @@ pub fn show_config_dialog(
 ) -> std::result::Result<Option<Config>, ()> {
     let result = Arc::new(Mutex::new(None::<Config>));
 
-    let mut dialog = Dialog::create("APNG出力設定").size(300, 510);
-
-    // ループ回数設定
-    let repeat_label = Label::new("ループ回数 (0=無限ループ)")
-        .position(20, 15)
-        .size(245, 20);
+    // Create widgets
+    let repeat_label = Label::new("ループ回数 (0=無限ループ)");
     let repeat_input = Number::new()
-        .position(20, 35)
-        .size(245, 20)
         .value(default_config.repeat as i32)
         .range(0, i32::MAX);
 
-    // カラーフォーマット設定
-    let color_label = Label::new("カラーフォーマット")
-        .position(20, 70)
-        .size(245, 20);
+    #[cfg(feature = "rgba")]
+    let color_label = Label::new("カラーフォーマット");
     #[cfg(feature = "rgba")]
     let color_options = vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()];
-    #[cfg(not(feature = "rgba"))]
-    let color_options = vec![ColorFormat::Rgb24.into()];
-    let color_combobox = ComboBox::new(color_options)
-        .position(20, 90)
-        .size(245, 20)
-        .selected(match default_config.color_format {
-            ColorFormat::Rgb24 => 0,
-            #[cfg(feature = "rgba")]
-            ColorFormat::Rgba32 => 1,
-            #[cfg(not(feature = "rgba"))]
-            ColorFormat::Rgba32 => 0,
-        });
+    #[cfg(feature = "rgba")]
+    let color_combobox = ComboBox::new(color_options).selected(match default_config.color_format {
+        ColorFormat::Rgb24 => 0,
+        ColorFormat::Rgba32 => 1,
+    });
 
-    // 圧縮設定
-    let compression_label = Label::new("圧縮").position(20, 125).size(295, 20);
+    let compression_label = Label::new("圧縮");
     let compression_options = vec![
         CompressionType::Default.into(),
         CompressionType::Fast.into(),
         CompressionType::Best.into(),
     ];
-    let compression_combobox = ComboBox::new(compression_options)
-        .position(20, 145)
-        .size(245, 20)
-        .selected(match default_config.compression_type {
+    let compression_combobox =
+        ComboBox::new(compression_options).selected(match default_config.compression_type {
             CompressionType::Default => 0,
             CompressionType::Fast => 1,
             CompressionType::Best => 2,
         });
 
-    // フィルター設定
-    let filter_label = Label::new("フィルター").position(20, 180).size(295, 20);
+    let filter_label = Label::new("フィルター");
     let filter_options = vec![
         FilterType::None.into(),
         FilterType::Sub.into(),
@@ -68,10 +50,8 @@ pub fn show_config_dialog(
         FilterType::Average.into(),
         FilterType::Paeth.into(),
     ];
-    let filter_combobox = ComboBox::new(filter_options)
-        .position(20, 200)
-        .size(245, 20)
-        .selected(match default_config.filter_type {
+    let filter_combobox =
+        ComboBox::new(filter_options).selected(match default_config.filter_type {
             FilterType::None => 0,
             FilterType::Sub => 1,
             FilterType::Up => 2,
@@ -79,59 +59,50 @@ pub fn show_config_dialog(
             FilterType::Paeth => 4,
         });
 
-    let chroma_key_enabled_checkbox = CheckBox::new("クロマキー透過を有効にする")
-        .position(20, 240)
-        .size(245, 20)
-        .checked(default_config.chroma_key_enabled);
+    let chroma_key_enabled_checkbox =
+        CheckBox::new("クロマキー透過を有効にする").checked(default_config.chroma_key_enabled);
 
-    let chroma_key_color_label = Label::new("基準色（例:#0000FF）")
-        .position(20, 270)
-        .size(245, 20);
+    let chroma_key_color_label = Label::new("基準色（例:#0000FF）");
+    let chroma_key_color_textbox =
+        TextBox::new().text(&default_config.chroma_key_color.to_string());
 
-    let chroma_key_color_textbox = TextBox::new()
-        .position(20, 290)
-        .size(245, 20)
-        .text(&default_config.chroma_key_color.to_string())
-        .enabled(default_config.chroma_key_enabled);
-
-    let hue_range_label = Label::new("色相範囲（0-360）")
-        .position(20, 320)
-        .size(245, 20);
-
+    let hue_range_label = Label::new("色相範囲（0-360）");
     let hue_range_textbox = Number::new()
-        .position(20, 340)
-        .size(245, 20)
         .value(default_config.chroma_key_hue_range as i32)
-        .range(0, 360)
-        .enabled(default_config.chroma_key_enabled);
+        .range(0, 360);
 
-    let saturation_range_label = Label::new("彩度範囲（0-100）")
-        .position(20, 370)
-        .size(245, 20);
-
+    let saturation_range_label = Label::new("彩度範囲（0-100）");
     let saturation_range_textbox = Number::new()
-        .position(20, 390)
-        .size(245, 20)
         .value(default_config.chroma_key_saturation_range as i32)
-        .range(0, 100)
-        .enabled(default_config.chroma_key_enabled);
+        .range(0, 100);
 
-    let chroma_key_enabled_checkbox = chroma_key_enabled_checkbox.on_change({
+    // Initially set enabled state based on checkbox
+    if !default_config.chroma_key_enabled {
+        chroma_key_color_textbox.set_enabled(false);
+        hue_range_textbox.set_enabled(false);
+        saturation_range_textbox.set_enabled(false);
+    }
+
+    // Handle checkbox change events
+    let chroma_key_enabled_checkbox = chroma_key_enabled_checkbox.add_event_handler({
         let chroma_key_color_textbox = chroma_key_color_textbox.clone();
         let hue_range_textbox = hue_range_textbox.clone();
         let saturation_range_textbox = saturation_range_textbox.clone();
-        move |checked| {
-            chroma_key_color_textbox.set_enabled(checked);
-            hue_range_textbox.set_enabled(checked);
-            saturation_range_textbox.set_enabled(checked);
-            Ok(())
+        move |event| match event {
+            CheckBoxEvent::Changed(checked) => {
+                chroma_key_color_textbox.set_enabled(checked);
+                hue_range_textbox.set_enabled(checked);
+                saturation_range_textbox.set_enabled(checked);
+            }
         }
     });
 
-    let ok_button = Button::new("OK").position(95, 430).size(80, 25).on_click({
+    let mut dialog = Dialog::new("APNG出力設定");
+
+    let ok_button = Button::new("OK").add_event_handler({
         let result = Arc::clone(&result);
-        let dialog = dialog.clone();
         let repeat_input = repeat_input.clone();
+        #[cfg(feature = "rgba")]
         let color_combobox = color_combobox.clone();
         let compression_combobox = compression_combobox.clone();
         let filter_combobox = filter_combobox.clone();
@@ -139,130 +110,184 @@ pub fn show_config_dialog(
         let chroma_key_color_textbox = chroma_key_color_textbox.clone();
         let hue_range_textbox = hue_range_textbox.clone();
         let saturation_range_textbox = saturation_range_textbox.clone();
-        move || {
-            if let Ok(repeat) = repeat_input.get_value::<u32>() {
-                let color_format = match color_combobox.get_selected_index() {
-                    0 => ColorFormat::Rgb24,
-                    #[cfg(feature = "rgba")]
-                    1 => ColorFormat::Rgba32,
-                    _ => Default::default(),
-                };
-                let compression_type = match compression_combobox.get_selected_index() {
-                    0 => CompressionType::Default,
-                    1 => CompressionType::Fast,
-                    2 => CompressionType::Best,
-                    _ => Default::default(),
-                };
-                let filter_type = match filter_combobox.get_selected_index() {
-                    0 => FilterType::None,
-                    1 => FilterType::Sub,
-                    2 => FilterType::Up,
-                    3 => FilterType::Average,
-                    4 => FilterType::Paeth,
-                    _ => Default::default(),
-                };
-
-                let chroma_key_enabled = chroma_key_enabled_checkbox.is_checked();
-
-                let chroma_key_target_color =
-                    match KeyColor::parse(&chroma_key_color_textbox.get_text()) {
-                        Ok(color) => color,
-                        Err(e) => {
-                            MessageBox::error(Some(parent_hwnd), &e, "エラー");
-                            return Ok(());
-                        }
-                    };
-
-                let chroma_key_hue_range = match hue_range_textbox.get_value::<u16>() {
-                    Ok(value) => value,
-                    Err(_) => {
-                        MessageBox::error(
-                            Some(parent_hwnd),
-                            "色相範囲の値が無効です。0-360の値を入力してください。",
-                            "エラー",
-                        );
-                        return Ok(());
-                    }
-                };
-
-                let chroma_key_saturation_range = match saturation_range_textbox.get_value::<u8>() {
-                    Ok(value) => value,
-                    Err(_) => {
-                        MessageBox::error(
-                            Some(parent_hwnd),
-                            "彩度範囲の値が無効です。0-100の値を入力してください。",
-                            "エラー",
-                        );
-                        return Ok(());
-                    }
-                };
-
-                if let Ok(mut guard) = result.lock() {
-                    *guard = Some(Config {
-                        repeat,
-                        color_format,
-                        compression_type,
-                        filter_type,
-                        chroma_key_enabled,
-                        chroma_key_color: chroma_key_target_color,
-                        chroma_key_hue_range,
-                        chroma_key_saturation_range,
-                    });
-                    dialog.close();
-                } else {
+        let dialog = dialog.clone();
+        move |_: ButtonEvent| {
+            let repeat = match repeat_input.get_value::<u32>() {
+                Ok(value) => value,
+                Err(_) => {
                     MessageBox::error(
                         Some(parent_hwnd),
-                        "内部エラー: 設定の保存に失敗しました。",
+                        "無効な数値です。正しい数値を入力してください。",
                         "エラー",
                     );
+                    return;
                 }
+            };
+            #[cfg(feature = "rgba")]
+            let color_format = match color_combobox.get_selected_index() {
+                0 => ColorFormat::Rgb24,
+                #[cfg(feature = "rgba")]
+                1 => ColorFormat::Rgba32,
+                _ => Default::default(),
+            };
+            let compression_type = match compression_combobox.get_selected_index() {
+                0 => CompressionType::Default,
+                1 => CompressionType::Fast,
+                2 => CompressionType::Best,
+                _ => Default::default(),
+            };
+            let filter_type = match filter_combobox.get_selected_index() {
+                0 => FilterType::None,
+                1 => FilterType::Sub,
+                2 => FilterType::Up,
+                3 => FilterType::Average,
+                4 => FilterType::Paeth,
+                _ => Default::default(),
+            };
+
+            let chroma_key_enabled = chroma_key_enabled_checkbox.is_checked();
+
+            let chroma_key_color = match KeyColor::parse(&chroma_key_color_textbox.get_text()) {
+                Ok(color) => color,
+                Err(e) => {
+                    MessageBox::error(Some(parent_hwnd), &e, "エラー");
+                    return;
+                }
+            };
+
+            let chroma_key_hue_range = match hue_range_textbox.get_value::<u16>() {
+                Ok(value) => value,
+                Err(_) => {
+                    MessageBox::error(
+                        Some(parent_hwnd),
+                        "色相範囲の値が無効です。0-360の値を入力してください。",
+                        "エラー",
+                    );
+                    return;
+                }
+            };
+
+            let chroma_key_saturation_range = match saturation_range_textbox.get_value::<u8>() {
+                Ok(value) => value,
+                Err(_) => {
+                    MessageBox::error(
+                        Some(parent_hwnd),
+                        "彩度範囲の値が無効です。0-100の値を入力してください。",
+                        "エラー",
+                    );
+                    return;
+                }
+            };
+
+            if let Ok(mut guard) = result.lock() {
+                *guard = Some(Config {
+                    repeat,
+                    #[cfg(feature = "rgba")]
+                    color_format,
+                    #[cfg(not(feature = "rgba"))]
+                    color_format: ColorFormat::Rgb24, // Default for non-RGBA builds
+                    compression_type,
+                    filter_type,
+                    chroma_key_enabled,
+                    chroma_key_color,
+                    chroma_key_hue_range,
+                    chroma_key_saturation_range,
+                });
+                dialog.close();
             } else {
                 MessageBox::error(
                     Some(parent_hwnd),
-                    "無効な数値です。正しい数値を入力してください。",
+                    "内部エラー: 設定の保存に失敗しました。",
                     "エラー",
                 );
             }
-            Ok(())
         }
     });
 
-    let cancel_button = Button::new("キャンセル")
-        .position(185, 430)
-        .size(80, 25)
-        .on_click({
-            let dialog = dialog.clone();
-            move || {
-                dialog.close();
-                Ok(())
-            }
-        });
+    let cancel_button = Button::new("キャンセル").add_event_handler({
+        let dialog = dialog.clone();
+        move |_| {
+            dialog.close();
+        }
+    });
 
-    dialog = dialog
-        .with_control(repeat_label)
-        .with_control(repeat_input)
-        .with_control(color_label)
-        .with_control(color_combobox)
-        .with_control(compression_label)
-        .with_control(compression_combobox)
-        .with_control(filter_label)
-        .with_control(filter_combobox)
-        .with_control(chroma_key_enabled_checkbox)
-        .with_control(chroma_key_color_label)
-        .with_control(chroma_key_color_textbox)
-        .with_control(hue_range_label)
-        .with_control(hue_range_textbox)
-        .with_control(saturation_range_label)
-        .with_control(saturation_range_textbox)
-        .with_control(ok_button)
-        .with_control(cancel_button);
+    // Create layout with sections
+    let mut layout = FlexLayout::column()
+        .with_width(SizeValue::Points(300.0))
+        .with_padding(15.0)
+        .with_gap(10.0);
 
-    if dialog.open(parent_hwnd).is_ok() {
-        match result.lock() {
+    // Basic Settings Section
+    layout = layout.with_layout(
+        FlexLayout::column()
+            .with_gap(5.0)
+            .with_widget(repeat_label)
+            .with_widget(repeat_input),
+    );
+
+    // Color Format Section (only if RGBA feature is enabled)
+    #[cfg(feature = "rgba")]
+    {
+        layout = layout.with_layout(
+            FlexLayout::column()
+                .with_widget(color_label)
+                .with_widget(color_combobox),
+        );
+    }
+
+    // Compression Settings Section
+    layout = layout
+        .with_layout(
+            FlexLayout::column()
+                .with_gap(5.0)
+                .with_widget(compression_label)
+                .with_widget(compression_combobox),
+        )
+        .with_layout(
+            FlexLayout::column()
+                .with_gap(5.0)
+                .with_widget(filter_label)
+                .with_widget(filter_combobox),
+        );
+
+    layout = layout
+        .with_widget(chroma_key_enabled_checkbox)
+        .with_layout(
+            FlexLayout::column()
+                .with_gap(5.0)
+                .with_widget(chroma_key_color_label)
+                .with_widget(chroma_key_color_textbox),
+        )
+        .with_layout(
+            FlexLayout::column()
+                .with_gap(5.0)
+                .with_widget(hue_range_label)
+                .with_widget(hue_range_textbox),
+        )
+        .with_layout(
+            FlexLayout::column()
+                .with_gap(5.0)
+                .with_widget(saturation_range_label)
+                .with_widget(saturation_range_textbox),
+        );
+
+    // Buttons Section
+    let buttons_section = FlexLayout::row()
+        .with_gap(10.0)
+        .with_padding_rect(0.0, 0.0, 5.0, 0.0)
+        .with_justify_content(JustifyContent::End)
+        .with_widget(ok_button)
+        .with_widget(cancel_button);
+
+    layout = layout.with_layout(buttons_section);
+
+    dialog = dialog.with_layout(layout);
+
+    match dialog.open(parent_hwnd) {
+        Ok(()) => match result.lock() {
             Ok(guard) => Ok(guard.clone()),
             Err(_) => Err(()),
-        }
-    } else {
-        Err(())
+        },
+        Err(_) => Err(()),
     }
 }

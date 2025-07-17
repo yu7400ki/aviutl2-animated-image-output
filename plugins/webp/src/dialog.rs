@@ -2,7 +2,8 @@ use crate::config::{ColorFormat, Config, KeyColor};
 use std::sync::{Arc, Mutex};
 use win32_dialog::{
     Dialog, MessageBox,
-    controls::{Button, CheckBox, ComboBox, Label, Number, TextBox},
+    layout::{FlexLayout, JustifyContent, SizeValue},
+    widget::{Button, ButtonEvent, CheckBox, CheckBoxEvent, Label, Number, TextBox},
 };
 use windows::Win32::Foundation::*;
 
@@ -12,119 +13,94 @@ pub fn show_config_dialog(
 ) -> std::result::Result<Option<Config>, ()> {
     let result = Arc::new(Mutex::new(None::<Config>));
 
-    let mut dialog = Dialog::create("WebP出力設定").size(300, 520);
-
-    let number_input_label = Label::new("ループ回数 (0=無限ループ)")
-        .position(20, 15)
-        .size(245, 20);
-    let number_input = Number::new()
-        .position(20, 35)
-        .size(245, 20)
+    // Create widgets
+    let repeat_label = Label::new("ループ回数 (0=無限ループ)");
+    let repeat_input = Number::new()
         .value(default_config.repeat as i32)
         .range(0, i32::MAX);
 
-    let color_combo_label = Label::new("カラーフォーマット")
-        .position(20, 70)
-        .size(245, 20);
-    let color_options = vec![
-        ColorFormat::Rgb24.into(),
-        #[cfg(feature = "rgba")]
-        ColorFormat::Rgba32.into(),
-    ];
-    let color_combobox = ComboBox::new(color_options)
-        .position(20, 90)
-        .size(245, 100)
-        .selected(match default_config.color_format {
-            ColorFormat::Rgb24 => 0,
-            #[cfg(feature = "rgba")]
-            ColorFormat::Rgba32 => 1,
-            #[cfg(not(feature = "rgba"))]
-            ColorFormat::Rgba32 => 0,
-        });
+    #[cfg(feature = "rgba")]
+    let color_label = Label::new("カラーフォーマット");
+    #[cfg(feature = "rgba")]
+    let color_options = vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()];
+    #[cfg(feature = "rgba")]
+    let color_combobox = ComboBox::new(color_options).selected(match default_config.color_format {
+        ColorFormat::Rgb24 => 0,
+        ColorFormat::Rgba32 => 1,
+    });
 
-    let quality_label = Label::new("品質 (0-100)").position(20, 155).size(245, 20);
+    let lossless_checkbox = CheckBox::new("ロスレス圧縮").checked(default_config.lossless);
+
+    let quality_label = Label::new("品質 (0-100)");
     let quality_input = Number::new()
-        .position(20, 175)
-        .size(245, 20)
         .value(default_config.quality as i32)
-        .range(0, 100)
-        .enabled(!default_config.lossless);
+        .range(0, 100);
 
-    let method_label = Label::new("圧縮方法 (0-6)").position(20, 205).size(245, 20);
+    let method_label = Label::new("圧縮方法 (0-6)");
     let method_input = Number::new()
-        .position(20, 225)
-        .size(245, 20)
         .value(default_config.method as i32)
-        .range(0, 6)
-        .enabled(!default_config.lossless);
+        .range(0, 6);
 
-    let lossless_checkbox = CheckBox::new("ロスレス圧縮")
-        .position(20, 125)
-        .size(245, 20)
-        .checked(default_config.lossless)
-        .on_change({
-            let quality_input = quality_input.clone();
-            let method_input = method_input.clone();
-            move |checked| {
+    // Initially set enabled state based on lossless checkbox
+    if default_config.lossless {
+        quality_input.set_enabled(false);
+        method_input.set_enabled(false);
+    }
+
+    let lossless_checkbox = lossless_checkbox.add_event_handler({
+        let quality_input = quality_input.clone();
+        let method_input = method_input.clone();
+        move |event| match event {
+            CheckBoxEvent::Changed(checked) => {
                 quality_input.set_enabled(!checked);
                 method_input.set_enabled(!checked);
-                Ok(())
             }
-        });
-
-    let chroma_key_enabled_checkbox = CheckBox::new("クロマキー透過を有効にする")
-        .position(20, 255)
-        .size(245, 20)
-        .checked(default_config.chroma_key_enabled);
-
-    let chroma_key_color_label = Label::new("基準色（例:#0000FF）")
-        .position(20, 285)
-        .size(245, 20);
-
-    let chroma_key_color_textbox = TextBox::new()
-        .position(20, 305)
-        .size(245, 20)
-        .text(&default_config.chroma_key_color.to_string())
-        .enabled(default_config.chroma_key_enabled);
-
-    let hue_range_label = Label::new("色相範囲（0-360）")
-        .position(20, 335)
-        .size(245, 20);
-
-    let hue_range_textbox = Number::new()
-        .position(20, 355)
-        .size(245, 20)
-        .value(default_config.chroma_key_hue_range as i32)
-        .range(0, 360)
-        .enabled(default_config.chroma_key_enabled);
-
-    let saturation_range_label = Label::new("彩度範囲（0-100）")
-        .position(20, 385)
-        .size(245, 20);
-
-    let saturation_range_textbox = Number::new()
-        .position(20, 405)
-        .size(245, 20)
-        .value(default_config.chroma_key_saturation_range as i32)
-        .range(0, 100)
-        .enabled(default_config.chroma_key_enabled);
-
-    let chroma_key_enabled_checkbox = chroma_key_enabled_checkbox.on_change({
-        let chroma_key_color_textbox = chroma_key_color_textbox.clone();
-        let hue_range_textbox = hue_range_textbox.clone();
-        let saturation_range_textbox = saturation_range_textbox.clone();
-        move |checked| {
-            chroma_key_color_textbox.set_enabled(checked);
-            hue_range_textbox.set_enabled(checked);
-            saturation_range_textbox.set_enabled(checked);
-            Ok(())
         }
     });
 
-    let ok_button = Button::new("OK").position(95, 445).size(80, 25).on_click({
+    let chroma_key_enabled_checkbox =
+        CheckBox::new("クロマキー透過を有効にする").checked(default_config.chroma_key_enabled);
+
+    let chroma_key_color_label = Label::new("基準色（例:#0000FF）");
+    let chroma_key_color_textbox =
+        TextBox::new().text(&default_config.chroma_key_color.to_string());
+
+    let hue_range_label = Label::new("色相範囲（0-360）");
+    let hue_range_textbox = Number::new()
+        .value(default_config.chroma_key_hue_range as i32)
+        .range(0, 360);
+
+    let saturation_range_label = Label::new("彩度範囲（0-100）");
+    let saturation_range_textbox = Number::new()
+        .value(default_config.chroma_key_saturation_range as i32)
+        .range(0, 100);
+
+    // Initially set enabled state based on chroma key checkbox
+    if !default_config.chroma_key_enabled {
+        chroma_key_color_textbox.set_enabled(false);
+        hue_range_textbox.set_enabled(false);
+        saturation_range_textbox.set_enabled(false);
+    }
+
+    let chroma_key_enabled_checkbox = chroma_key_enabled_checkbox.add_event_handler({
+        let chroma_key_color_textbox = chroma_key_color_textbox.clone();
+        let hue_range_textbox = hue_range_textbox.clone();
+        let saturation_range_textbox = saturation_range_textbox.clone();
+        move |event| match event {
+            CheckBoxEvent::Changed(checked) => {
+                chroma_key_color_textbox.set_enabled(checked);
+                hue_range_textbox.set_enabled(checked);
+                saturation_range_textbox.set_enabled(checked);
+            }
+        }
+    });
+
+    let mut dialog = Dialog::new("WebP出力設定");
+
+    let ok_button = Button::new("OK").add_event_handler({
         let result = Arc::clone(&result);
-        let dialog = dialog.clone();
-        let number_input = number_input.clone();
+        let repeat_input = repeat_input.clone();
+        #[cfg(feature = "rgba")]
         let color_combobox = color_combobox.clone();
         let lossless_checkbox = lossless_checkbox.clone();
         let quality_input = quality_input.clone();
@@ -133,129 +109,208 @@ pub fn show_config_dialog(
         let chroma_key_color_textbox = chroma_key_color_textbox.clone();
         let hue_range_textbox = hue_range_textbox.clone();
         let saturation_range_textbox = saturation_range_textbox.clone();
-        move || {
-            if let Ok(value) = number_input.get_value::<i32>() {
-                let color_format = match color_combobox.get_selected_index() {
-                    0 => ColorFormat::Rgb24,
-                    #[cfg(feature = "rgba")]
-                    1 => ColorFormat::Rgba32,
-                    _ => ColorFormat::Rgb24,
-                };
-                let lossless = lossless_checkbox.is_checked();
-                let quality = if lossless {
-                    100.0
-                } else {
-                    quality_input.get_value::<i32>().unwrap_or(75) as f32
-                };
-                let method = if lossless {
-                    6
-                } else {
-                    method_input.get_value::<i32>().unwrap_or(4) as u8
-                };
-
-                let chroma_key_enabled = chroma_key_enabled_checkbox.is_checked();
-
-                let chroma_key_color = match KeyColor::parse(&chroma_key_color_textbox.get_text()) {
-                    Ok(color) => color,
-                    Err(e) => {
-                        MessageBox::error(Some(parent_hwnd), &e, "エラー");
-                        return Ok(());
-                    }
-                };
-
-                let chroma_key_hue_range = match hue_range_textbox.get_value::<u16>() {
-                    Ok(value) => value,
-                    Err(_) => {
-                        MessageBox::error(
-                            Some(parent_hwnd),
-                            "色相範囲の値が無効です。0-360の値を入力してください。",
-                            "エラー",
-                        );
-                        return Ok(());
-                    }
-                };
-
-                let chroma_key_saturation_range = match saturation_range_textbox.get_value::<u8>() {
-                    Ok(value) => value,
-                    Err(_) => {
-                        MessageBox::error(
-                            Some(parent_hwnd),
-                            "彩度範囲の値が無効です。0-100の値を入力してください。",
-                            "エラー",
-                        );
-                        return Ok(());
-                    }
-                };
-
-                if let Ok(mut guard) = result.lock() {
-                    *guard = Some(Config {
-                        repeat: value,
-                        color_format,
-                        lossless,
-                        quality,
-                        method,
-                        chroma_key_enabled,
-                        chroma_key_color,
-                        chroma_key_hue_range,
-                        chroma_key_saturation_range,
-                    });
-
-                    dialog.close();
-                } else {
+        let dialog = dialog.clone();
+        move |_: ButtonEvent| {
+            let repeat = match repeat_input.get_value::<i32>() {
+                Ok(value) => value,
+                Err(_) => {
                     MessageBox::error(
                         Some(parent_hwnd),
-                        "内部エラー: 設定の保存に失敗しました。",
+                        "ループ回数の値が無効です。正しい数値を入力してください。",
                         "エラー",
                     );
+                    return;
                 }
+            };
+
+            #[cfg(feature = "rgba")]
+            let color_format = match color_combobox.get_selected_index() {
+                0 => ColorFormat::Rgb24,
+                #[cfg(feature = "rgba")]
+                1 => ColorFormat::Rgba32,
+                _ => Default::default(),
+            };
+
+            let lossless = lossless_checkbox.is_checked();
+
+            let quality = if lossless {
+                100.0
+            } else {
+                match quality_input.get_value::<i32>() {
+                    Ok(value) => value as f32,
+                    Err(_) => {
+                        MessageBox::error(
+                            Some(parent_hwnd),
+                            "品質の値が無効です。0-100の値を入力してください。",
+                            "エラー",
+                        );
+                        return;
+                    }
+                }
+            };
+
+            let method = if lossless {
+                6
+            } else {
+                match method_input.get_value::<i32>() {
+                    Ok(value) => value as u8,
+                    Err(_) => {
+                        MessageBox::error(
+                            Some(parent_hwnd),
+                            "圧縮方法の値が無効です。0-6の値を入力してください。",
+                            "エラー",
+                        );
+                        return;
+                    }
+                }
+            };
+
+            let chroma_key_enabled = chroma_key_enabled_checkbox.is_checked();
+
+            let chroma_key_color = match KeyColor::parse(&chroma_key_color_textbox.get_text()) {
+                Ok(color) => color,
+                Err(e) => {
+                    MessageBox::error(Some(parent_hwnd), &e, "エラー");
+                    return;
+                }
+            };
+
+            let chroma_key_hue_range = match hue_range_textbox.get_value::<u16>() {
+                Ok(value) => value,
+                Err(_) => {
+                    MessageBox::error(
+                        Some(parent_hwnd),
+                        "色相範囲の値が無効です。0-360の値を入力してください。",
+                        "エラー",
+                    );
+                    return;
+                }
+            };
+
+            let chroma_key_saturation_range = match saturation_range_textbox.get_value::<u8>() {
+                Ok(value) => value,
+                Err(_) => {
+                    MessageBox::error(
+                        Some(parent_hwnd),
+                        "彩度範囲の値が無効です。0-100の値を入力してください。",
+                        "エラー",
+                    );
+                    return;
+                }
+            };
+
+            if let Ok(mut guard) = result.lock() {
+                *guard = Some(Config {
+                    repeat,
+                    #[cfg(feature = "rgba")]
+                    color_format,
+                    #[cfg(not(feature = "rgba"))]
+                    color_format: ColorFormat::Rgb24,
+                    lossless,
+                    quality,
+                    method,
+                    chroma_key_enabled,
+                    chroma_key_color,
+                    chroma_key_hue_range,
+                    chroma_key_saturation_range,
+                });
+                dialog.close();
             } else {
                 MessageBox::error(
                     Some(parent_hwnd),
-                    "無効な数値です。0以上の整数を入力してください。",
+                    "内部エラー: 設定の保存に失敗しました。",
                     "エラー",
                 );
             }
-            Ok(())
         }
     });
 
-    let cancel_button = Button::new("キャンセル")
-        .position(185, 445)
-        .size(80, 25)
-        .on_click({
-            let dialog = dialog.clone();
-            move || {
-                dialog.close();
-                Ok(())
-            }
-        });
+    let cancel_button = Button::new("キャンセル").add_event_handler({
+        let dialog = dialog.clone();
+        move |_| {
+            dialog.close();
+        }
+    });
 
-    dialog = dialog
-        .with_control(number_input_label)
-        .with_control(number_input)
-        .with_control(color_combo_label)
-        .with_control(color_combobox)
-        .with_control(lossless_checkbox)
-        .with_control(quality_label)
-        .with_control(quality_input)
-        .with_control(method_label)
-        .with_control(method_input)
-        .with_control(chroma_key_enabled_checkbox)
-        .with_control(chroma_key_color_label)
-        .with_control(chroma_key_color_textbox)
-        .with_control(hue_range_label)
-        .with_control(hue_range_textbox)
-        .with_control(saturation_range_label)
-        .with_control(saturation_range_textbox)
-        .with_control(ok_button)
-        .with_control(cancel_button);
+    // Create layout with sections
+    let mut layout = FlexLayout::column()
+        .with_width(SizeValue::Points(300.0))
+        .with_padding(15.0)
+        .with_gap(10.0);
 
-    if dialog.open(parent_hwnd).is_ok() {
-        match result.lock() {
+    // Basic Settings Section
+    layout = layout.with_layout(
+        FlexLayout::column()
+            .with_gap(5.0)
+            .with_widget(repeat_label)
+            .with_widget(repeat_input),
+    );
+
+    // Color Format Section (only if RGBA feature is enabled)
+    #[cfg(feature = "rgba")]
+    {
+        layout = layout.with_layout(
+            FlexLayout::column()
+                .with_widget(color_label)
+                .with_widget(color_combobox),
+        );
+    }
+
+    // Compression Settings Section
+    layout = layout
+        .with_widget(lossless_checkbox)
+        .with_layout(
+            FlexLayout::column()
+                .with_gap(5.0)
+                .with_widget(quality_label)
+                .with_widget(quality_input),
+        )
+        .with_layout(
+            FlexLayout::column()
+                .with_gap(5.0)
+                .with_widget(method_label)
+                .with_widget(method_input),
+        );
+
+    // Chroma Key Section
+    layout = layout
+        .with_widget(chroma_key_enabled_checkbox)
+        .with_layout(
+            FlexLayout::column()
+                .with_gap(5.0)
+                .with_widget(chroma_key_color_label)
+                .with_widget(chroma_key_color_textbox),
+        )
+        .with_layout(
+            FlexLayout::column()
+                .with_gap(5.0)
+                .with_widget(hue_range_label)
+                .with_widget(hue_range_textbox),
+        )
+        .with_layout(
+            FlexLayout::column()
+                .with_gap(5.0)
+                .with_widget(saturation_range_label)
+                .with_widget(saturation_range_textbox),
+        );
+
+    // Buttons Section
+    let buttons_section = FlexLayout::row()
+        .with_gap(10.0)
+        .with_padding_rect(0.0, 0.0, 5.0, 0.0)
+        .with_justify_content(JustifyContent::End)
+        .with_widget(ok_button)
+        .with_widget(cancel_button);
+
+    layout = layout.with_layout(buttons_section);
+
+    dialog = dialog.with_layout(layout);
+
+    match dialog.open(parent_hwnd) {
+        Ok(()) => match result.lock() {
             Ok(guard) => Ok(guard.clone()),
             Err(_) => Err(()),
-        }
-    } else {
-        Err(())
+        },
+        Err(_) => Err(()),
     }
 }
