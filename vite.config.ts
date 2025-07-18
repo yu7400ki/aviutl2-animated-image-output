@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
+import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import rsc from "@vitejs/plugin-rsc";
 import { defineConfig, type Plugin, type ResolvedConfig } from "vite";
@@ -24,6 +25,7 @@ export default defineConfig((env) => ({
     rscSsgPlugin(),
     inspect(),
     tsconfigPaths(),
+    tailwindcss(),
   ],
 }));
 

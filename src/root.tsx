@@ -1,4 +1,5 @@
 import { Counter } from "./counter";
+import "./index.css";
 
 export async function getStaticPaths() {
   return ["/"];
