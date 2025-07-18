@@ -84,29 +84,6 @@
   },
   "overrides": [
     {
-      "includes": ["**/*.test.ts"],
-      "linter": {
-        "rules": {
-          "style": {
-            "noNonNullAssertion": "off"
-          }
-        }
-      }
-    },
-    {
-      "includes": ["**/*.stories.tsx"],
-      "linter": {
-        "rules": {
-          "style": {
-            "noNonNullAssertion": "off"
-          },
-          "suspicious": {
-            "noConsole": "off"
-          }
-        }
-      }
-    },
-    {
       "includes": ["./*.ts", "./scripts/**/*.ts"],
       "linter": {
         "rules": {
@@ -115,18 +92,6 @@
           },
           "suspicious": {
             "noConsole": "off"
-          }
-        }
-      }
-    },
-    {
-      "includes": ["**/src/routes/**/*"],
-      "linter": {
-        "rules": {
-          "style": {
-            "useFilenamingConvention": {
-              "level": "off"
-            }
           }
         }
       }
