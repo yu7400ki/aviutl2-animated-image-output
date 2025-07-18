@@ -120,7 +120,7 @@ async function processReleases(
 
       pluginRelease[pluginType as Plugin] = {
         version: release.tag_name.slice(pluginConfig.tagPrefix.length),
-        date: release.published_at,
+        date: new Date(release.published_at).toISOString(),
         url: `/${asset.name}`,
       };
       break;
