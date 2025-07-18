@@ -21,6 +21,7 @@ async function hydrate(): Promise<void> {
   function BrowserRoot() {
     const [payload, setPayload_] = React.useState(initialPayload);
 
+    // biome-ignore lint/correctness/useExhaustiveDependencies: ignore
     React.useEffect(() => {
       setPayload = (v) => React.startTransition(() => setPayload_(v));
     }, [setPayload_]);
