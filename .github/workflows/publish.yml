@@ -46,6 +46,12 @@ jobs:
             exit 1
           fi
 
+      - name: Install NASM (for AVIF)
+        if: steps.format.outputs.format == 'avif'
+        run: |
+          choco install nasm -y
+          echo "C:\Program Files\NASM" >> $GITHUB_PATH
+
       - name: Build plugin
         run: |
           cargo build --release --target x86_64-pc-windows-msvc -p ${{ steps.format.outputs.format }}_output
