@@ -23,6 +23,7 @@
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "latest",
     "vite": "^7.0.4",
-    "vite-plugin-inspect": "^11.3.0"
+    "vite-plugin-inspect": "^11.3.0",
+    "vite-tsconfig-paths": "^5.1.4"
   }
 }

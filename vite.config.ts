@@ -7,6 +7,7 @@ import react from "@vitejs/plugin-react";
 import rsc from "@vitejs/plugin-rsc";
 import { defineConfig, type Plugin, type ResolvedConfig } from "vite";
 import inspect from "vite-plugin-inspect";
+import tsconfigPaths from "vite-tsconfig-paths";
 import { RSC_POSTFIX } from "./src/framework/shared";
 
 export default defineConfig((env) => ({
@@ -22,6 +23,7 @@ export default defineConfig((env) => ({
     }),
     rscSsgPlugin(),
     inspect(),
+    tsconfigPaths(),
   ],
 }));
 
