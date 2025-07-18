@@ -6,7 +6,7 @@ interface PluginGridProps {
 }
 
 export function PluginGrid({ releases }: PluginGridProps) {
-  const plugins: Plugin[] = ["png", "gif", "webp", "avif"];
+  const plugins: Plugin[] = ["apng", "gif", "webp", "avif"];
 
   return (
     <section className="w-[100cqw] mx-[calc(50%-50cqw)]">
