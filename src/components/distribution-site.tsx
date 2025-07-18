@@ -1,4 +1,5 @@
 import type { PluginRelease } from "../types";
+import { Disclaimer } from "./disclaimer";
 import { Footer } from "./footer";
 import { InstallationSteps } from "./installation-steps";
 import { Notices } from "./notices";
@@ -31,6 +32,7 @@ export function DistributionSite({ releases }: DistributionSiteProps) {
           <UsageSteps />
           <PluginSettings />
           <Notices />
+          <Disclaimer />
         </div>
       </article>
       <Footer />
