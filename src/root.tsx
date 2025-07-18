@@ -4,7 +4,7 @@ export async function getStaticPaths() {
   return ["/"];
 }
 
-export async function Root() {
+export async function Root(_: { url: URL }) {
   return (
     <html lang="ja">
       <head>
