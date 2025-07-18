@@ -66,7 +66,7 @@ fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Res
                     &mut image_data,
                     config.chroma_key_color.to_array(),
                     config.chroma_key_hue_range as f32,
-                    config.chroma_key_saturation_range as f32 / 100.0,
+                    config.chroma_key_saturation_range as f32,
                 );
             }
 
