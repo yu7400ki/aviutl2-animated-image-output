@@ -1,0 +1,5 @@
+name = "aviutl2-animated-image-output"
+compatibility_date = "2025-7-18"
+
+[assets]
+directory = "dist/client"

@@ -107,11 +107,14 @@
       }
     },
     {
-      "includes": ["./*.ts"],
+      "includes": ["./*.ts", "./scripts/**/*.ts"],
       "linter": {
         "rules": {
           "correctness": {
             "noNodejsModules": "off"
+          },
+          "suspicious": {
+            "noConsole": "off"
           }
         }
       }
