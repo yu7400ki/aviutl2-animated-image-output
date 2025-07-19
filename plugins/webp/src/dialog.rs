@@ -1,5 +1,7 @@
 use crate::config::{ColorFormat, Config, KeyColor};
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "rgba")]
+use win32_dialog::widget::ComboBox;
 use win32_dialog::{
     Dialog, MessageBox,
     layout::{FlexLayout, JustifyContent, SizeValue},
