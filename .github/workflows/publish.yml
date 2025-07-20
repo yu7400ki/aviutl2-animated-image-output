@@ -46,6 +46,13 @@ jobs:
             exit 1
           fi
 
+          # Check if tag ends with patch.*
+          if [[ "$TAG" == *patch.* ]]; then
+            echo "rgba_enabled=true" >> $GITHUB_OUTPUT
+          else
+            echo "rgba_enabled=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Install NASM (for AVIF)
         if: steps.format.outputs.format == 'avif'
         run: |
@@ -54,7 +61,11 @@ jobs:
 
       - name: Build plugin
         run: |
-          cargo build --release --target x86_64-pc-windows-msvc -p ${{ steps.format.outputs.format }}_output
+          if [[ "${{ steps.format.outputs.rgba_enabled }}" == "true" ]]; then
+            cargo build --release --target x86_64-pc-windows-msvc --features rgba -p ${{ steps.format.outputs.format }}_output
+          else
+            cargo build --release --target x86_64-pc-windows-msvc -p ${{ steps.format.outputs.format }}_output
+          fi
 
       - name: Rename artifact
         run: |
@@ -72,6 +83,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           draft: true
+          prerelease: ${{ steps.format.outputs.rgba_enabled }}
           files: |
             *.auo2
         env:
