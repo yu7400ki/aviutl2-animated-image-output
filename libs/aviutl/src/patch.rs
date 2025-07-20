@@ -7,7 +7,7 @@ pub unsafe fn apply_rgba_patch(info: &OutputInfo) -> std::result::Result<u32, &s
         Some(func) => func as usize,
         None => return Err("func_get_videoが設定されていません"),
     };
-    let target = base_addr + 0xA0;
+    let target = base_addr + 0xCA;
     let target_ptr = target as *mut u32;
     let mut old_protect = PAGE_PROTECTION_FLAGS::default();
 
@@ -25,12 +25,12 @@ pub unsafe fn apply_rgba_patch(info: &OutputInfo) -> std::result::Result<u32, &s
         }
 
         let current_value = *target_ptr;
-        if current_value != 0x000058BF {
+        if current_value != 0x000058BB {
             VirtualProtect(target_ptr as *mut c_void, 4, old_protect, &mut old_protect).ok();
             return Err("対象のメモリ値が期待値と一致しません");
         }
 
-        *target_ptr = 0x000057BF;
+        *target_ptr = 0x000057BB;
     }
 
     Ok(old_protect.0)
@@ -41,11 +41,11 @@ pub unsafe fn restore_rgba_patch(info: &OutputInfo, old_protect: u32) {
         Some(func) => func as usize,
         None => return,
     };
-    let target = base_addr + 0xA0;
+    let target = base_addr + 0xCA;
     let target_ptr = target as *mut u32;
 
     unsafe {
-        *target_ptr = 0x000058BF;
+        *target_ptr = 0x000058BB;
         let old_protect_flags = PAGE_PROTECTION_FLAGS(old_protect);
         let _ = VirtualProtect(
             target_ptr as *mut c_void,
