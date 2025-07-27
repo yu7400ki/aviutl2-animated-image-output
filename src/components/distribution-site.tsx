@@ -1,4 +1,4 @@
-import type { PluginRelease } from "../types";
+import type { PluginRelease } from "../libs/types";
 import { Disclaimer } from "./disclaimer";
 import { Footer } from "./footer";
 import { InstallationSteps } from "./installation-steps";

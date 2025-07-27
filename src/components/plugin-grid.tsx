@@ -1,4 +1,4 @@
-import type { Plugin, PluginRelease } from "../types";
+import type { Plugin, PluginRelease } from "../libs/types";
 import { PluginCard } from "./plugin-card";
 
 interface PluginGridProps {

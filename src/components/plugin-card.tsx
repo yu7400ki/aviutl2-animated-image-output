@@ -1,5 +1,5 @@
 import { clsx } from "clsx";
-import type { Plugin, PluginRelease } from "../types";
+import type { Plugin, PluginRelease } from "../libs/types";
 
 interface PluginCardProps {
   plugin: Plugin;

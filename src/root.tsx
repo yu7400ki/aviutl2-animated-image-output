@@ -1,14 +1,14 @@
-import "./index.css";
-import json from "public/release.json" with { type: "json" };
 import { DistributionSite } from "./components/distribution-site";
-import type { PluginRelease } from "./types";
+import { getConfig, getPluginReleases } from "./libs/release";
+import "./index.css";
 
 export async function getStaticPaths() {
   return ["/"];
 }
 
 export async function Root(_: { url: URL }) {
-  const releases = json satisfies PluginRelease;
+  const config = getConfig();
+  const releases = await getPluginReleases(config);
 
   return (
     <html lang="ja">
