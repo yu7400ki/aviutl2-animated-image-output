@@ -9,6 +9,27 @@ use windows::Win32::System::LibraryLoader::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonVariant {
+    Primary,
+    Secondary,
+}
+
+impl Default for ButtonVariant {
+    fn default() -> Self {
+        ButtonVariant::Primary
+    }
+}
+
+impl Into<WINDOW_STYLE> for ButtonVariant {
+    fn into(self) -> WINDOW_STYLE {
+        match self {
+            ButtonVariant::Primary => WINDOW_STYLE(BS_DEFPUSHBUTTON as u32),
+            ButtonVariant::Secondary => WINDOW_STYLE(BS_PUSHBUTTON as u32),
+        }
+    }
+}
+
 pub enum ButtonEvent {
     Click,
 }
@@ -17,6 +38,7 @@ struct ButtonInner {
     hwnd: Option<HWND>,
     id: ControlId,
     label: String,
+    variant: ButtonVariant,
     event_handlers: Vec<Box<dyn FnMut(ButtonEvent)>>,
     width: crate::layout::SizeValue,
     height: crate::layout::SizeValue,
@@ -32,11 +54,20 @@ impl Button {
             hwnd: None,
             id: ControlId::new(),
             label: label.to_string(),
+            variant: ButtonVariant::default(),
             event_handlers: Vec::new(),
             width: SizeValue::Auto,
             height: SizeValue::Auto,
             node_id: None,
         })))
+    }
+
+    pub fn primary(label: &str) -> Self {
+        Button::new(label).with_variant(ButtonVariant::Primary)
+    }
+
+    pub fn secondary(label: &str) -> Self {
+        Button::new(label).with_variant(ButtonVariant::Secondary)
     }
 
     pub fn with_width(self, width: crate::layout::SizeValue) -> Self {
@@ -51,6 +82,11 @@ impl Button {
 
     pub fn get_hwnd(&self) -> Option<HWND> {
         self.0.borrow().hwnd
+    }
+
+    pub fn with_variant(self, variant: ButtonVariant) -> Self {
+        self.0.borrow_mut().variant = variant;
+        self
     }
 
     pub fn add_event_handler<F>(self, handler: F) -> Self
@@ -149,11 +185,13 @@ impl Widget for Button {
 
             let hstring = HSTRING::from(self.0.borrow().label.as_str());
 
+            let button_style: WINDOW_STYLE = self.0.borrow().variant.into();
+
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 w!("BUTTON"),
                 PCWSTR(hstring.as_ptr()),
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_DEFPUSHBUTTON as u32),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | button_style,
                 layout.location.x as i32 + position.0,
                 layout.location.y as i32 + position.1,
                 layout.size.width as i32,
