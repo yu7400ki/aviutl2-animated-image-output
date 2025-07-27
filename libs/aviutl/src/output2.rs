@@ -94,7 +94,7 @@ pub struct OutputInfo {
 impl OutputInfo {
     /// フラグ定数: 画像データあり
     pub const FLAG_VIDEO: c_int = 1;
-    /// フラグ定数: 音声データあり  
+    /// フラグ定数: 音声データあり
     pub const FLAG_AUDIO: c_int = 2;
 
     /// 画像データを取得
@@ -156,57 +156,41 @@ impl OutputInfo {
         }
     }
 
-    /// BGRフォーマットのフレームデータをRGBAに変換して取得（アルファチャンネル付き）
+    /// PA64フォーマットのフレームデータをRGBAに変換して取得（アルファチャンネル付き）
     #[inline(always)]
     pub fn get_video_rgba(&self, frame: i32) -> Option<Vec<u8>> {
-        let data_ptr = self.get_video(frame, video_format::BI_RGB)?;
+        let data_ptr = self.get_video(frame, video_format::PA64)?;
 
-        unsafe {
-            let input_stride = self.w * 4; // RGBA32のストライド
-            let data_slice =
-                std::slice::from_raw_parts(data_ptr as *const u8, (input_stride * self.h) as usize);
+        let data_slice = unsafe {
+            std::slice::from_raw_parts(data_ptr as *const u16, (self.w * self.h * 4) as usize)
+        };
 
-            let mut image_buffer = Vec::with_capacity((self.w * self.h * 4) as usize);
+        let mut image_buffer = Vec::with_capacity((self.w * self.h * 4) as usize);
 
-            // BMPは下から上に格納されているので反転してBGR→RGBA変換
-            for y in (0..self.h).rev() {
-                let row_start = (y * input_stride) as usize;
-                let row_end = row_start + (self.w * 4) as usize;
-                for bgra_pixel in data_slice[row_start..row_end].chunks_exact(4) {
-                    image_buffer.push(bgra_pixel[2]); // R
-                    image_buffer.push(bgra_pixel[1]); // G
-                    image_buffer.push(bgra_pixel[0]); // B
-                    image_buffer.push(bgra_pixel[3]); // A
-                }
-            }
-            Some(image_buffer)
+        for chunk in data_slice.chunks_exact(4) {
+            let r = chunk[0] as u32;
+            let g = chunk[1] as u32;
+            let b = chunk[2] as u32;
+            let a = chunk[3] as u32;
+
+            // アンプレマルチ（非乗算化）
+            let (ur, ug, ub) = if a > 0 {
+                (
+                    (r * 65535 + a / 2) / a,
+                    (g * 65535 + a / 2) / a,
+                    (b * 65535 + a / 2) / a,
+                )
+            } else {
+                (0, 0, 0)
+            };
+
+            image_buffer.push((ur >> 8) as u8); // R
+            image_buffer.push((ug >> 8) as u8); // G
+            image_buffer.push((ub >> 8) as u8); // B
+            image_buffer.push((a >> 8) as u8); // A
         }
-    }
 
-    /// RGBフォーマットのフレームデータをRGBAに変換して取得（アルファチャンネル付き）
-    #[inline(always)]
-    pub fn get_video_rgb_4ch(&self, frame: i32) -> Option<Vec<u8>> {
-        let data_ptr = self.get_video(frame, video_format::BI_RGB)?;
-
-        unsafe {
-            let input_stride = ((self.w * 3 + 3) / 4) * 4; // RGB24のストライド（4バイト境界アライメント）
-            let data_slice =
-                std::slice::from_raw_parts(data_ptr as *const u8, (input_stride * self.h) as usize);
-
-            let mut image_buffer = Vec::with_capacity((self.w * self.h * 4) as usize);
-            // BMPは下から上に格納されているので反転してBGR→RGBA変換
-            for y in (0..self.h).rev() {
-                let row_start = (y * input_stride) as usize;
-                let row_end = row_start + (self.w * 3) as usize;
-                for bgr_pixel in data_slice[row_start..row_end].chunks_exact(3) {
-                    image_buffer.push(bgr_pixel[2]); // R
-                    image_buffer.push(bgr_pixel[1]); // G
-                    image_buffer.push(bgr_pixel[0]); // B
-                    image_buffer.push(255); // A（不透明）
-                }
-            }
-            Some(image_buffer)
-        }
+        Some(image_buffer)
     }
 }
 
@@ -247,6 +231,12 @@ pub mod video_format {
     pub const BI_RGB: DWORD = 0;
     /// YUY2
     pub const YUY2: DWORD = u32::from_le_bytes(*b"YUY2");
+    /// PA64
+    /// DXGI_FORMAT_R16G16B16A16_UNORM(乗算済みα)
+    pub const PA64: DWORD = u32::from_le_bytes(*b"PA64");
+    /// HF64
+    /// DXGI_FORMAT_R16G16B16A16_FLOAT(乗算済みα)
+    pub const HF64: DWORD = u32::from_le_bytes(*b"HF64");
 }
 
 /// 音声フォーマット定数
