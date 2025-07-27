@@ -58,7 +58,7 @@ pub fn show_config_dialog(
 
     let mut dialog = Dialog::new("APNG出力設定");
 
-    let ok_button = Button::new("OK").add_event_handler({
+    let ok_button = Button::primary("OK").add_event_handler({
         let result = Arc::clone(&result);
         let repeat_input = repeat_input.clone();
         let color_combobox = color_combobox.clone();
@@ -115,7 +115,7 @@ pub fn show_config_dialog(
         }
     });
 
-    let cancel_button = Button::new("キャンセル").add_event_handler({
+    let cancel_button = Button::secondary("キャンセル").add_event_handler({
         let dialog = dialog.clone();
         move |_| {
             dialog.close();
