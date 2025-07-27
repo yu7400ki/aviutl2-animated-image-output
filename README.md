@@ -11,7 +11,7 @@ AviUtl ExEdit2 で動画をアニメーション画像として出力できる�
 
 ## 動作環境
 
-- AviUtl ExEdit2 beta1 以降
+- AviUtl ExEdit2 beta3 以降
 
 ## インストール
 

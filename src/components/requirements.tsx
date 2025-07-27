@@ -7,7 +7,7 @@ export function Requirements() {
       <Alert
         type="info"
         title="必要環境"
-        description="AviUtl ExEdit2 beta1 以降"
+        description="AviUtl ExEdit2 beta3 以降"
       />
     </section>
   );
