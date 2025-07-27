@@ -2,9 +2,6 @@ mod config;
 mod dialog;
 
 use aviutl::output2::{OutputInfo, OutputPluginTable};
-#[cfg(feature = "rgba")]
-use aviutl::patch::{apply_rgba_patch, restore_rgba_patch};
-use chroma_key::apply_chroma_key;
 use config::{ColorFormat, Config};
 use dialog::show_config_dialog;
 use png::{BitDepth, ColorType, Encoder};
@@ -20,7 +17,7 @@ fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
         std::fs::File::create(&output_path).map_err(|e| format!("ファイル作成エラー: {}", e))?;
     let mut encoder = Encoder::new(output_file, info.w as u32, info.h as u32);
 
-    let color_type = if config.color_format == ColorFormat::Rgba32 || config.chroma_key_enabled {
+    let color_type = if config.color_format == ColorFormat::Rgba32 {
         ColorType::Rgba
     } else {
         ColorType::Rgb
@@ -50,38 +47,12 @@ fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
         }
         // カラーフォーマットに応じてフレームデータを取得
         let frame_data = if config.color_format == ColorFormat::Rgba32 {
-            // RGBAモード: パッチを適用してRGBA32データを取得
-            #[cfg(feature = "rgba")]
-            {
-                info.get_video_rgba(frame)
-            }
-            #[cfg(not(feature = "rgba"))]
-            {
-                if config.chroma_key_enabled {
-                    info.get_video_rgb_4ch(frame)
-                } else {
-                    info.get_video_rgb(frame)
-                }
-            }
+            info.get_video_rgba(frame)
         } else {
-            if config.chroma_key_enabled {
-                info.get_video_rgb_4ch(frame)
-            } else {
-                info.get_video_rgb(frame)
-            }
+            info.get_video_rgb(frame)
         };
 
-        if let Some(mut data) = frame_data {
-            // クロマキー処理を適用
-            if config.chroma_key_enabled {
-                apply_chroma_key(
-                    &mut data,
-                    config.chroma_key_color.to_array(),
-                    config.chroma_key_hue_range as f32,
-                    config.chroma_key_saturation_range as f32,
-                );
-            }
-
+        if let Some(data) = frame_data {
             // フレームデータを書き込み
             writer
                 .write_image_data(&data)
@@ -107,24 +78,6 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
         // 設定を読み込み
         let config = Config::load();
 
-        // RGBAモードの場合のみパッチを適用
-        #[cfg(feature = "rgba")]
-        let use_rgba = matches!(config.color_format, ColorFormat::Rgba32);
-
-        #[cfg(feature = "rgba")]
-        let old_protect: Option<u32> = if use_rgba {
-            match apply_rgba_patch(&info) {
-                Ok(protect) => Some(protect),
-                Err(e) => {
-                    let error_msg = format!("メモリパッチ適用エラー: {}", e);
-                    MessageBox::error(Some(HWND::default()), &error_msg, "エラー");
-                    return false;
-                }
-            }
-        } else {
-            None
-        };
-
         let result = match create_apng_from_video(info, &config) {
             Ok(_) => true,
             Err(e) => {
@@ -133,12 +86,6 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
                 false
             }
         };
-
-        // パッチを復元
-        #[cfg(feature = "rgba")]
-        if let Some(protect) = old_protect {
-            restore_rgba_patch(&info, protect);
-        }
 
         result
     }

@@ -7,13 +7,9 @@ edition = "2024"
 name = "webp_output"
 crate-type = ["cdylib"]
 
-[features]
-rgba = []
-
 [dependencies]
 aviutl = { path = "../../libs/aviutl" }
 win32_dialog = { path = "../../libs/dialog" }
-chroma_key = { path = "../../libs/chroma_key" }
 rust-ini = { workspace = true }
 libwebp-sys = { version = "0.12" }
 widestring = { workspace = true }

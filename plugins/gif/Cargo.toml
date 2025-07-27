@@ -7,13 +7,9 @@ edition = "2024"
 name = "gif_output"
 crate-type = ["cdylib"]
 
-[features]
-rgba = []
-
 [dependencies]
 aviutl = { path = "../../libs/aviutl" }
 win32_dialog = { path = "../../libs/dialog" }
-chroma_key = { path = "../../libs/chroma_key" }
 gif = { version = "0.13" }
 rust-ini = { workspace = true }
 widestring = { workspace = true }

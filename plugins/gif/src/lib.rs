@@ -2,9 +2,6 @@ mod config;
 mod dialog;
 
 use aviutl::output2::{OutputInfo, OutputPluginTable};
-#[cfg(feature = "rgba")]
-use aviutl::patch::{apply_rgba_patch, restore_rgba_patch};
-use chroma_key::apply_chroma_key;
 use gif::{Encoder, Frame, Repeat};
 use std::ffi::c_void;
 use std::fs::File;
@@ -39,80 +36,21 @@ fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Res
         }
 
         let image_data = match config.color_format {
-            ColorFormat::Rgb24 => {
-                if config.chroma_key_enabled {
-                    info.get_video_rgb_4ch(frame)
-                } else {
-                    info.get_video_rgb(frame)
-                }
-            }
-            #[cfg(feature = "rgba")]
+            ColorFormat::Rgb24 => info.get_video_rgb(frame),
             ColorFormat::Rgba32 => info.get_video_rgba(frame),
-            #[cfg(not(feature = "rgba"))]
-            ColorFormat::Rgba32 => {
-                if config.chroma_key_enabled {
-                    info.get_video_rgb_4ch(frame)
-                } else {
-                    info.get_video_rgb(frame)
-                }
-            }
         };
 
-        #[allow(unused_mut)]
-        if let Some(mut image_data) = image_data {
-            // クロマキー処理を適用
-            if config.chroma_key_enabled {
-                apply_chroma_key(
-                    &mut image_data,
-                    config.chroma_key_color.to_array(),
-                    config.chroma_key_hue_range as f32,
-                    config.chroma_key_saturation_range as f32,
-                );
-            }
-
+        if let Some(image_data) = image_data {
             let mut gif_frame = match config.color_format {
                 ColorFormat::Rgb24 => {
-                    if config.chroma_key_enabled {
-                        Frame::from_rgba_speed(
-                            info.w as u16,
-                            info.h as u16,
-                            &mut image_data,
-                            config.speed,
-                        )
-                    } else {
-                        Frame::from_rgb_speed(
-                            info.w as u16,
-                            info.h as u16,
-                            &image_data,
-                            config.speed,
-                        )
-                    }
+                    Frame::from_rgb_speed(info.w as u16, info.h as u16, &image_data, config.speed)
                 }
-                #[cfg(feature = "rgba")]
                 ColorFormat::Rgba32 => Frame::from_rgba_speed(
                     info.w as u16,
                     info.h as u16,
-                    &mut image_data,
+                    &mut image_data.clone(),
                     config.speed,
                 ),
-                #[cfg(not(feature = "rgba"))]
-                ColorFormat::Rgba32 => {
-                    if config.chroma_key_enabled {
-                        Frame::from_rgba_speed(
-                            info.w as u16,
-                            info.h as u16,
-                            &mut image_data,
-                            config.speed,
-                        )
-                    } else {
-                        Frame::from_rgb_speed(
-                            info.w as u16,
-                            info.h as u16,
-                            &image_data,
-                            config.speed,
-                        )
-                    }
-                }
             };
 
             gif_frame.dispose = gif::DisposalMethod::Background;
@@ -159,24 +97,6 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
 
         let config = Config::load();
 
-        // RGBAモードの場合のみパッチを適用
-        #[cfg(feature = "rgba")]
-        let use_rgba = matches!(config.color_format, ColorFormat::Rgba32);
-
-        #[cfg(feature = "rgba")]
-        let old_protect: Option<u32> = if use_rgba {
-            match apply_rgba_patch(&info) {
-                Ok(protect) => Some(protect),
-                Err(e) => {
-                    let error_msg = format!("メモリパッチ適用エラー: {}", e);
-                    MessageBox::error(None, &error_msg, "エラー");
-                    return false;
-                }
-            }
-        } else {
-            None
-        };
-
         let result = match create_gif_from_video(info, &config) {
             Ok(_) => true,
             Err(e) => {
@@ -185,12 +105,6 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
                 false
             }
         };
-
-        // パッチを復元
-        #[cfg(feature = "rgba")]
-        if let Some(protect) = old_protect {
-            restore_rgba_patch(&info, protect);
-        }
 
         result
     }

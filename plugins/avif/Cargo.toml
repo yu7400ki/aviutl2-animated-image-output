@@ -7,13 +7,9 @@ edition = "2024"
 name = "avif_output"
 crate-type = ["cdylib"]
 
-[features]
-rgba = []
-
 [dependencies]
 aviutl = { path = "../../libs/aviutl" }
 win32_dialog = { path = "../../libs/dialog" }
-chroma_key = { path = "../../libs/chroma_key" }
 libavif = { version = "0.14.0", default-features = false, features = [
     "codec-aom",
 ], git = "https://github.com/njaard/libavif-rs.git", rev = "18304417e422120835c358cdd0721ee43e4c6d7c" }

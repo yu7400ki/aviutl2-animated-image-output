@@ -1,11 +1,10 @@
-use crate::config::{ColorFormat, Config, KeyColor};
+use crate::config::{ColorFormat, Config};
 use std::sync::{Arc, Mutex};
-#[cfg(feature = "rgba")]
 use win32_dialog::widget::ComboBox;
 use win32_dialog::{
     Dialog, MessageBox,
     layout::{FlexLayout, JustifyContent, SizeValue},
-    widget::{Button, ButtonEvent, CheckBox, CheckBoxEvent, Label, Number, TextBox},
+    widget::{Button, ButtonEvent, Label, Number},
 };
 use windows::Win32::Foundation::*;
 
@@ -26,52 +25,11 @@ pub fn show_config_dialog(
         .value(default_config.speed as i32)
         .range(1, 30);
 
-    #[cfg(feature = "rgba")]
     let color_label = Label::new("カラーフォーマット");
-    #[cfg(feature = "rgba")]
     let color_options = vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()];
-    #[cfg(feature = "rgba")]
     let color_combobox = ComboBox::new(color_options).selected(match default_config.color_format {
         ColorFormat::Rgb24 => 0,
         ColorFormat::Rgba32 => 1,
-    });
-
-    let chroma_key_enabled_checkbox =
-        CheckBox::new("クロマキー透過を有効にする").checked(default_config.chroma_key_enabled);
-
-    let chroma_key_color_label = Label::new("基準色（例:#0000FF）");
-    let chroma_key_color_textbox =
-        TextBox::new().text(&default_config.chroma_key_color.to_string());
-
-    let hue_range_label = Label::new("色相範囲（0-360）");
-    let hue_range_textbox = Number::new()
-        .value(default_config.chroma_key_hue_range as i32)
-        .range(0, 360);
-
-    let saturation_range_label = Label::new("彩度範囲（0-100）");
-    let saturation_range_textbox = Number::new()
-        .value(default_config.chroma_key_saturation_range as i32)
-        .range(0, 100);
-
-    // Initially set enabled state based on checkbox
-    if !default_config.chroma_key_enabled {
-        chroma_key_color_textbox.set_enabled(false);
-        hue_range_textbox.set_enabled(false);
-        saturation_range_textbox.set_enabled(false);
-    }
-
-    // Handle checkbox change events
-    let chroma_key_enabled_checkbox = chroma_key_enabled_checkbox.add_event_handler({
-        let chroma_key_color_textbox = chroma_key_color_textbox.clone();
-        let hue_range_textbox = hue_range_textbox.clone();
-        let saturation_range_textbox = saturation_range_textbox.clone();
-        move |event| match event {
-            CheckBoxEvent::Changed(checked) => {
-                chroma_key_color_textbox.set_enabled(checked);
-                hue_range_textbox.set_enabled(checked);
-                saturation_range_textbox.set_enabled(checked);
-            }
-        }
     });
 
     let mut dialog = Dialog::new("GIF出力設定");
@@ -80,12 +38,7 @@ pub fn show_config_dialog(
         let result = Arc::clone(&result);
         let repeat_input = repeat_input.clone();
         let speed_input = speed_input.clone();
-        #[cfg(feature = "rgba")]
         let color_combobox = color_combobox.clone();
-        let chroma_key_enabled_checkbox = chroma_key_enabled_checkbox.clone();
-        let chroma_key_color_textbox = chroma_key_color_textbox.clone();
-        let hue_range_textbox = hue_range_textbox.clone();
-        let saturation_range_textbox = saturation_range_textbox.clone();
         let dialog = dialog.clone();
         move |_: ButtonEvent| {
             let repeat = match repeat_input.get_value::<u16>() {
@@ -112,60 +65,17 @@ pub fn show_config_dialog(
                 }
             };
 
-            #[cfg(feature = "rgba")]
             let color_format = match color_combobox.get_selected_index() {
                 0 => ColorFormat::Rgb24,
-                #[cfg(feature = "rgba")]
                 1 => ColorFormat::Rgba32,
                 _ => Default::default(),
-            };
-
-            let chroma_key_enabled = chroma_key_enabled_checkbox.is_checked();
-
-            let chroma_key_color = match KeyColor::parse(&chroma_key_color_textbox.get_text()) {
-                Ok(color) => color,
-                Err(e) => {
-                    MessageBox::error(Some(parent_hwnd), &e, "エラー");
-                    return;
-                }
-            };
-
-            let chroma_key_hue_range = match hue_range_textbox.get_value::<u16>() {
-                Ok(value) => value,
-                Err(_) => {
-                    MessageBox::error(
-                        Some(parent_hwnd),
-                        "色相範囲の値が無効です。0-360の値を入力してください。",
-                        "エラー",
-                    );
-                    return;
-                }
-            };
-
-            let chroma_key_saturation_range = match saturation_range_textbox.get_value::<u8>() {
-                Ok(value) => value,
-                Err(_) => {
-                    MessageBox::error(
-                        Some(parent_hwnd),
-                        "彩度範囲の値が無効です。0-100の値を入力してください。",
-                        "エラー",
-                    );
-                    return;
-                }
             };
 
             if let Ok(mut guard) = result.lock() {
                 *guard = Some(Config {
                     repeat,
-                    #[cfg(feature = "rgba")]
                     color_format,
-                    #[cfg(not(feature = "rgba"))]
-                    color_format: ColorFormat::Rgb24,
                     speed,
-                    chroma_key_enabled,
-                    chroma_key_color,
-                    chroma_key_hue_range,
-                    chroma_key_saturation_range,
                 });
                 dialog.close();
             } else {
@@ -207,36 +117,11 @@ pub fn show_config_dialog(
         );
 
     // Color Format Section (only if RGBA feature is enabled)
-    #[cfg(feature = "rgba")]
-    {
-        layout = layout.with_layout(
-            FlexLayout::column()
-                .with_widget(color_label)
-                .with_widget(color_combobox),
-        );
-    }
-
-    // Chroma Key Section
-    layout = layout
-        .with_widget(chroma_key_enabled_checkbox)
-        .with_layout(
-            FlexLayout::column()
-                .with_gap(5.0)
-                .with_widget(chroma_key_color_label)
-                .with_widget(chroma_key_color_textbox),
-        )
-        .with_layout(
-            FlexLayout::column()
-                .with_gap(5.0)
-                .with_widget(hue_range_label)
-                .with_widget(hue_range_textbox),
-        )
-        .with_layout(
-            FlexLayout::column()
-                .with_gap(5.0)
-                .with_widget(saturation_range_label)
-                .with_widget(saturation_range_textbox),
-        );
+    layout = layout.with_layout(
+        FlexLayout::column()
+            .with_widget(color_label)
+            .with_widget(color_combobox),
+    );
 
     // Buttons Section
     let buttons_section = FlexLayout::row()

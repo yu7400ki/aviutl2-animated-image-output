@@ -2,9 +2,6 @@ mod config;
 mod dialog;
 
 use aviutl::output2::{OutputInfo, OutputPluginTable};
-#[cfg(feature = "rgba")]
-use aviutl::patch::{apply_rgba_patch, restore_rgba_patch};
-use chroma_key::apply_chroma_key;
 use libavif::{Encoder, RgbPixels, YuvFormat};
 use std::ffi::c_void;
 use widestring::{U16CStr, Utf16Str, utf16str};
@@ -33,36 +30,11 @@ fn create_avif_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
         }
 
         let image_data = match config.color_format {
-            ColorFormat::Rgb24 => {
-                if config.chroma_key_enabled {
-                    info.get_video_rgb_4ch(frame as i32)
-                } else {
-                    info.get_video_rgb(frame as i32)
-                }
-            }
-            #[cfg(feature = "rgba")]
+            ColorFormat::Rgb24 => info.get_video_rgb(frame as i32),
             ColorFormat::Rgba32 => info.get_video_rgba(frame as i32),
-            #[cfg(not(feature = "rgba"))]
-            ColorFormat::Rgba32 => {
-                if config.chroma_key_enabled {
-                    info.get_video_rgb_4ch(frame as i32)
-                } else {
-                    info.get_video_rgb(frame as i32)
-                }
-            }
         };
 
-        if let Some(mut pixel_data) = image_data {
-            // クロマキー処理を適用
-            if config.chroma_key_enabled {
-                apply_chroma_key(
-                    &mut pixel_data,
-                    config.chroma_key_color.to_array(),
-                    config.chroma_key_hue_range as f32,
-                    config.chroma_key_saturation_range as f32,
-                );
-            }
-
+        if let Some(pixel_data) = image_data {
             let rgb_pixels = RgbPixels::new(width, height, &pixel_data)
                 .map_err(|e| format!("RGBピクセル作成エラー: {}", e))?;
 
@@ -94,24 +66,6 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
 
         let config = Config::load();
 
-        // RGBAモードの場合のみパッチを適用
-        #[cfg(feature = "rgba")]
-        let use_rgba = matches!(config.color_format, ColorFormat::Rgba32);
-
-        #[cfg(feature = "rgba")]
-        let old_protect: Option<u32> = if use_rgba {
-            match apply_rgba_patch(&info) {
-                Ok(protect) => Some(protect),
-                Err(e) => {
-                    let error_msg = format!("メモリパッチ適用エラー: {}", e);
-                    MessageBox::error(None, &error_msg, "エラー");
-                    return false;
-                }
-            }
-        } else {
-            None
-        };
-
         let result = match create_avif_from_video(info, &config) {
             Ok(_) => true,
             Err(e) => {
@@ -120,12 +74,6 @@ extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
                 false
             }
         };
-
-        // パッチを復元
-        #[cfg(feature = "rgba")]
-        if let Some(protect) = old_protect {
-            restore_rgba_patch(&info, protect);
-        }
 
         result
     }
