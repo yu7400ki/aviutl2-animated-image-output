@@ -139,6 +139,7 @@ pub fn show_config_dialog(
     // Color Format Section
     layout = layout.with_layout(
         FlexLayout::column()
+            .with_gap(5.0)
             .with_widget(color_label)
             .with_widget(color_combobox),
     );
