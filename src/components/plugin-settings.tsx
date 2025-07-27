@@ -10,16 +10,16 @@ const pluginSettings = {
         description: "アニメーションの繰り返し回数（0 = 無限ループ）",
       },
       {
+        name: "カラーフォーマット",
+        description: "RGB 24bit / RGBA 32bit",
+      },
+      {
         name: "圧縮",
         description: "標準 / 高速 / 最高",
       },
       {
         name: "フィルター",
         description: "PNG のフィルター設定（なし、Sub、Up、Average、Paeth）",
-      },
-      {
-        name: "クロマキー",
-        description: "透明化する色の指定（RGB値）",
       },
     ],
   },
@@ -32,13 +32,13 @@ const pluginSettings = {
         description: "アニメーションの繰り返し回数（0 = 無限ループ）",
       },
       {
+        name: "カラーフォーマット",
+        description: "RGB 24bit / RGBA 32bit",
+      },
+      {
         name: "パレット生成速度",
         description:
           "NeuQuant アルゴリズムの処理速度（1-30、高い値=速い処理・低品質）",
-      },
-      {
-        name: "クロマキー",
-        description: "透明化する色の指定（RGB値）",
       },
     ],
   },
@@ -51,6 +51,10 @@ const pluginSettings = {
         description: "アニメーションの繰り返し回数（0 = 無限ループ）",
       },
       {
+        name: "カラーフォーマット",
+        description: "RGB 24bit / RGBA 32bit",
+      },
+      {
         name: "ロスレス圧縮",
         description: "可逆圧縮の ON/OFF",
       },
@@ -61,10 +65,6 @@ const pluginSettings = {
       {
         name: "圧縮方法",
         description: "圧縮アルゴリズム（0-6、ロスレス OFF 時のみ）",
-      },
-      {
-        name: "クロマキー",
-        description: "透明化する色の指定（RGB値）",
       },
     ],
   },
@@ -81,8 +81,8 @@ const pluginSettings = {
         description: "エンコード速度（0-10、値が大きいほど高速）",
       },
       {
-        name: "クロマキー",
-        description: "透明化する色の指定（RGB値）",
+        name: "カラーフォーマット",
+        description: "RGB 24bit / RGBA 32bit",
       },
     ],
   },

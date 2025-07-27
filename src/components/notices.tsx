@@ -7,11 +7,6 @@ const notices = [
     description:
       "大きなファイルサイズや長時間の動画では処理時間が長くなる場合があります",
   },
-  {
-    type: "error" as const,
-    title: "アルファチャンネルについて",
-    description: "AviUtl2の制限でアルファチャンネルを持つ画像は出力できません",
-  },
 ];
 
 export function Notices() {
