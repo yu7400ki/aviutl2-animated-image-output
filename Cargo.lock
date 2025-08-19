@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "apng_output"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aviutl",
  "png",
@@ -28,7 +28,7 @@ checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
 name = "avif_output"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aviutl",
  "libavif",
@@ -187,7 +187,7 @@ dependencies = [
 
 [[package]]
 name = "gif_output"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aviutl",
  "gif",
@@ -449,7 +449,7 @@ dependencies = [
 
 [[package]]
 name = "webp_output"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aviutl",
  "libwebp-sys",
