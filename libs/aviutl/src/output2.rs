@@ -173,21 +173,17 @@ impl OutputInfo {
             let b = chunk[2] as u32;
             let a = chunk[3] as u32;
 
-            // アンプレマルチ（非乗算化）
-            let (ur, ug, ub) = if a > 0 {
-                (
-                    (r * 65535 + a / 2) / a,
-                    (g * 65535 + a / 2) / a,
-                    (b * 65535 + a / 2) / a,
-                )
+            let (r8, g8, b8, a8) = if a < 128 {
+                (0, 0, 0, 0)
             } else {
-                (0, 0, 0)
+                (
+                    ((r * 255 + a / 2) / a) as u8,
+                    ((g * 255 + a / 2) / a) as u8,
+                    ((b * 255 + a / 2) / a) as u8,
+                    ((a + 128) / 257) as u8,
+                )
             };
-
-            image_buffer.push((ur >> 8) as u8); // R
-            image_buffer.push((ug >> 8) as u8); // G
-            image_buffer.push((ub >> 8) as u8); // B
-            image_buffer.push((a >> 8) as u8); // A
+            image_buffer.extend_from_slice(&[r8, g8, b8, a8]);
         }
 
         Some(image_buffer)
