@@ -6,6 +6,7 @@ use std::rc::Rc;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::HFONT;
 use windows::Win32::System::LibraryLoader::*;
+use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::*;
 
@@ -22,6 +23,7 @@ struct ComboBoxInner {
     width: crate::layout::SizeValue,
     height: crate::layout::SizeValue,
     node_id: Option<taffy::NodeId>,
+    enabled: bool,
 }
 
 #[derive(Clone)]
@@ -38,6 +40,7 @@ impl ComboBox {
             width: SizeValue::Percent(1.0),
             height: SizeValue::Points(25.0),
             node_id: None,
+            enabled: true,
         })))
     }
 
@@ -91,6 +94,15 @@ impl ComboBox {
             inner.items[index as usize].clone()
         } else {
             String::new()
+        }
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.0.borrow_mut().enabled = enabled;
+        if let Some(hwnd) = self.get_hwnd() {
+            unsafe {
+                let _ = EnableWindow(hwnd, enabled);
+            }
         }
     }
 }
@@ -200,6 +212,10 @@ impl Widget for ComboBox {
                 Some(WPARAM(selected_index as usize)),
                 None,
             );
+
+            // Set initial enabled state
+            let enabled = self.0.borrow().enabled;
+            let _ = EnableWindow(hwnd, enabled);
 
             self.0.borrow_mut().hwnd = Some(hwnd);
             Ok(())
