@@ -9,8 +9,8 @@ use windows::core::PCWSTR;
 
 #[derive(Copy, Clone, PartialEq)]
 pub enum ColorFormat {
-    Rgb24,  // RGB 24bit
-    Rgba32, // RGBA 32bit
+    Rgb24,
+    Rgba32,
 }
 
 impl Default for ColorFormat {
@@ -22,8 +22,8 @@ impl Default for ColorFormat {
 impl Into<&'static str> for ColorFormat {
     fn into(self) -> &'static str {
         match self {
-            ColorFormat::Rgb24 => "RGB 24bit",
-            ColorFormat::Rgba32 => "RGBA 32bit",
+            ColorFormat::Rgb24 => "透過無し",
+            ColorFormat::Rgba32 => "透過付き",
         }
     }
 }
