@@ -230,16 +230,6 @@ impl Config {
         }
     }
 
-    pub const fn default() -> Self {
-        Config {
-            repeat: 0,
-            color_format: ColorFormat::Rgb24,
-            compression_type: CompressionType::Default,
-            filter_type: FilterType::Sub,
-            adaptive_filter: false,
-        }
-    }
-
     pub fn load() -> Self {
         let default = Self::default();
 
