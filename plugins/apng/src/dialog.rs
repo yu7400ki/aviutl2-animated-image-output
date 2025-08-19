@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use win32_dialog::{
     Dialog, MessageBox,
     layout::{FlexLayout, JustifyContent, SizeValue},
-    widget::{Button, ButtonEvent, ComboBox, Label, Number},
+    widget::{Button, ButtonEvent, CheckBox, CheckBoxEvent, ComboBox, Label, Number},
 };
 use windows::Win32::Foundation::*;
 
@@ -56,6 +56,23 @@ pub fn show_config_dialog(
             FilterType::Paeth => 4,
         });
 
+    let adaptive_filter_checkbox =
+        CheckBox::new("アダプティブフィルター").checked(default_config.adaptive_filter);
+
+    // adaptive_filterが有効な場合はfilterを無効化
+    if default_config.adaptive_filter {
+        filter_combobox.set_enabled(false);
+    }
+
+    let adaptive_filter_checkbox = adaptive_filter_checkbox.add_event_handler({
+        let filter_combobox = filter_combobox.clone();
+        move |event: CheckBoxEvent| match event {
+            CheckBoxEvent::Changed(checked) => {
+                filter_combobox.set_enabled(!checked);
+            }
+        }
+    });
+
     let mut dialog = Dialog::new("APNG出力設定");
 
     let ok_button = Button::primary("OK").add_event_handler({
@@ -64,6 +81,7 @@ pub fn show_config_dialog(
         let color_combobox = color_combobox.clone();
         let compression_combobox = compression_combobox.clone();
         let filter_combobox = filter_combobox.clone();
+        let adaptive_filter_checkbox = adaptive_filter_checkbox.clone();
         let dialog = dialog.clone();
         move |_: ButtonEvent| {
             let repeat = match repeat_input.get_value::<u32>() {
@@ -97,12 +115,15 @@ pub fn show_config_dialog(
                 _ => Default::default(),
             };
 
+            let adaptive_filter = adaptive_filter_checkbox.is_checked();
+
             if let Ok(mut guard) = result.lock() {
                 *guard = Some(Config {
                     repeat,
                     color_format,
                     compression_type,
                     filter_type,
+                    adaptive_filter,
                 });
                 dialog.close();
             } else {
@@ -152,6 +173,7 @@ pub fn show_config_dialog(
                 .with_widget(compression_label)
                 .with_widget(compression_combobox),
         )
+        .with_widget(adaptive_filter_checkbox)
         .with_layout(
             FlexLayout::column()
                 .with_gap(5.0)
