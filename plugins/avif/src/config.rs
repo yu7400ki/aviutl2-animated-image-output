@@ -49,11 +49,68 @@ impl ColorFormat {
     }
 }
 
+#[derive(Copy, Clone, PartialEq)]
+pub enum YuvFormat {
+    Yuv420,
+    Yuv422,
+    Yuv444,
+}
+
+impl Default for YuvFormat {
+    fn default() -> Self {
+        YuvFormat::Yuv420
+    }
+}
+
+impl Into<&'static str> for YuvFormat {
+    fn into(self) -> &'static str {
+        match self {
+            YuvFormat::Yuv420 => "YUV420",
+            YuvFormat::Yuv422 => "YUV422",
+            YuvFormat::Yuv444 => "YUV444",
+        }
+    }
+}
+
+impl FromStr for YuvFormat {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.parse::<u32>() {
+            Ok(0) => Ok(YuvFormat::Yuv420),
+            Ok(1) => Ok(YuvFormat::Yuv422),
+            Ok(2) => Ok(YuvFormat::Yuv444),
+            _ => Err(()),
+        }
+    }
+}
+
+impl Into<libavif::YuvFormat> for YuvFormat {
+    fn into(self) -> libavif::YuvFormat {
+        match self {
+            YuvFormat::Yuv420 => libavif::YuvFormat::Yuv420,
+            YuvFormat::Yuv422 => libavif::YuvFormat::Yuv422,
+            YuvFormat::Yuv444 => libavif::YuvFormat::Yuv444,
+        }
+    }
+}
+
+impl YuvFormat {
+    fn to_index(&self) -> u32 {
+        match self {
+            YuvFormat::Yuv420 => 0,
+            YuvFormat::Yuv422 => 1,
+            YuvFormat::Yuv444 => 2,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub quality: u8,
     pub speed: u8,
     pub color_format: ColorFormat,
+    pub yuv_format: YuvFormat,
     pub threads: usize,
 }
 
@@ -63,6 +120,7 @@ impl Default for Config {
             quality: 75,
             speed: 10,
             color_format: ColorFormat::default(),
+            yuv_format: YuvFormat::default(),
             threads: std::thread::available_parallelism().map_or(1, |p| p.get()),
         }
     }
@@ -133,6 +191,11 @@ impl Config {
             .and_then(|s| s.parse::<ColorFormat>().ok())
             .unwrap_or_default();
 
+        let yuv_format = section
+            .and_then(|s| s.get("yuv_format"))
+            .and_then(|s| s.parse::<YuvFormat>().ok())
+            .unwrap_or_default();
+
         let threads = section
             .and_then(|s| s.get("threads"))
             .and_then(|s| s.parse::<usize>().ok())
@@ -142,6 +205,7 @@ impl Config {
             quality,
             speed,
             color_format,
+            yuv_format,
             threads,
         }
     }
@@ -154,6 +218,7 @@ impl Config {
             .set("quality", self.quality.to_string())
             .set("speed", self.speed.to_string())
             .set("color_format", self.color_format.to_index().to_string())
+            .set("yuv_format", self.yuv_format.to_index().to_string())
             .set("threads", self.threads.to_string());
 
         ini.write_to_file(&config_path).map_err(|e| e.to_string())

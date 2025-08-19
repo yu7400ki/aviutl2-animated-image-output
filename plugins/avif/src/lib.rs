@@ -2,7 +2,7 @@ mod config;
 mod dialog;
 
 use aviutl::output2::{OutputInfo, OutputPluginTable};
-use libavif::{Encoder, RgbPixels, YuvFormat};
+use libavif::{Encoder, RgbPixels};
 use std::ffi::c_void;
 use widestring::{U16CStr, Utf16Str, utf16str};
 use win32_dialog::MessageBox;
@@ -38,7 +38,7 @@ fn create_avif_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
             let rgb_pixels = RgbPixels::new(width, height, &pixel_data)
                 .map_err(|e| format!("RGBピクセル作成エラー: {}", e))?;
 
-            let image = rgb_pixels.to_image(YuvFormat::Yuv420);
+            let image = rgb_pixels.to_image(config.yuv_format.into());
 
             encoder
                 .add_image(&image, info.scale as u64, Default::default())

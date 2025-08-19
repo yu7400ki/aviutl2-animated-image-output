@@ -1,4 +1,4 @@
-use crate::config::{ColorFormat, Config};
+use crate::config::{ColorFormat, Config, YuvFormat};
 use std::sync::{Arc, Mutex};
 use win32_dialog::widget::ComboBox;
 use win32_dialog::{
@@ -32,6 +32,18 @@ pub fn show_config_dialog(
         ColorFormat::Rgba32 => 1,
     });
 
+    let yuv_label = Label::new("YUVフォーマット");
+    let yuv_options = vec![
+        YuvFormat::Yuv420.into(),
+        YuvFormat::Yuv422.into(),
+        YuvFormat::Yuv444.into(),
+    ];
+    let yuv_combobox = ComboBox::new(yuv_options).selected(match default_config.yuv_format {
+        YuvFormat::Yuv420 => 0,
+        YuvFormat::Yuv422 => 1,
+        YuvFormat::Yuv444 => 2,
+    });
+
     let mut dialog = Dialog::new("AVIF出力設定");
 
     let ok_button = Button::primary("OK").add_event_handler({
@@ -39,6 +51,7 @@ pub fn show_config_dialog(
         let quality_number = quality_number.clone();
         let speed_number = speed_number.clone();
         let color_combobox = color_combobox.clone();
+        let yuv_combobox = yuv_combobox.clone();
         let dialog = dialog.clone();
         move |_: ButtonEvent| {
             let quality = match quality_number.get_value::<u8>() {
@@ -71,11 +84,19 @@ pub fn show_config_dialog(
                 _ => Default::default(),
             };
 
+            let yuv_format = match yuv_combobox.get_selected_index() {
+                0 => YuvFormat::Yuv420,
+                1 => YuvFormat::Yuv422,
+                2 => YuvFormat::Yuv444,
+                _ => Default::default(),
+            };
+
             if let Ok(mut guard) = result.lock() {
                 *guard = Some(Config {
                     quality,
                     speed,
                     color_format,
+                    yuv_format,
                     threads: Config::default().threads,
                 });
                 dialog.close();
@@ -123,6 +144,14 @@ pub fn show_config_dialog(
             .with_gap(5.0)
             .with_widget(color_label)
             .with_widget(color_combobox),
+    );
+
+    // YUV Format Section
+    layout = layout.with_layout(
+        FlexLayout::column()
+            .with_gap(5.0)
+            .with_widget(yuv_label)
+            .with_widget(yuv_combobox),
     );
 
     // Buttons Section
