@@ -11,11 +11,15 @@ const pluginSettings = {
       },
       {
         name: "カラーフォーマット",
-        description: "RGB 24bit / RGBA 32bit",
+        description: "透過無し / 透過付き",
       },
       {
         name: "圧縮",
         description: "標準 / 高速 / 最高",
+      },
+      {
+        name: "アダプティブフィルター",
+        description: "自動的に最適なフィルターを選択",
       },
       {
         name: "フィルター",
@@ -33,7 +37,7 @@ const pluginSettings = {
       },
       {
         name: "カラーフォーマット",
-        description: "RGB 24bit / RGBA 32bit",
+        description: "透過無し / 透過付き",
       },
       {
         name: "パレット生成速度",
@@ -52,7 +56,7 @@ const pluginSettings = {
       },
       {
         name: "カラーフォーマット",
-        description: "RGB 24bit / RGBA 32bit",
+        description: "透過無し / 透過付き",
       },
       {
         name: "ロスレス圧縮",
@@ -82,7 +86,11 @@ const pluginSettings = {
       },
       {
         name: "カラーフォーマット",
-        description: "RGB 24bit / RGBA 32bit",
+        description: "透過無し / 透過付き",
+      },
+      {
+        name: "YUVフォーマット",
+        description: "色空間設定（YUV420 / YUV422 / YUV444）",
       },
     ],
   },
