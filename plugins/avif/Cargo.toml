@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 [dependencies]
 aviutl = { path = "../../libs/aviutl" }
 win32_dialog = { path = "../../libs/dialog" }
-rustavif = { git = "https://github.com/yu7400ki/rustavif", rev = "4266f31a18c41594cb695a21c48a599eca34c10b", default-features = false, features = [
+rustavif = { git = "https://github.com/yu7400ki/rustavif", rev = "df26b9d", default-features = false, features = [
   "codec-aom",
 ] }
 rust-ini = { workspace = true }
