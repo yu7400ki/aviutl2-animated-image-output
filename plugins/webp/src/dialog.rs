@@ -34,7 +34,7 @@ pub fn show_config_dialog(
         .value(default_config.quality as i32)
         .range(0, 100);
 
-    let method_label = Label::new("圧縮方法 (0-6)");
+    let method_label = Label::new("メソッド (0-6)");
     let method_input = Number::new()
         .value(default_config.method as i32)
         .range(0, 6);
@@ -94,7 +94,7 @@ pub fn show_config_dialog(
                     Err(_) => {
                         MessageBox::error(
                             Some(parent_hwnd),
-                            "圧縮方法の値が無効です。0-6の値を入力してください。",
+                            "メソッドの値が無効です。0-6の値を入力してください。",
                             "エラー",
                         );
                         return;
