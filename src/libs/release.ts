@@ -20,9 +20,9 @@ interface ReleaseData {
 }
 
 const PLUGIN_MAP = {
-  apng: {
+  png: {
     tagPrefix: "apng-v",
-    fileName: "apng_output.auo2",
+    fileName: "png_output.auo2",
   },
   gif: {
     tagPrefix: "gif-v",

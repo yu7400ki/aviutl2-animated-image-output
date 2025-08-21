@@ -4,7 +4,7 @@ export type Release = {
   url: string;
 };
 
-export type Plugin = "apng" | "gif" | "webp" | "avif";
+export type Plugin = "png" | "gif" | "webp" | "avif";
 
 export type PluginRelease = {
   [key in Plugin]?: Release;

@@ -7,7 +7,7 @@ interface PluginCardProps {
 }
 
 const pluginInfo = {
-  apng: {
+  png: {
     title: "PNG (APNG)",
     description: "高品質、可逆圧縮",
     features: ["高品質なアニメーション画像", "可逆圧縮", "透明度対応"],
