@@ -14,7 +14,11 @@ pub fn show_config_dialog(
 ) -> std::result::Result<Option<Config>, ()> {
     let result = Arc::new(Mutex::new(None::<Config>));
 
-    // Create widgets
+    let repeat_label = Label::new("ループ回数 (0=無限ループ)");
+    let repeat_input = Number::new()
+        .value(default_config.repeat as i32)
+        .range(0, i32::MAX);
+
     let quality_label = Label::new("品質 (0-100)");
     let quality_number = Number::new()
         .value(default_config.quality as i32)
@@ -48,12 +52,25 @@ pub fn show_config_dialog(
 
     let ok_button = Button::primary("OK").add_event_handler({
         let result = Arc::clone(&result);
+        let repeat_input = repeat_input.clone();
         let quality_number = quality_number.clone();
         let speed_number = speed_number.clone();
         let color_combobox = color_combobox.clone();
         let yuv_combobox = yuv_combobox.clone();
         let dialog = dialog.clone();
         move |_: ButtonEvent| {
+            let repeat = match repeat_input.get_value::<u32>() {
+                Ok(value) => value,
+                Err(_) => {
+                    MessageBox::error(
+                        Some(parent_hwnd),
+                        "ループ回数の値が無効です。正しい数値を入力してください。",
+                        "エラー",
+                    );
+                    return;
+                }
+            };
+
             let quality = match quality_number.get_value::<u8>() {
                 Ok(value) => value,
                 Err(_) => {
@@ -93,6 +110,7 @@ pub fn show_config_dialog(
 
             if let Ok(mut guard) = result.lock() {
                 *guard = Some(Config {
+                    repeat,
                     quality,
                     speed,
                     color_format,
@@ -125,6 +143,12 @@ pub fn show_config_dialog(
 
     // Basic Settings Section
     layout = layout
+        .with_layout(
+            FlexLayout::column()
+                .with_gap(5.0)
+                .with_widget(repeat_label)
+                .with_widget(repeat_input),
+        )
         .with_layout(
             FlexLayout::column()
                 .with_gap(5.0)

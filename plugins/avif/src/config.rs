@@ -107,6 +107,7 @@ impl YuvFormat {
 
 #[derive(Clone)]
 pub struct Config {
+    pub repeat: u32,
     pub quality: u8,
     pub speed: u8,
     pub color_format: ColorFormat,
@@ -117,6 +118,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            repeat: 0,
             quality: 75,
             speed: 10,
             color_format: ColorFormat::default(),
@@ -174,6 +176,11 @@ impl Config {
 
         let section = ini.section(Some("Config"));
 
+        let repeat = section
+            .and_then(|s| s.get("repeat"))
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(default.repeat);
+
         let quality = section
             .and_then(|s| s.get("quality"))
             .and_then(|s| s.parse::<u8>().ok())
@@ -202,6 +209,7 @@ impl Config {
             .unwrap_or(default.threads);
 
         Self {
+            repeat,
             quality,
             speed,
             color_format,
@@ -215,6 +223,7 @@ impl Config {
         let mut ini = Ini::new();
 
         ini.with_section(Some("Config"))
+            .set("repeat", self.repeat.to_string())
             .set("quality", self.quality.to_string())
             .set("speed", self.speed.to_string())
             .set("color_format", self.color_format.to_index().to_string())

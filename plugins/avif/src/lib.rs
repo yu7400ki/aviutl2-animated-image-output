@@ -15,6 +15,7 @@ fn create_avif_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
     let output_path = unsafe { U16CStr::from_ptr_str(info.savefile).to_string_lossy() };
 
     let mut encoder = Encoder::new().map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
+    encoder.set_repetition_count(config.repeat);
     encoder.set_timescale(info.rate as u64);
     encoder.set_quality(config.quality);
     encoder.set_speed(config.speed);
