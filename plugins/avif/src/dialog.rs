@@ -20,7 +20,7 @@ pub fn show_config_dialog(
         .value(default_config.quality as i32)
         .range(0, 100);
 
-    let speed_label = Label::new("速度 (0-10)");
+    let speed_label = Label::new("エンコード速度 (0-10)");
     let speed_number = Number::new()
         .value(default_config.speed as i32)
         .range(0, 10);
@@ -71,7 +71,7 @@ pub fn show_config_dialog(
                 Err(_) => {
                     MessageBox::error(
                         Some(parent_hwnd),
-                        "速度の値が無効です。0-10の値を入力してください。",
+                        "エンコード速度の値が無効です。0-10の値を入力してください。",
                         "エラー",
                     );
                     return;
