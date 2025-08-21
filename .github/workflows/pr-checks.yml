@@ -21,6 +21,11 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Install NASM
+        run: |
+          choco install nasm -y
+          echo "C:\Program Files\NASM" >> $GITHUB_PATH
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
