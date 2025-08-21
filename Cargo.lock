@@ -18,18 +18,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "apng_output"
-version = "1.0.0"
-dependencies = [
- "aviutl",
- "png",
- "rust-ini",
- "widestring",
- "win32_dialog",
- "windows",
-]
-
-[[package]]
 name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -396,6 +384,18 @@ dependencies = [
  "fdeflate",
  "flate2",
  "miniz_oxide",
+]
+
+[[package]]
+name = "png_output"
+version = "1.0.0"
+dependencies = [
+ "aviutl",
+ "png",
+ "rust-ini",
+ "widestring",
+ "win32_dialog",
+ "windows",
 ]
 
 [[package]]

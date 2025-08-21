@@ -34,7 +34,7 @@ jobs:
         run: |
           TAG="${GITHUB_REF##*/}"
           if [[ "$TAG" == apng-v* ]]; then
-            echo "format=apng" >> $GITHUB_OUTPUT
+            echo "format=png" >> $GITHUB_OUTPUT
           elif [[ "$TAG" == gif-v* ]]; then
             echo "format=gif" >> $GITHUB_OUTPUT
           elif [[ "$TAG" == webp-v* ]]; then
