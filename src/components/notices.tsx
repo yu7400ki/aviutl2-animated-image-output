@@ -5,7 +5,12 @@ const notices = [
     type: "warning" as const,
     title: "処理時間について",
     description:
-      "大きなファイルサイズや長時間の動画では処理時間が長くなる場合があります",
+      "圧縮設定や動画サイズによっては処理時間が極端に長くなる場合があります",
+  },
+  {
+    type: "warning" as const,
+    title: "ファイルサイズについて",
+    description: "動画に比べてファイルサイズが大きくなる傾向があります",
   },
 ];
 
