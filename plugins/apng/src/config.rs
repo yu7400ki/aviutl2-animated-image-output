@@ -31,8 +31,8 @@ impl Into<png::ColorType> for ColorFormat {
 impl Into<&'static str> for ColorFormat {
     fn into(self) -> &'static str {
         match self {
-            ColorFormat::Rgb24 => "RGB 24bit",
-            ColorFormat::Rgba32 => "RGBA 32bit",
+            ColorFormat::Rgb24 => "透過無し",
+            ColorFormat::Rgba32 => "透過付き",
         }
     }
 }
@@ -186,6 +186,7 @@ pub struct Config {
     pub color_format: ColorFormat,
     pub compression_type: CompressionType,
     pub filter_type: FilterType,
+    pub adaptive_filter: bool,
 }
 
 impl Default for Config {
@@ -195,6 +196,7 @@ impl Default for Config {
             color_format: ColorFormat::default(),
             compression_type: CompressionType::default(),
             filter_type: FilterType::default(),
+            adaptive_filter: true,
         }
     }
 }
@@ -228,15 +230,6 @@ impl Config {
         }
     }
 
-    pub const fn default() -> Self {
-        Config {
-            repeat: 0,
-            color_format: ColorFormat::Rgb24,
-            compression_type: CompressionType::Default,
-            filter_type: FilterType::Sub,
-        }
-    }
-
     pub fn load() -> Self {
         let default = Self::default();
 
@@ -267,11 +260,18 @@ impl Config {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(default.filter_type);
 
+                let adaptive_filter = section
+                    .get("adaptive_filter")
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .map(|v| v != 0)
+                    .unwrap_or(default.adaptive_filter);
+
                 Config {
                     repeat,
                     color_format,
                     compression_type,
                     filter_type,
+                    adaptive_filter,
                 }
             } else {
                 default
@@ -291,7 +291,8 @@ impl Config {
                 "compression_type",
                 self.compression_type.to_index().to_string(),
             )
-            .set("filter_type", self.filter_type.to_index().to_string());
+            .set("filter_type", self.filter_type.to_index().to_string())
+            .set("adaptive_filter", (self.adaptive_filter as u32).to_string());
 
         let config_path = Self::config_file_path()?;
         ini.write_to_file(&config_path).map_err(|e| e.to_string())

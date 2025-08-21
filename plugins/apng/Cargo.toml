@@ -1,10 +1,10 @@
 [package]
-name = "apng_output"
-version = "1.0.0"
+name = "png_output"
+version = "1.1.0"
 edition = "2024"
 
 [lib]
-name = "apng_output"
+name = "png_output"
 crate-type = ["cdylib"]
 
 [dependencies]

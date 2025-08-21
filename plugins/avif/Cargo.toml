@@ -1,6 +1,6 @@
 [package]
 name = "avif_output"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 
 [lib]
@@ -10,12 +10,12 @@ crate-type = ["cdylib"]
 [dependencies]
 aviutl = { path = "../../libs/aviutl" }
 win32_dialog = { path = "../../libs/dialog" }
-libavif = { version = "0.14.0", default-features = false, features = [
-    "codec-aom",
-], git = "https://github.com/njaard/libavif-rs.git", rev = "18304417e422120835c358cdd0721ee43e4c6d7c" }
+rustavif = { git = "https://github.com/yu7400ki/rustavif", rev = "df26b9d", default-features = false, features = [
+  "codec-aom",
+] }
 rust-ini = { workspace = true }
 widestring = { workspace = true }
 windows = { workspace = true, features = [
-    "Win32_Foundation",
-    "Win32_UI_WindowsAndMessaging",
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
 ] }

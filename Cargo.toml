@@ -9,8 +9,11 @@ widestring = { version = "1.2" }
 rust-ini = { version = "0.21" }
 
 [profile.release]
-opt-level = "z"
-lto = true
+opt-level = 3
+lto = "fat"
 codegen-units = 1
 panic = "abort"
-strip = true
+strip = "symbols"
+overflow-checks = false
+debug-assertions = false
+incremental = false

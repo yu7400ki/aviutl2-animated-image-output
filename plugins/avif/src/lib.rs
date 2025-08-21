@@ -2,7 +2,7 @@ mod config;
 mod dialog;
 
 use aviutl::output2::{OutputInfo, OutputPluginTable};
-use libavif::{Encoder, RgbPixels, YuvFormat};
+use rustavif::{BitDepth, Encoder, RgbFormat, RgbImage};
 use std::ffi::c_void;
 use widestring::{U16CStr, Utf16Str, utf16str};
 use win32_dialog::MessageBox;
@@ -14,11 +14,12 @@ use dialog::show_config_dialog;
 fn create_avif_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
     let output_path = unsafe { U16CStr::from_ptr_str(info.savefile).to_string_lossy() };
 
-    let mut encoder = Encoder::new();
+    let mut encoder = Encoder::new().map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
+    encoder.set_repetition_count(config.repeat);
     encoder.set_timescale(info.rate as u64);
     encoder.set_quality(config.quality);
     encoder.set_speed(config.speed);
-    encoder.set_max_threads(config.threads);
+    encoder.set_max_threads(config.threads as u32);
 
     let width = info.w as u32;
     let height = info.h as u32;
@@ -34,11 +35,19 @@ fn create_avif_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
             ColorFormat::Rgba32 => info.get_video_rgba(frame as i32),
         };
 
-        if let Some(pixel_data) = image_data {
-            let rgb_pixels = RgbPixels::new(width, height, &pixel_data)
-                .map_err(|e| format!("RGBピクセル作成エラー: {}", e))?;
+        if let Some(mut pixel_data) = image_data {
+            let rgb_pixels = RgbImage::from_pixels(
+                width,
+                height,
+                BitDepth::Eight,
+                RgbFormat::Rgba,
+                &mut pixel_data,
+            )
+            .map_err(|e| format!("RGBピクセル作成エラー: {}", e))?;
 
-            let image = rgb_pixels.to_image(YuvFormat::Yuv420);
+            let image = rgb_pixels
+                .to_yuv_image(config.yuv_format.into())
+                .map_err(|e| format!("YUV画像変換エラー: {}", e))?;
 
             encoder
                 .add_image(&image, info.scale as u64, Default::default())
@@ -52,7 +61,8 @@ fn create_avif_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
         .finish()
         .map_err(|e| format!("エンコード完了エラー: {}", e))?;
 
-    std::fs::write(&output_path, &*data).map_err(|e| format!("ファイル保存エラー: {}", e))?;
+    std::fs::write(&output_path, data.as_slice())
+        .map_err(|e| format!("ファイル保存エラー: {}", e))?;
 
     Ok(())
 }

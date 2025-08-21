@@ -4,7 +4,7 @@ use win32_dialog::widget::ComboBox;
 use win32_dialog::{
     Dialog, MessageBox,
     layout::{FlexLayout, JustifyContent, SizeValue},
-    widget::{Button, ButtonEvent, CheckBox, CheckBoxEvent, Label, Number},
+    widget::{Button, ButtonEvent, CheckBox, Label, Number},
 };
 use windows::Win32::Foundation::*;
 
@@ -34,27 +34,10 @@ pub fn show_config_dialog(
         .value(default_config.quality as i32)
         .range(0, 100);
 
-    let method_label = Label::new("圧縮方法 (0-6)");
+    let method_label = Label::new("メソッド (0-6)");
     let method_input = Number::new()
         .value(default_config.method as i32)
         .range(0, 6);
-
-    // Initially set enabled state based on lossless checkbox
-    if default_config.lossless {
-        quality_input.set_enabled(false);
-        method_input.set_enabled(false);
-    }
-
-    let lossless_checkbox = lossless_checkbox.add_event_handler({
-        let quality_input = quality_input.clone();
-        let method_input = method_input.clone();
-        move |event| match event {
-            CheckBoxEvent::Changed(checked) => {
-                quality_input.set_enabled(!checked);
-                method_input.set_enabled(!checked);
-            }
-        }
-    });
 
     let mut dialog = Dialog::new("WebP出力設定");
 
@@ -111,7 +94,7 @@ pub fn show_config_dialog(
                     Err(_) => {
                         MessageBox::error(
                             Some(parent_hwnd),
-                            "圧縮方法の値が無効です。0-6の値を入力してください。",
+                            "メソッドの値が無効です。0-6の値を入力してください。",
                             "エラー",
                         );
                         return;

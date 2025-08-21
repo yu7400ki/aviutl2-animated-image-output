@@ -26,7 +26,13 @@ fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
     encoder.set_color(color_type);
     encoder.set_depth(BitDepth::Eight);
     encoder.set_compression(config.compression_type.into());
-    encoder.set_filter(config.filter_type.into());
+
+    if config.adaptive_filter {
+        encoder.set_adaptive_filter(png::AdaptiveFilterType::Adaptive);
+    } else {
+        encoder.set_filter(config.filter_type.into());
+        encoder.set_adaptive_filter(png::AdaptiveFilterType::NonAdaptive);
+    }
 
     // APNG設定
     encoder

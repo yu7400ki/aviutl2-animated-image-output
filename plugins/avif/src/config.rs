@@ -22,8 +22,8 @@ impl Default for ColorFormat {
 impl Into<&'static str> for ColorFormat {
     fn into(self) -> &'static str {
         match self {
-            ColorFormat::Rgb24 => "RGB 24bit",
-            ColorFormat::Rgba32 => "RGBA 32bit",
+            ColorFormat::Rgb24 => "透過無し",
+            ColorFormat::Rgba32 => "透過付き",
         }
     }
 }
@@ -49,20 +49,80 @@ impl ColorFormat {
     }
 }
 
+#[derive(Copy, Clone, PartialEq)]
+pub enum YuvFormat {
+    Yuv420,
+    Yuv422,
+    Yuv444,
+}
+
+impl Default for YuvFormat {
+    fn default() -> Self {
+        YuvFormat::Yuv420
+    }
+}
+
+impl Into<&'static str> for YuvFormat {
+    fn into(self) -> &'static str {
+        match self {
+            YuvFormat::Yuv420 => "YUV420",
+            YuvFormat::Yuv422 => "YUV422",
+            YuvFormat::Yuv444 => "YUV444",
+        }
+    }
+}
+
+impl FromStr for YuvFormat {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.parse::<u32>() {
+            Ok(0) => Ok(YuvFormat::Yuv420),
+            Ok(1) => Ok(YuvFormat::Yuv422),
+            Ok(2) => Ok(YuvFormat::Yuv444),
+            _ => Err(()),
+        }
+    }
+}
+
+impl Into<rustavif::PixelFormat> for YuvFormat {
+    fn into(self) -> rustavif::PixelFormat {
+        match self {
+            YuvFormat::Yuv420 => rustavif::PixelFormat::Yuv420,
+            YuvFormat::Yuv422 => rustavif::PixelFormat::Yuv422,
+            YuvFormat::Yuv444 => rustavif::PixelFormat::Yuv444,
+        }
+    }
+}
+
+impl YuvFormat {
+    fn to_index(&self) -> u32 {
+        match self {
+            YuvFormat::Yuv420 => 0,
+            YuvFormat::Yuv422 => 1,
+            YuvFormat::Yuv444 => 2,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Config {
+    pub repeat: u32,
     pub quality: u8,
     pub speed: u8,
     pub color_format: ColorFormat,
+    pub yuv_format: YuvFormat,
     pub threads: usize,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
+            repeat: 0,
             quality: 75,
             speed: 10,
             color_format: ColorFormat::default(),
+            yuv_format: YuvFormat::default(),
             threads: std::thread::available_parallelism().map_or(1, |p| p.get()),
         }
     }
@@ -116,6 +176,11 @@ impl Config {
 
         let section = ini.section(Some("Config"));
 
+        let repeat = section
+            .and_then(|s| s.get("repeat"))
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(default.repeat);
+
         let quality = section
             .and_then(|s| s.get("quality"))
             .and_then(|s| s.parse::<u8>().ok())
@@ -133,15 +198,22 @@ impl Config {
             .and_then(|s| s.parse::<ColorFormat>().ok())
             .unwrap_or_default();
 
+        let yuv_format = section
+            .and_then(|s| s.get("yuv_format"))
+            .and_then(|s| s.parse::<YuvFormat>().ok())
+            .unwrap_or_default();
+
         let threads = section
             .and_then(|s| s.get("threads"))
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(default.threads);
 
         Self {
+            repeat,
             quality,
             speed,
             color_format,
+            yuv_format,
             threads,
         }
     }
@@ -151,9 +223,11 @@ impl Config {
         let mut ini = Ini::new();
 
         ini.with_section(Some("Config"))
+            .set("repeat", self.repeat.to_string())
             .set("quality", self.quality.to_string())
             .set("speed", self.speed.to_string())
             .set("color_format", self.color_format.to_index().to_string())
+            .set("yuv_format", self.yuv_format.to_index().to_string())
             .set("threads", self.threads.to_string());
 
         ini.write_to_file(&config_path).map_err(|e| e.to_string())
