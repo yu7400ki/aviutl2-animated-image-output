@@ -4,7 +4,7 @@ use win32_dialog::widget::ComboBox;
 use win32_dialog::{
     Dialog, MessageBox,
     layout::{FlexLayout, JustifyContent, SizeValue},
-    widget::{Button, ButtonEvent, CheckBox, CheckBoxEvent, Label, Number},
+    widget::{Button, ButtonEvent, CheckBox, Label, Number},
 };
 use windows::Win32::Foundation::*;
 
@@ -38,23 +38,6 @@ pub fn show_config_dialog(
     let method_input = Number::new()
         .value(default_config.method as i32)
         .range(0, 6);
-
-    // Initially set enabled state based on lossless checkbox
-    if default_config.lossless {
-        quality_input.set_enabled(false);
-        method_input.set_enabled(false);
-    }
-
-    let lossless_checkbox = lossless_checkbox.add_event_handler({
-        let quality_input = quality_input.clone();
-        let method_input = method_input.clone();
-        move |event| match event {
-            CheckBoxEvent::Changed(checked) => {
-                quality_input.set_enabled(!checked);
-                method_input.set_enabled(!checked);
-            }
-        }
-    });
 
     let mut dialog = Dialog::new("WebP出力設定");
 
