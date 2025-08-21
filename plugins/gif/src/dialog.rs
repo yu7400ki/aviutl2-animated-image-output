@@ -20,7 +20,7 @@ pub fn show_config_dialog(
         .value(default_config.repeat as i32)
         .range(0, u16::MAX as i32);
 
-    let speed_label = Label::new("パレット生成速度 (1-30)");
+    let speed_label = Label::new("処理速度 (1-30)");
     let speed_input = Number::new()
         .value(default_config.speed as i32)
         .range(1, 30);
