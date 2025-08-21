@@ -19,7 +19,7 @@ const pluginSettings = {
       },
       {
         name: "アダプティブフィルター",
-        description: "自動的に最適なフィルターを選択",
+        description: "自動的に最適なフィルターを選択（処理時間は長くなります）",
       },
       {
         name: "フィルター",
@@ -40,9 +40,8 @@ const pluginSettings = {
         description: "透過無し / 透過付き",
       },
       {
-        name: "パレット生成速度",
-        description:
-          "NeuQuant アルゴリズムの処理速度（1-30、高い値=速い処理・低品質）",
+        name: "エンコード速度",
+        description: "エンコード速度（1-30、値が大きいほど高速）",
       },
     ],
   },
@@ -64,11 +63,11 @@ const pluginSettings = {
       },
       {
         name: "品質",
-        description: "画質設定（0-100、ロスレス OFF 時のみ）",
+        description: "品質設定（0-100）",
       },
       {
-        name: "圧縮方法",
-        description: "圧縮アルゴリズム（0-6、ロスレス OFF 時のみ）",
+        name: "メソッド",
+        description: "品質と速度のトレードオフ（0-6、値が小さいほど高速）",
       },
     ],
   },
@@ -77,11 +76,15 @@ const pluginSettings = {
     color: "orange",
     items: [
       {
+        name: "ループ回数",
+        description: "アニメーションの繰り返し回数（0 = 無限ループ）",
+      },
+      {
         name: "品質",
         description: "画質設定（0-100）",
       },
       {
-        name: "速度",
+        name: "エンコード速度",
         description: "エンコード速度（0-10、値が大きいほど高速）",
       },
       {
