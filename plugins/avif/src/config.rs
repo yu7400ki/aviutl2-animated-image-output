@@ -85,12 +85,12 @@ impl FromStr for YuvFormat {
     }
 }
 
-impl Into<libavif::YuvFormat> for YuvFormat {
-    fn into(self) -> libavif::YuvFormat {
+impl Into<rustavif::PixelFormat> for YuvFormat {
+    fn into(self) -> rustavif::PixelFormat {
         match self {
-            YuvFormat::Yuv420 => libavif::YuvFormat::Yuv420,
-            YuvFormat::Yuv422 => libavif::YuvFormat::Yuv422,
-            YuvFormat::Yuv444 => libavif::YuvFormat::Yuv444,
+            YuvFormat::Yuv420 => rustavif::PixelFormat::Yuv420,
+            YuvFormat::Yuv422 => rustavif::PixelFormat::Yuv422,
+            YuvFormat::Yuv444 => rustavif::PixelFormat::Yuv444,
         }
     }
 }
