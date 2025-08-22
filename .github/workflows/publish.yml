@@ -60,7 +60,7 @@ jobs:
       - name: Rename artifact
         run: |
           FORMAT=${{ steps.format.outputs.format }}
-          DLL_PATH="target/x86_64-pc-windows-gnu/release/${FORMAT}_output.dll"
+          DLL_PATH="${CARGO_TARGET_DIR}/x86_64-pc-windows-gnu/release/${FORMAT}_output.dll"
           AUO2_PATH="${FORMAT}_output.auo2"
           if [ ! -f "$DLL_PATH" ]; then
             echo "Build artifact not found: $DLL_PATH"
