@@ -23,7 +23,7 @@ fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Res
     let repeat_setting = if config.repeat == 0 {
         Repeat::Infinite
     } else {
-        Repeat::Finite(config.repeat)
+        Repeat::Finite(config.repeat - 1)
     };
 
     encoder
