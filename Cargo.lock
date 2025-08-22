@@ -25,7 +25,7 @@ checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
 name = "avif_output"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "aviutl",
  "rust-ini",
@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "gif_output"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "aviutl",
  "gif",
@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "png_output"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "aviutl",
  "png",
@@ -587,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "webp_output"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "aviutl",
  "libwebp-sys",
