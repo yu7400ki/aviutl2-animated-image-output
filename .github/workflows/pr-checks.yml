@@ -47,7 +47,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: x86_64-pc-windows-gnu
 
       - name: Install NASM
         run: |
@@ -58,7 +58,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Check Build
-        run: cargo build --target x86_64-pc-windows-msvc --locked
+        run: cargo build --target x86_64-pc-windows-gnu --locked
 
   frontend-checks:
     name: Frontend Checks

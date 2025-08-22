@@ -27,7 +27,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: x86_64-pc-windows-gnu
 
       - name: Determine plugin format
         id: format
@@ -54,12 +54,12 @@ jobs:
 
       - name: Build plugin
         run: |
-          cargo build --release --target x86_64-pc-windows-msvc -p ${{ steps.format.outputs.format }}_output
+          cargo build --release --target x86_64-pc-windows-gnu -p ${{ steps.format.outputs.format }}_output
 
       - name: Rename artifact
         run: |
           FORMAT=${{ steps.format.outputs.format }}
-          DLL_PATH="target/x86_64-pc-windows-msvc/release/${FORMAT}_output.dll"
+          DLL_PATH="target/x86_64-pc-windows-gnu/release/${FORMAT}_output.dll"
           AUO2_PATH="${FORMAT}_output.auo2"
           if [ ! -f "$DLL_PATH" ]; then
             echo "Build artifact not found: $DLL_PATH"
