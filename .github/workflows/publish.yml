@@ -19,6 +19,7 @@ jobs:
         shell: bash
     env:
       CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: D:\t
 
     steps:
       - name: Checkout repository

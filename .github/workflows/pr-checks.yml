@@ -39,6 +39,8 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      CARGO_TARGET_DIR: D:\t
 
     steps:
       - name: Checkout repository
