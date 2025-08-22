@@ -280,7 +280,7 @@ dependencies = [
 [[package]]
 name = "libavif-sys"
 version = "0.1.0"
-source = "git+https://github.com/yu7400ki/rustavif?rev=df26b9d#df26b9d4cc250311311f4bc1a6d6698f4e116ecd"
+source = "git+https://github.com/yu7400ki/rustavif?rev=d7e326a#d7e326a40af2b6beeff573a8be57f6038f3d9122"
 dependencies = [
  "bindgen",
  "cmake",
@@ -474,7 +474,7 @@ dependencies = [
 [[package]]
 name = "rustavif"
 version = "0.1.0"
-source = "git+https://github.com/yu7400ki/rustavif?rev=df26b9d#df26b9d4cc250311311f4bc1a6d6698f4e116ecd"
+source = "git+https://github.com/yu7400ki/rustavif?rev=d7e326a#d7e326a40af2b6beeff573a8be57f6038f3d9122"
 dependencies = [
  "libavif-sys",
 ]
