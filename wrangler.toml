@@ -3,3 +3,8 @@ compatibility_date = "2025-7-18"
 
 [assets]
 directory = "dist/client"
+html_handling = "auto-trailing-slash"
+
+[[routes]]
+pattern = "yu7400ki.me/aviutl2-animated-image-output*"
+zone_name = "yu7400ki.me"

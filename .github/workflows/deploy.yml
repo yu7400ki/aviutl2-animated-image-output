@@ -28,6 +28,7 @@ jobs:
       - name: Build
         run: bun run build
         env:
+          BASE_URL: /aviutl2-animated-image-output
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           GITHUB_REPOSITORY_NAME: ${{ github.event.repository.name }}
 

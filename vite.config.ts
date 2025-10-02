@@ -12,6 +12,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
 import { RSC_POSTFIX } from "./src/framework/shared";
 
 export default defineConfig((env) => ({
+  base: process.env.BASE_URL ?? "/",
   plugins: [
     react(),
     rsc({
@@ -27,6 +28,13 @@ export default defineConfig((env) => ({
     tsconfigPaths(),
     tailwindcss(),
   ],
+  environments: {
+    client: {
+      build: {
+        outDir: path.join("dist/client", process.env.BASE_URL ?? "/"),
+      },
+    },
+  },
 }));
 
 function rscSsgPlugin(): Plugin[] {
