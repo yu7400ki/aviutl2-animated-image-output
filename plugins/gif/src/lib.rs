@@ -30,6 +30,9 @@ fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Res
         .set_repeat(repeat_setting)
         .map_err(|e| format!("ループ設定エラー: {}", e))?;
 
+    let delay = (100.0 * info.scale as f64 / info.rate as f64).round() as u16;
+    let delay = delay.max(1);
+
     for frame in 0..info.n {
         if info.is_abort() {
             return Err("処理が中断されました".into());
@@ -40,7 +43,7 @@ fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Res
             ColorFormat::Rgba32 => info.get_video_rgba(frame),
         };
 
-        if let Some(image_data) = image_data {
+        if let Some(mut image_data) = image_data {
             let mut gif_frame = match config.color_format {
                 ColorFormat::Rgb24 => {
                     Frame::from_rgb_speed(info.w as u16, info.h as u16, &image_data, config.speed)
@@ -48,14 +51,13 @@ fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Res
                 ColorFormat::Rgba32 => Frame::from_rgba_speed(
                     info.w as u16,
                     info.h as u16,
-                    &mut image_data.clone(),
+                    &mut image_data,
                     config.speed,
                 ),
             };
 
             gif_frame.dispose = gif::DisposalMethod::Background;
-            let delay = (100.0 * info.scale as f64 / info.rate as f64).round() as u16;
-            gif_frame.delay = delay.max(1);
+            gif_frame.delay = delay;
 
             encoder
                 .write_frame(&gif_frame)
