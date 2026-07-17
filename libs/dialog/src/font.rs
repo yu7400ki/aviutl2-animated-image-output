@@ -42,7 +42,7 @@ impl FontManager {
             );
 
             if font.is_invalid() {
-                Err(DialogError::Win32Error(windows::core::Error::from_win32()))
+                Err(DialogError::Win32Error(windows::core::Error::from_thread()))
             } else {
                 Ok(font)
             }

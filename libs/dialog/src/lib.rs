@@ -197,7 +197,7 @@ impl Dialog {
                 if result.0 == 0 {
                     break; // WM_QUIT
                 } else if result.0 == -1 {
-                    return Err(DialogError::Win32Error(Error::from_win32()));
+                    return Err(DialogError::Win32Error(Error::from_thread()));
                 }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
@@ -253,7 +253,7 @@ impl Dialog {
                     hIconSm: HICON::default(),
                 };
                 if RegisterClassExW(&wc) == 0 {
-                    return Err(DialogError::Win32Error(Error::from_win32()));
+                    return Err(DialogError::Win32Error(Error::from_thread()));
                 }
             }
         }
@@ -317,7 +317,7 @@ pub fn get_text_size(text: &str, font: Option<HFONT>) -> Result<(i32, i32)> {
     unsafe {
         let hdc = GetDC(None);
         if hdc.is_invalid() {
-            return Err(DialogError::Win32Error(Error::from_win32()));
+            return Err(DialogError::Win32Error(Error::from_thread()));
         }
 
         if let Some(font) = font {
@@ -330,7 +330,7 @@ pub fn get_text_size(text: &str, font: Option<HFONT>) -> Result<(i32, i32)> {
         if result.as_bool() {
             Ok((size.cx, size.cy))
         } else {
-            Err(DialogError::Win32Error(Error::from_win32()))
+            Err(DialogError::Win32Error(Error::from_thread()))
         }
     }
 }

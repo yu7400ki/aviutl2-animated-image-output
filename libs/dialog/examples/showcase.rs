@@ -136,7 +136,7 @@ fn main() -> Result<()> {
             if result.0 == 0 {
                 break; // WM_QUIT
             } else if result.0 == -1 {
-                return Err(Error::from_win32());
+                return Err(Error::from_thread());
             }
 
             let _ = TranslateMessage(&msg);
