@@ -8,11 +8,9 @@ name = "gif_output"
 crate-type = ["cdylib"]
 
 [dependencies]
-aviutl = { path = "../../libs/aviutl" }
+aviutl2 = { path = "../../libs/aviutl2" }
 win32_dialog = { path = "../../libs/dialog" }
 gif = { version = "0.13" }
-rust-ini = { workspace = true }
-widestring = { workspace = true }
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",

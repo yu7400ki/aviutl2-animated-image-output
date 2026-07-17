@@ -1,70 +1,19 @@
-use ini::Ini;
-use std::path::{Path, PathBuf};
+pub use aviutl2::ColorFormat;
+use aviutl2::IniConfig;
+use aviutl2::ini::{Ini, Properties};
 use std::str::FromStr;
-use windows::Win32::Foundation::{HMODULE, MAX_PATH};
-use windows::Win32::System::LibraryLoader::{
-    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GetModuleFileNameW, GetModuleHandleExW,
-};
-use windows::core::PCWSTR;
 
-#[derive(Copy, Clone, PartialEq)]
-pub enum ColorFormat {
-    Rgb24,
-    Rgba32,
-}
-
-impl Default for ColorFormat {
-    fn default() -> Self {
-        ColorFormat::Rgb24
-    }
-}
-
-impl Into<&'static str> for ColorFormat {
-    fn into(self) -> &'static str {
-        match self {
-            ColorFormat::Rgb24 => "透過無し",
-            ColorFormat::Rgba32 => "透過付き",
-        }
-    }
-}
-
-impl FromStr for ColorFormat {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.parse::<u32>() {
-            Ok(0) => Ok(ColorFormat::Rgb24),
-            Ok(1) => Ok(ColorFormat::Rgba32),
-            _ => Err(()),
-        }
-    }
-}
-
-impl ColorFormat {
-    fn to_index(&self) -> u32 {
-        match self {
-            ColorFormat::Rgb24 => 0,
-            ColorFormat::Rgba32 => 1,
-        }
-    }
-}
-
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Default)]
 pub enum YuvFormat {
+    #[default]
     Yuv420,
     Yuv422,
     Yuv444,
 }
 
-impl Default for YuvFormat {
-    fn default() -> Self {
-        YuvFormat::Yuv420
-    }
-}
-
-impl Into<&'static str> for YuvFormat {
-    fn into(self) -> &'static str {
-        match self {
+impl From<YuvFormat> for &'static str {
+    fn from(value: YuvFormat) -> Self {
+        match value {
             YuvFormat::Yuv420 => "YUV420",
             YuvFormat::Yuv422 => "YUV422",
             YuvFormat::Yuv444 => "YUV444",
@@ -85,9 +34,9 @@ impl FromStr for YuvFormat {
     }
 }
 
-impl Into<rustavif::PixelFormat> for YuvFormat {
-    fn into(self) -> rustavif::PixelFormat {
-        match self {
+impl From<YuvFormat> for rustavif::PixelFormat {
+    fn from(value: YuvFormat) -> Self {
+        match value {
             YuvFormat::Yuv420 => rustavif::PixelFormat::Yuv420,
             YuvFormat::Yuv422 => rustavif::PixelFormat::Yuv422,
             YuvFormat::Yuv444 => rustavif::PixelFormat::Yuv444,
@@ -96,7 +45,7 @@ impl Into<rustavif::PixelFormat> for YuvFormat {
 }
 
 impl YuvFormat {
-    fn to_index(&self) -> u32 {
+    fn to_index(self) -> u32 {
         match self {
             YuvFormat::Yuv420 => 0,
             YuvFormat::Yuv422 => 1,
@@ -128,53 +77,11 @@ impl Default for Config {
     }
 }
 
-impl Config {
-    fn config_file_path() -> Result<PathBuf, String> {
-        let (buffer, len) = unsafe {
-            let mut hmodule: HMODULE = HMODULE::default();
-            GetModuleHandleExW(
-                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-                PCWSTR(Self::config_file_path as *const () as *const u16),
-                &mut hmodule as *mut HMODULE,
-            )
-            .map_err(|e| format!("GetModuleHandleExW failed: {}", e))?;
+impl IniConfig for Config {
+    const FILE_NAME: &'static str = concat!(env!("CARGO_PKG_NAME"), ".ini");
 
-            let mut buffer = [0u16; MAX_PATH as usize];
-            let len = GetModuleFileNameW(Some(hmodule), &mut buffer);
-
-            (buffer, len)
-        };
-
-        if len > 0 {
-            let dll_path = String::from_utf16_lossy(&buffer[..len as usize]);
-            let dll_path = PathBuf::from(&dll_path);
-            let dll_dir = dll_path
-                .parent()
-                .ok_or("プラグインのディレクトリが取得できません")?;
-            Ok(dll_dir.join(concat!(env!("CARGO_PKG_NAME"), ".ini")))
-        } else {
-            Err("GetModuleFileNameW failed".to_string())
-        }
-    }
-
-    pub fn load() -> Self {
+    fn load_from(section: Option<&Properties>) -> Self {
         let default = Self::default();
-
-        let config_path = match Self::config_file_path() {
-            Ok(path) => path,
-            Err(_) => return default,
-        };
-
-        if !Path::new(&config_path).exists() {
-            return default;
-        }
-
-        let ini = match Ini::load_from_file(&config_path) {
-            Ok(ini) => ini,
-            Err(_) => return default,
-        };
-
-        let section = ini.section(Some("Config"));
 
         let repeat = section
             .and_then(|s| s.get("repeat"))
@@ -218,18 +125,13 @@ impl Config {
         }
     }
 
-    pub fn save(&self) -> Result<(), String> {
-        let config_path = Self::config_file_path()?;
-        let mut ini = Ini::new();
-
-        ini.with_section(Some("Config"))
+    fn save_to(&self, ini: &mut Ini) {
+        ini.with_section(Some(Self::SECTION))
             .set("repeat", self.repeat.to_string())
             .set("quality", self.quality.to_string())
             .set("speed", self.speed.to_string())
             .set("color_format", self.color_format.to_index().to_string())
             .set("yuv_format", self.yuv_format.to_index().to_string())
             .set("threads", self.threads.to_string());
-
-        ini.write_to_file(&config_path).map_err(|e| e.to_string())
     }
 }

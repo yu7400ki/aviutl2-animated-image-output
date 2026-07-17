@@ -27,17 +27,25 @@ checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 name = "avif_output"
 version = "1.1.3"
 dependencies = [
- "aviutl",
- "rust-ini",
+ "aviutl2",
  "rustavif",
- "widestring",
  "win32_dialog",
  "windows",
 ]
 
 [[package]]
-name = "aviutl"
-version = "0.0.0"
+name = "aviutl2"
+version = "0.1.0"
+dependencies = [
+ "aviutl2-sys",
+ "rust-ini",
+ "widestring",
+ "windows",
+]
+
+[[package]]
+name = "aviutl2-sys"
+version = "0.1.0"
 dependencies = [
  "windows",
 ]
@@ -232,10 +240,8 @@ dependencies = [
 name = "gif_output"
 version = "1.1.3"
 dependencies = [
- "aviutl",
+ "aviutl2",
  "gif",
- "rust-ini",
- "widestring",
  "win32_dialog",
  "windows",
 ]
@@ -390,10 +396,8 @@ dependencies = [
 name = "png_output"
 version = "1.1.2"
 dependencies = [
- "aviutl",
+ "aviutl2",
  "png",
- "rust-ini",
- "widestring",
  "win32_dialog",
  "windows",
 ]
@@ -589,10 +593,8 @@ dependencies = [
 name = "webp_output"
 version = "1.1.2"
 dependencies = [
- "aviutl",
+ "aviutl2",
  "libwebp-sys",
- "rust-ini",
- "widestring",
  "win32_dialog",
  "windows",
 ]

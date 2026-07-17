@@ -8,11 +8,9 @@ name = "webp_output"
 crate-type = ["cdylib"]
 
 [dependencies]
-aviutl = { path = "../../libs/aviutl" }
+aviutl2 = { path = "../../libs/aviutl2" }
 win32_dialog = { path = "../../libs/dialog" }
-rust-ini = { workspace = true }
 libwebp-sys = { version = "0.12" }
-widestring = { workspace = true }
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",

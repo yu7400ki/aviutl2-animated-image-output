@@ -8,13 +8,11 @@ name = "avif_output"
 crate-type = ["cdylib"]
 
 [dependencies]
-aviutl = { path = "../../libs/aviutl" }
+aviutl2 = { path = "../../libs/aviutl2" }
 win32_dialog = { path = "../../libs/dialog" }
 rustavif = { git = "https://github.com/yu7400ki/rustavif", rev = "d7e326a", default-features = false, features = [
   "codec-aom",
 ] }
-rust-ini = { workspace = true }
-widestring = { workspace = true }
 windows = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_UI_WindowsAndMessaging",
