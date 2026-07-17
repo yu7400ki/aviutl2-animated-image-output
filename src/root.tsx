@@ -1,15 +1,7 @@
-import { DistributionSite } from "./components/distribution-site";
-import { getConfig, getPluginReleases } from "./libs/release";
+import type React from "react";
 import "./index.css";
 
-export async function getStaticPaths() {
-  return ["/"];
-}
-
-export async function Root(_: { url: URL }) {
-  const config = getConfig();
-  const releases = await getPluginReleases(config);
-
+export default function Root({ children }: { children: React.ReactNode }) {
   return (
     <html lang="ja">
       <head>
@@ -21,11 +13,7 @@ export async function Root(_: { url: URL }) {
           content="AviUtl ExEdit2 で動画をアニメーション画像として出力できるプラグインセット。PNG(APNG)、GIF、WebP、AVIFの4つのフォーマットに対応。"
         />
       </head>
-      <body>
-        <main>
-          <DistributionSite releases={releases} />
-        </main>
-      </body>
+      <body>{children}</body>
     </html>
   );
 }
