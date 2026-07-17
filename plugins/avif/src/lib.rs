@@ -11,6 +11,13 @@ use windows::{Win32::Foundation::*, core::*};
 use config::{ColorFormat, Config};
 use dialog::show_config_dialog;
 
+fn rgb_format_for(color_format: ColorFormat) -> RgbFormat {
+    match color_format {
+        ColorFormat::Rgb24 => RgbFormat::Rgb,
+        ColorFormat::Rgba32 => RgbFormat::Rgba,
+    }
+}
+
 fn create_avif_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
     let output_path = unsafe { U16CStr::from_ptr_str(info.savefile).to_string_lossy() };
 
@@ -40,7 +47,7 @@ fn create_avif_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
                 width,
                 height,
                 BitDepth::Eight,
-                RgbFormat::Rgba,
+                rgb_format_for(config.color_format),
                 &mut pixel_data,
             )
             .map_err(|e| format!("RGBピクセル作成エラー: {}", e))?;
