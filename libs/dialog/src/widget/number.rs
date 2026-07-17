@@ -1,27 +1,26 @@
+use super::{CreateCtx, MeasureCtx, Widget, get_window_text, require_node};
+use crate::Result;
 use crate::layout::SizeValue;
-use crate::{ControlId, DialogError, Result, Widget};
 use std::cell::RefCell;
-use std::ffi::c_void;
 use std::rc::Rc;
-use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Gdi::HFONT;
-use windows::Win32::System::LibraryLoader::*;
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::UI::Controls::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
-use windows::Win32::UI::{Controls::*, WindowsAndMessaging::*};
-use windows::core::*;
+use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::{HSTRING, PCWSTR, w};
 
 struct NumberInner {
     hwnd: Option<HWND>,
     updown_hwnd: Option<HWND>,
-    id: ControlId,
-    value: i32,
+    text: String,
     range: Option<(i32, i32)>,
     enabled: bool,
-    width: crate::layout::SizeValue,
-    height: crate::layout::SizeValue,
+    width: SizeValue,
+    height: SizeValue,
     node_id: Option<taffy::NodeId>,
 }
 
+/// スピンボタン付きの数値入力コントロール
 #[derive(Clone)]
 pub struct Number(Rc<RefCell<NumberInner>>);
 
@@ -30,8 +29,7 @@ impl Number {
         Number(Rc::new(RefCell::new(NumberInner {
             hwnd: None,
             updown_hwnd: None,
-            id: ControlId::new(),
-            value: 0,
+            text: "0".to_string(),
             range: None,
             enabled: true,
             width: SizeValue::Percent(1.0),
@@ -40,18 +38,18 @@ impl Number {
         })))
     }
 
-    pub fn with_width(self, width: crate::layout::SizeValue) -> Self {
+    pub fn with_width(self, width: SizeValue) -> Self {
         self.0.borrow_mut().width = width;
         self
     }
 
-    pub fn with_height(self, height: crate::layout::SizeValue) -> Self {
+    pub fn with_height(self, height: SizeValue) -> Self {
         self.0.borrow_mut().height = height;
         self
     }
 
     pub fn value(self, val: i32) -> Self {
-        self.0.borrow_mut().value = val;
+        self.0.borrow_mut().text = val.to_string();
         self
     }
 
@@ -66,18 +64,9 @@ impl Number {
     }
 
     pub fn get_text(&self) -> String {
-        let inner = self.0.borrow();
-        match inner.hwnd {
-            Some(hwnd) => unsafe {
-                let mut buffer = [0u16; 256];
-                let len = GetWindowTextW(hwnd, &mut buffer);
-                if len > 0 {
-                    String::from_utf16_lossy(&buffer[..len as usize])
-                } else {
-                    String::new()
-                }
-            },
-            None => inner.value.to_string(),
+        match self.hwnd() {
+            Some(hwnd) => get_window_text(hwnd),
+            None => self.0.borrow().text.clone(),
         }
     }
 
@@ -86,7 +75,8 @@ impl Number {
     }
 
     pub fn set_text(&self, text: &str) {
-        let inner = self.0.borrow();
+        let mut inner = self.0.borrow_mut();
+        inner.text = text.to_string();
         if let Some(hwnd) = inner.hwnd {
             let hstring = HSTRING::from(text);
             unsafe {
@@ -101,7 +91,7 @@ impl Number {
 
     pub fn set_enabled(&self, enabled: bool) {
         self.0.borrow_mut().enabled = enabled;
-        if let Some(hwnd) = self.get_hwnd() {
+        if let Some(hwnd) = self.hwnd() {
             unsafe {
                 let _ = EnableWindow(hwnd, enabled);
             }
@@ -113,24 +103,14 @@ impl Number {
     }
 }
 
+impl Default for Number {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Widget for Number {
-    fn get_id(&self) -> ControlId {
-        self.0.borrow().id.clone()
-    }
-
-    fn get_hwnd(&self) -> Option<HWND> {
-        self.0.borrow().hwnd
-    }
-
-    fn handle_message(&mut self, _msg: u32, _wparam: WPARAM, _lparam: LPARAM) -> Option<LRESULT> {
-        None
-    }
-
-    fn create_node(
-        &self,
-        tree: &mut taffy::TaffyTree,
-        _font: Option<HFONT>,
-    ) -> Result<taffy::NodeId> {
+    fn build_node(&self, tree: &mut taffy::TaffyTree, _ctx: &MeasureCtx) -> Result<taffy::NodeId> {
         let size = {
             let inner = self.0.borrow();
             taffy::Size {
@@ -143,69 +123,48 @@ impl Widget for Number {
             size,
             ..Default::default()
         })?;
-
         self.0.borrow_mut().node_id = Some(node);
         Ok(node)
     }
 
-    fn create_window(
-        &mut self,
-        parent: HWND,
-        taffy: &taffy::TaffyTree,
-        position: (i32, i32),
-    ) -> Result<()> {
-        let node_id = self.0.borrow().node_id.ok_or_else(|| {
-            DialogError::InvalidOperation("Node ID not set for number".to_string())
-        })?;
-        let layout = taffy.layout(node_id)?;
+    fn create(&self, ctx: &mut CreateCtx, offset: (f32, f32)) -> Result<Vec<i32>> {
+        let node_id = require_node(self.0.borrow().node_id, "Number")?;
+        let rect = ctx.control_rect(node_id, offset)?;
+        let edit_id = ctx.alloc_id();
+        let updown_id = ctx.alloc_id();
+
+        let hwnd_edit = ctx.create_control(
+            w!("EDIT"),
+            PCWSTR::null(),
+            WS_BORDER | WS_TABSTOP | WINDOW_STYLE(ES_NUMBER as u32),
+            WS_EX_CLIENTEDGE,
+            rect,
+            edit_id,
+        )?;
+
+        // スピンボタン。UDS_ALIGNRIGHTによりUDM_SETBUDDYでエディットの右端に配置される
+        let updown_rect = super::ControlRect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: rect.height,
+        };
+        let hwnd_updown = ctx.create_control(
+            UPDOWN_CLASS,
+            PCWSTR::null(),
+            WINDOW_STYLE(UDS_ALIGNRIGHT)
+                | WINDOW_STYLE(UDS_SETBUDDYINT)
+                | WINDOW_STYLE(UDS_ARROWKEYS),
+            WINDOW_EX_STYLE(0),
+            updown_rect,
+            updown_id,
+        )?;
 
         unsafe {
-            let hinstance = GetModuleHandleW(None)?;
-
-            // Create the edit control
-            let hwnd_edit = CreateWindowExW(
-                WS_EX_CLIENTEDGE,
-                w!("EDIT"),
-                PCWSTR::null(),
-                WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | WINDOW_STYLE(ES_NUMBER as u32),
-                layout.location.x as i32 + position.0,
-                layout.location.y as i32 + position.1,
-                layout.size.width as i32,
-                layout.size.height as i32,
-                Some(parent),
-                Some(HMENU(self.0.borrow().id.as_raw() as *mut c_void)),
-                Some(HINSTANCE(hinstance.0)),
-                None,
-            )?;
-
-            let enabled = self.0.borrow().enabled;
-            let _ = EnableWindow(hwnd_edit, enabled);
-
-            // Create the updown control
-            let hwnd_updown = CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                UPDOWN_CLASS,
-                PCWSTR::null(),
-                WS_CHILD
-                    | WS_VISIBLE
-                    | WINDOW_STYLE(UDS_ALIGNRIGHT as u32)
-                    | WINDOW_STYLE(UDS_SETBUDDYINT as u32)
-                    | WINDOW_STYLE(UDS_ARROWKEYS as u32),
-                layout.location.x as i32,
-                layout.location.y as i32,
-                0,
-                layout.size.height as i32,
-                Some(parent),
-                Some(HMENU((self.0.borrow().id.as_raw() + 1000) as *mut c_void)),
-                Some(HINSTANCE(hinstance.0)),
-                None,
-            )?;
-
-            let initial_value = self.0.borrow().value;
-            let hstring = HSTRING::from(initial_value.to_string().as_str());
+            let text = self.0.borrow().text.clone();
+            let hstring = HSTRING::from(text.as_str());
             let _ = SetWindowTextW(hwnd_edit, &hstring);
 
-            // Set updown control's buddy to the edit control
             SendMessageW(
                 hwnd_updown,
                 UDM_SETBUDDY,
@@ -213,7 +172,6 @@ impl Widget for Number {
                 Some(LPARAM(0)),
             );
 
-            // Set range if specified
             if let Some((min, max)) = self.0.borrow().range {
                 SendMessageW(
                     hwnd_updown,
@@ -223,29 +181,26 @@ impl Widget for Number {
                 );
             }
 
-            self.0.borrow_mut().hwnd = Some(hwnd_edit);
-            self.0.borrow_mut().updown_hwnd = Some(hwnd_updown);
-
-            Ok(())
+            let enabled = self.0.borrow().enabled;
+            let _ = EnableWindow(hwnd_edit, enabled);
         }
+
+        let mut inner = self.0.borrow_mut();
+        inner.hwnd = Some(hwnd_edit);
+        inner.updown_hwnd = Some(hwnd_updown);
+        // 通知は使用しないためコマンドIDは登録しない
+        Ok(Vec::new())
     }
 
-    fn set_font(&self, font: HFONT) {
-        if let Some(hwnd) = self.get_hwnd() {
-            unsafe {
-                SendMessageW(
-                    hwnd,
-                    WM_SETFONT,
-                    Some(WPARAM(font.0 as usize)),
-                    Some(LPARAM(1)),
-                );
-            }
-        }
+    fn cache_state(&self) {
+        let text = self.get_text();
+        let mut inner = self.0.borrow_mut();
+        inner.text = text;
+        inner.hwnd = None;
+        inner.updown_hwnd = None;
     }
-}
 
-impl Default for Number {
-    fn default() -> Self {
-        Self::new()
+    fn hwnd(&self) -> Option<HWND> {
+        self.0.borrow().hwnd
     }
 }

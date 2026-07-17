@@ -1,14 +1,18 @@
-use super::{Layout, LayoutItem};
-use crate::DialogError;
-use crate::{Result, layout::SizeValue, widget::Widget};
-use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Gdi::HFONT;
+use super::{Layout, LayoutItem, SizeValue};
+use crate::widget::{CreateCtx, MeasureCtx, Widget};
+use crate::{DialogError, Result};
+use std::rc::Rc;
 
-#[derive(Default)]
 pub struct FlexLayout {
     style: taffy::Style,
     items: Vec<LayoutItem>,
     node_id: Option<taffy::NodeId>,
+}
+
+impl Default for FlexLayout {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FlexLayout {
@@ -30,15 +34,11 @@ impl FlexLayout {
     }
 
     pub fn column() -> Self {
-        let mut layout = Self::new();
-        layout.style.flex_direction = taffy::FlexDirection::Column;
-        layout
+        Self::new().with_direction(taffy::FlexDirection::Column)
     }
 
     pub fn row() -> Self {
-        let mut layout = Self::new();
-        layout.style.flex_direction = taffy::FlexDirection::Row;
-        layout
+        Self::new().with_direction(taffy::FlexDirection::Row)
     }
 
     pub fn add_item(mut self, item: LayoutItem) -> Self {
@@ -52,7 +52,7 @@ impl FlexLayout {
     }
 
     pub fn with_widget<T: Widget + 'static>(mut self, widget: T) -> Self {
-        self.items.push(LayoutItem::Widget(Box::new(widget)));
+        self.items.push(LayoutItem::Widget(Rc::new(widget)));
         self
     }
 
@@ -89,14 +89,8 @@ impl FlexLayout {
         self
     }
 
-    pub fn with_padding(mut self, padding: f32) -> Self {
-        self.style.padding = taffy::Rect {
-            left: taffy::LengthPercentage::length(padding),
-            right: taffy::LengthPercentage::length(padding),
-            top: taffy::LengthPercentage::length(padding),
-            bottom: taffy::LengthPercentage::length(padding),
-        };
-        self
+    pub fn with_padding(self, padding: f32) -> Self {
+        self.with_padding_rect(padding, padding, padding, padding)
     }
 
     pub fn with_padding_rect(mut self, left: f32, right: f32, top: f32, bottom: f32) -> Self {
@@ -153,77 +147,38 @@ impl FlexLayout {
 }
 
 impl Layout for FlexLayout {
-    fn compute(
-        &mut self,
-        tree: &mut taffy::TaffyTree,
-        font: Option<HFONT>,
-    ) -> Result<taffy::NodeId> {
+    fn build(&mut self, tree: &mut taffy::TaffyTree, ctx: &MeasureCtx) -> Result<taffy::NodeId> {
         let mut child_nodes = Vec::new();
 
         for item in &mut self.items {
             let node = match item {
-                LayoutItem::Layout(layout) => layout.compute(tree, font),
-                LayoutItem::Widget(widget) => widget.create_node(tree, font),
+                LayoutItem::Layout(layout) => layout.build(tree, ctx),
+                LayoutItem::Widget(widget) => widget.build_node(tree, ctx),
             }?;
             child_nodes.push(node);
         }
 
-        let container = tree
-            .new_with_children(self.style.clone(), &child_nodes)
-            .unwrap();
-
+        let container = tree.new_with_children(self.style.clone(), &child_nodes)?;
         self.node_id = Some(container);
-
         Ok(container)
     }
 
-    fn create_window(
-        &mut self,
-        parent: HWND,
-        taffy: &taffy::TaffyTree,
-        position: (i32, i32),
-    ) -> Result<()> {
+    fn create(&self, ctx: &mut CreateCtx, offset: (f32, f32)) -> Result<()> {
         let node_id = self.node_id.ok_or_else(|| {
-            DialogError::InvalidOperation("Node ID not set for button".to_string())
+            DialogError::InvalidOperation("FlexLayout: layout has not been built".into())
         })?;
-        let layout = taffy.layout(node_id)?;
-        let x = position.0 + layout.location.x as i32;
-        let y = position.1 + layout.location.y as i32;
+        let layout = ctx.tree().layout(node_id)?;
+        let origin = (offset.0 + layout.location.x, offset.1 + layout.location.y);
 
-        for item in &mut self.items {
-            match item {
-                LayoutItem::Widget(widget) => widget.create_window(parent, taffy, (x, y))?,
-                LayoutItem::Layout(layout) => layout.create_window(parent, taffy, (x, y))?,
-            };
-        }
-        Ok(())
-    }
-
-    fn handle_message(
-        &mut self,
-        msg: u32,
-        wparam: windows::Win32::Foundation::WPARAM,
-        lparam: windows::Win32::Foundation::LPARAM,
-    ) -> Option<windows::Win32::Foundation::LRESULT> {
-        // 子要素にメッセージを伝播
-        for item in &mut self.items {
-            let result = match item {
-                LayoutItem::Widget(widget) => widget.handle_message(msg, wparam, lparam),
-                LayoutItem::Layout(layout) => layout.handle_message(msg, wparam, lparam),
-            };
-            if let Some(result) = result {
-                return Some(result);
-            }
-        }
-        None
-    }
-
-    fn apply_font(&self, font: HFONT) {
         for item in &self.items {
             match item {
-                LayoutItem::Widget(widget) => widget.set_font(font),
-                LayoutItem::Layout(layout) => layout.apply_font(font),
-            };
+                LayoutItem::Widget(widget) => {
+                    let ids = widget.create(ctx, origin)?;
+                    ctx.register(Rc::clone(widget), ids);
+                }
+                LayoutItem::Layout(layout) => layout.create(ctx, origin)?,
+            }
         }
+        Ok(())
     }
 }

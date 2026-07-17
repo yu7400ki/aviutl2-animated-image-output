@@ -1,22 +1,19 @@
+use super::{CreateCtx, MeasureCtx, Widget, get_window_text, require_node};
+use crate::Result;
 use crate::layout::SizeValue;
-use crate::{ControlId, DialogError, Result, Widget};
 use std::cell::RefCell;
-use std::ffi::c_void;
 use std::rc::Rc;
-use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Gdi::HFONT;
-use windows::Win32::System::LibraryLoader::*;
+use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::*;
+use windows::core::{HSTRING, PCWSTR, w};
 
 struct TextBoxInner {
     hwnd: Option<HWND>,
-    id: ControlId,
     text: String,
     enabled: bool,
-    width: crate::layout::SizeValue,
-    height: crate::layout::SizeValue,
+    width: SizeValue,
+    height: SizeValue,
     node_id: Option<taffy::NodeId>,
 }
 
@@ -27,7 +24,6 @@ impl TextBox {
     pub fn new() -> Self {
         TextBox(Rc::new(RefCell::new(TextBoxInner {
             hwnd: None,
-            id: ControlId::new(),
             text: String::new(),
             enabled: true,
             width: SizeValue::Percent(1.0),
@@ -36,12 +32,12 @@ impl TextBox {
         })))
     }
 
-    pub fn with_width(self, width: crate::layout::SizeValue) -> Self {
+    pub fn with_width(self, width: SizeValue) -> Self {
         self.0.borrow_mut().width = width;
         self
     }
 
-    pub fn with_height(self, height: crate::layout::SizeValue) -> Self {
+    pub fn with_height(self, height: SizeValue) -> Self {
         self.0.borrow_mut().height = height;
         self
     }
@@ -57,18 +53,9 @@ impl TextBox {
     }
 
     pub fn get_text(&self) -> String {
-        let inner = self.0.borrow();
-        match inner.hwnd {
-            Some(hwnd) => unsafe {
-                let mut buffer = [0u16; 256];
-                let len = GetWindowTextW(hwnd, &mut buffer);
-                if len > 0 {
-                    String::from_utf16_lossy(&buffer[..len as usize])
-                } else {
-                    String::new()
-                }
-            },
-            None => inner.text.clone(),
+        match self.hwnd() {
+            Some(hwnd) => get_window_text(hwnd),
+            None => self.0.borrow().text.clone(),
         }
     }
 
@@ -85,7 +72,7 @@ impl TextBox {
 
     pub fn set_enabled(&self, enabled: bool) {
         self.0.borrow_mut().enabled = enabled;
-        if let Some(hwnd) = self.get_hwnd() {
+        if let Some(hwnd) = self.hwnd() {
             unsafe {
                 let _ = EnableWindow(hwnd, enabled);
             }
@@ -97,24 +84,14 @@ impl TextBox {
     }
 }
 
+impl Default for TextBox {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Widget for TextBox {
-    fn get_id(&self) -> ControlId {
-        self.0.borrow().id.clone()
-    }
-
-    fn get_hwnd(&self) -> Option<HWND> {
-        self.0.borrow().hwnd
-    }
-
-    fn handle_message(&mut self, _msg: u32, _wparam: WPARAM, _lparam: LPARAM) -> Option<LRESULT> {
-        None
-    }
-
-    fn create_node(
-        &self,
-        tree: &mut taffy::TaffyTree,
-        _font: Option<HFONT>,
-    ) -> Result<taffy::NodeId> {
+    fn build_node(&self, tree: &mut taffy::TaffyTree, _ctx: &MeasureCtx) -> Result<taffy::NodeId> {
         let size = {
             let inner = self.0.borrow();
             taffy::Size {
@@ -127,70 +104,47 @@ impl Widget for TextBox {
             size,
             ..Default::default()
         })?;
-
         self.0.borrow_mut().node_id = Some(node);
         Ok(node)
     }
 
-    fn create_window(
-        &mut self,
-        parent: HWND,
-        taffy: &taffy::TaffyTree,
-        position: (i32, i32),
-    ) -> Result<()> {
-        let node_id = self.0.borrow().node_id.ok_or_else(|| {
-            DialogError::InvalidOperation("Node ID not set for textbox".to_string())
-        })?;
-        let layout = taffy.layout(node_id)?;
+    fn create(&self, ctx: &mut CreateCtx, offset: (f32, f32)) -> Result<Vec<i32>> {
+        let node_id = require_node(self.0.borrow().node_id, "TextBox")?;
+        let rect = ctx.control_rect(node_id, offset)?;
+        let id = ctx.alloc_id();
+
+        let hwnd = ctx.create_control(
+            w!("EDIT"),
+            PCWSTR::null(),
+            WS_BORDER | WS_TABSTOP,
+            WS_EX_CLIENTEDGE,
+            rect,
+            id,
+        )?;
 
         unsafe {
-            let hinstance = GetModuleHandleW(None)?;
-
-            let hwnd = CreateWindowExW(
-                WS_EX_CLIENTEDGE,
-                w!("EDIT"),
-                PCWSTR::null(),
-                WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP,
-                layout.location.x as i32 + position.0,
-                layout.location.y as i32 + position.1,
-                layout.size.width as i32,
-                layout.size.height as i32,
-                Some(parent),
-                Some(HMENU(self.0.borrow().id.as_raw() as *mut c_void)),
-                Some(HINSTANCE(hinstance.0)),
-                None,
-            )?;
-
-            let initial_text = self.0.borrow().text.clone();
-            if !initial_text.is_empty() {
-                let hstring = HSTRING::from(initial_text.as_str());
+            let text = self.0.borrow().text.clone();
+            if !text.is_empty() {
+                let hstring = HSTRING::from(text.as_str());
                 let _ = SetWindowTextW(hwnd, &hstring);
             }
 
             let enabled = self.0.borrow().enabled;
             let _ = EnableWindow(hwnd, enabled);
-
-            self.0.borrow_mut().hwnd = Some(hwnd);
-            Ok(())
         }
+
+        self.0.borrow_mut().hwnd = Some(hwnd);
+        Ok(Vec::new())
     }
 
-    fn set_font(&self, font: HFONT) {
-        if let Some(hwnd) = self.get_hwnd() {
-            unsafe {
-                SendMessageW(
-                    hwnd,
-                    WM_SETFONT,
-                    Some(WPARAM(font.0 as usize)),
-                    Some(LPARAM(1)),
-                );
-            }
-        }
+    fn cache_state(&self) {
+        let text = self.get_text();
+        let mut inner = self.0.borrow_mut();
+        inner.text = text;
+        inner.hwnd = None;
     }
-}
 
-impl Default for TextBox {
-    fn default() -> Self {
-        Self::new()
+    fn hwnd(&self) -> Option<HWND> {
+        self.0.borrow().hwnd
     }
 }

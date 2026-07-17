@@ -1,26 +1,19 @@
+use super::{CreateCtx, MeasureCtx, Widget, dispatch_event, require_node};
+use crate::Result;
 use crate::layout::SizeValue;
-use crate::{ControlId, DialogError, Result, Widget, get_text_size};
 use std::cell::RefCell;
-use std::ffi::c_void;
 use std::rc::Rc;
-use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Gdi::HFONT;
-use windows::Win32::System::LibraryLoader::*;
+use windows::Win32::Foundation::{HWND, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::*;
-
-pub enum CheckBoxEvent {
-    Changed(bool),
-}
+use windows::core::{HSTRING, PCWSTR, w};
 
 struct CheckBoxInner {
     hwnd: Option<HWND>,
-    id: ControlId,
     label: String,
     checked: bool,
-    event_handlers: Vec<Box<dyn FnMut(CheckBoxEvent)>>,
-    width: crate::layout::SizeValue,
-    height: crate::layout::SizeValue,
+    handlers: Vec<Box<dyn FnMut(bool)>>,
+    width: SizeValue,
+    height: SizeValue,
     node_id: Option<taffy::NodeId>,
 }
 
@@ -31,52 +24,48 @@ impl CheckBox {
     pub fn new(label: &str) -> Self {
         CheckBox(Rc::new(RefCell::new(CheckBoxInner {
             hwnd: None,
-            id: ControlId::new(),
             label: label.to_string(),
             checked: false,
-            event_handlers: Vec::new(),
+            handlers: Vec::new(),
             width: SizeValue::Auto,
             height: SizeValue::Auto,
             node_id: None,
         })))
     }
 
-    pub fn with_width(self, width: crate::layout::SizeValue) -> Self {
+    pub fn with_width(self, width: SizeValue) -> Self {
         self.0.borrow_mut().width = width;
         self
     }
 
-    pub fn with_height(self, height: crate::layout::SizeValue) -> Self {
+    pub fn with_height(self, height: SizeValue) -> Self {
         self.0.borrow_mut().height = height;
         self
     }
 
     pub fn checked(self, checked: bool) -> Self {
-        self.0.borrow_mut().checked = checked;
+        self.set_checked(checked);
         self
     }
 
-    pub fn add_event_handler<F>(self, handler: F) -> Self
+    /// チェック状態の変化時のハンドラを追加する
+    pub fn on_change<F>(self, handler: F) -> Self
     where
-        F: FnMut(CheckBoxEvent) + 'static,
+        F: FnMut(bool) + 'static,
     {
-        self.0.borrow_mut().event_handlers.push(Box::new(handler));
+        self.0.borrow_mut().handlers.push(Box::new(handler));
         self
     }
 
     pub fn is_checked(&self) -> bool {
-        if let Some(hwnd) = self.get_hwnd() {
-            unsafe {
-                let result = SendMessageW(hwnd, BM_GETCHECK, None, None);
-                result.0 == 1
-            }
-        } else {
-            self.0.borrow().checked
+        match self.hwnd() {
+            Some(hwnd) => unsafe { SendMessageW(hwnd, BM_GETCHECK, None, None).0 == 1 },
+            None => self.0.borrow().checked,
         }
     }
 
     pub fn set_checked(&self, checked: bool) {
-        if let Some(hwnd) = self.get_hwnd() {
+        if let Some(hwnd) = self.hwnd() {
             unsafe {
                 SendMessageW(
                     hwnd,
@@ -91,65 +80,26 @@ impl CheckBox {
 }
 
 impl Widget for CheckBox {
-    fn get_id(&self) -> ControlId {
-        self.0.borrow().id.clone()
-    }
-
-    fn get_hwnd(&self) -> Option<HWND> {
-        self.0.borrow().hwnd
-    }
-
-    fn handle_message(&mut self, msg: u32, wparam: WPARAM, _lparam: LPARAM) -> Option<LRESULT> {
-        match msg {
-            WM_COMMAND => {
-                let command_id = (wparam.0 & 0xFFFF) as i32;
-                let notification = (wparam.0 >> 16) as u16;
-
-                let id = self.0.borrow().id.as_raw();
-                if command_id == id && u32::from(notification) == BN_CLICKED {
-                    let checked = self.is_checked();
-                    self.0.borrow_mut().checked = checked;
-
-                    for handler in &mut self.0.borrow_mut().event_handlers {
-                        handler(CheckBoxEvent::Changed(checked));
-                    }
-                    return Some(LRESULT(0));
-                }
-            }
-            _ => {}
-        }
-        None
-    }
-
-    fn create_node(
-        &self,
-        tree: &mut taffy::TaffyTree,
-        font: Option<HFONT>,
-    ) -> Result<taffy::NodeId> {
+    fn build_node(&self, tree: &mut taffy::TaffyTree, ctx: &MeasureCtx) -> Result<taffy::NodeId> {
         let size = {
             let inner = self.0.borrow();
 
-            // Calculate text size with the provided font only when needed
-            let (text_width, text_height) = if inner.width == crate::layout::SizeValue::Auto
-                || inner.height == crate::layout::SizeValue::Auto
-            {
-                get_text_size(&inner.label, font)
-                    .map(|(w, h)| (w as f32, h as f32))
-                    .unwrap_or((0.0, 0.0))
-            } else {
-                (0.0, 0.0)
-            };
+            let (text_width, text_height) =
+                if inner.width == SizeValue::Auto || inner.height == SizeValue::Auto {
+                    ctx.text_size(&inner.label)?
+                } else {
+                    (0.0, 0.0)
+                };
 
             taffy::Size {
-                width: if inner.width == crate::layout::SizeValue::Auto {
-                    taffy::Dimension::length(text_width + 20.0) // Add padding for checkbox
-                } else {
-                    inner.width.clone().into()
+                width: match &inner.width {
+                    // チェックマーク分の余白を足す
+                    SizeValue::Auto => taffy::Dimension::length(text_width + 20.0),
+                    other => other.clone().into(),
                 },
-                height: if inner.height == crate::layout::SizeValue::Auto {
-                    taffy::Dimension::length(text_height + 5.0) // Add padding
-                } else {
-                    inner.height.clone().into()
+                height: match &inner.height {
+                    SizeValue::Auto => taffy::Dimension::length(text_height + 5.0),
+                    other => other.clone().into(),
                 },
             }
         };
@@ -158,61 +108,55 @@ impl Widget for CheckBox {
             size,
             ..Default::default()
         })?;
-
         self.0.borrow_mut().node_id = Some(node);
         Ok(node)
     }
 
-    fn create_window(
-        &mut self,
-        parent: HWND,
-        taffy: &taffy::TaffyTree,
-        position: (i32, i32),
-    ) -> Result<()> {
-        let node_id = self.0.borrow().node_id.ok_or_else(|| {
-            DialogError::InvalidOperation("Node ID not set for checkbox".to_string())
-        })?;
-        let layout = taffy.layout(node_id)?;
+    fn create(&self, ctx: &mut CreateCtx, offset: (f32, f32)) -> Result<Vec<i32>> {
+        let node_id = require_node(self.0.borrow().node_id, "CheckBox")?;
+        let rect = ctx.control_rect(node_id, offset)?;
+        let id = ctx.alloc_id();
 
-        unsafe {
-            let hinstance = GetModuleHandleW(None)?;
+        let (label, checked) = {
+            let inner = self.0.borrow();
+            (HSTRING::from(inner.label.as_str()), inner.checked)
+        };
 
-            let hstring = HSTRING::from(self.0.borrow().label.as_str());
+        let hwnd = ctx.create_control(
+            w!("BUTTON"),
+            PCWSTR(label.as_ptr()),
+            WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
+            WINDOW_EX_STYLE(0),
+            rect,
+            id,
+        )?;
 
-            let hwnd = CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                w!("BUTTON"),
-                PCWSTR(hstring.as_ptr()),
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
-                layout.location.x as i32 + position.0,
-                layout.location.y as i32 + position.1,
-                layout.size.width as i32,
-                layout.size.height as i32,
-                Some(parent),
-                Some(HMENU(self.0.borrow().id.as_raw() as *mut c_void)),
-                Some(HINSTANCE(hinstance.0)),
-                None,
-            )?;
-
-            if self.0.borrow().checked {
+        if checked {
+            unsafe {
                 SendMessageW(hwnd, BM_SETCHECK, Some(WPARAM(1)), None);
             }
+        }
 
-            self.0.borrow_mut().hwnd = Some(hwnd);
-            Ok(())
+        self.0.borrow_mut().hwnd = Some(hwnd);
+        Ok(vec![id])
+    }
+
+    fn on_command(&self, code: u16) {
+        if u32::from(code) == BN_CLICKED {
+            let checked = self.is_checked();
+            self.0.borrow_mut().checked = checked;
+            dispatch_event(&self.0, |inner| &mut inner.handlers, checked);
         }
     }
 
-    fn set_font(&self, font: HFONT) {
-        if let Some(hwnd) = self.get_hwnd() {
-            unsafe {
-                SendMessageW(
-                    hwnd,
-                    WM_SETFONT,
-                    Some(WPARAM(font.0 as usize)),
-                    Some(LPARAM(1)),
-                );
-            }
-        }
+    fn cache_state(&self) {
+        let checked = self.is_checked();
+        let mut inner = self.0.borrow_mut();
+        inner.checked = checked;
+        inner.hwnd = None;
+    }
+
+    fn hwnd(&self) -> Option<HWND> {
+        self.0.borrow().hwnd
     }
 }

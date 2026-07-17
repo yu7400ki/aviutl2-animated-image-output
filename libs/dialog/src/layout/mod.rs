@@ -6,65 +6,60 @@ pub use taffy::{
     AlignItems, AvailableSpace, Dimension, FlexDirection, JustifyContent, LengthPercentage, Size,
 };
 
-use crate::{Result, widget::Widget};
-use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Gdi::HFONT;
+use crate::Result;
+use crate::widget::{CreateCtx, Label, MeasureCtx, Widget};
+use std::rc::Rc;
 
-/// 基本的なレイアウト要素を表すtrait
+/// レイアウト要素を表すtrait。
+/// サイズ・座標はすべて論理px(96DPI基準)で扱い、物理pxへの変換は
+/// `CreateCtx`がコントロール生成時に行う。
 pub trait Layout {
-    fn compute(
-        &mut self,
-        tree: &mut taffy::TaffyTree,
-        font: Option<HFONT>,
-    ) -> Result<taffy::NodeId>;
-    fn create_window(
-        &mut self,
-        parent: HWND,
-        taffy: &taffy::TaffyTree,
-        position: (i32, i32),
-    ) -> Result<()>;
-    fn handle_message(
-        &mut self,
-        msg: u32,
-        wparam: windows::Win32::Foundation::WPARAM,
-        lparam: windows::Win32::Foundation::LPARAM,
-    ) -> Option<windows::Win32::Foundation::LRESULT>;
-    fn apply_font(&self, font: HFONT);
+    /// taffyノードを構築する
+    fn build(&mut self, tree: &mut taffy::TaffyTree, ctx: &MeasureCtx) -> Result<taffy::NodeId>;
+
+    /// レイアウト結果に従ってコントロールを生成する。
+    /// `offset`は親からの累積位置(論理px)。
+    fn create(&self, ctx: &mut CreateCtx, offset: (f32, f32)) -> Result<()>;
 }
 
-/// Layoutの中に入れられるアイテム（WidgetかLayoutのどちらか）
+/// Layoutの中に入れられるアイテム(WidgetかLayoutのどちらか)
 pub enum LayoutItem {
-    Widget(Box<dyn Widget>),
+    Widget(Rc<dyn Widget>),
     Layout(Box<dyn Layout>),
 }
 
-/// SizeValue provides a more ergonomic API for specifying dimensions
+/// 「ラベル+入力コントロール」の縦組みセクションを作る補助関数
+pub fn labeled(text: &str, widget: impl Widget + 'static) -> FlexLayout {
+    FlexLayout::column()
+        .with_gap(5.0)
+        .with_widget(Label::new(text))
+        .with_widget(widget)
+}
+
+/// サイズ指定のためのAPI
 #[derive(Debug, Clone, PartialEq)]
 pub enum SizeValue {
-    /// Fixed pixel values
+    /// 固定値(論理px)
     Points(f32),
-    /// Percentage values (0.0 to 1.0)
+    /// 親に対する割合(0.0〜1.0)
     Percent(f32),
-    /// Automatic sizing based on content
+    /// 内容に応じた自動サイズ
     Auto,
 }
 
 impl SizeValue {
-    /// Create a fixed pixel size
     pub fn points(value: f32) -> Self {
         SizeValue::Points(value)
     }
 
-    /// Create a percentage size
     pub fn percent(value: f32) -> Self {
         assert!(
-            value >= 0.0 && value <= 1.0,
+            (0.0..=1.0).contains(&value),
             "Percentage must be between 0.0 and 1.0"
         );
         SizeValue::Percent(value)
     }
 
-    /// Create an automatic size
     pub fn auto() -> Self {
         SizeValue::Auto
     }

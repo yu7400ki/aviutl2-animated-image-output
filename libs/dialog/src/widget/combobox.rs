@@ -1,27 +1,20 @@
+use super::{CreateCtx, MeasureCtx, Widget, dispatch_event, require_node};
+use crate::Result;
 use crate::layout::SizeValue;
-use crate::{ControlId, DialogError, Result, Widget};
 use std::cell::RefCell;
-use std::ffi::c_void;
 use std::rc::Rc;
-use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Gdi::HFONT;
-use windows::Win32::System::LibraryLoader::*;
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::*;
-
-pub enum ComboBoxEvent {
-    SelectionChanged(i32),
-}
+use windows::core::{HSTRING, PCWSTR, w};
 
 struct ComboBoxInner {
     hwnd: Option<HWND>,
-    id: ControlId,
     items: Vec<String>,
     selected_index: i32,
-    event_handlers: Vec<Box<dyn FnMut(ComboBoxEvent)>>,
-    width: crate::layout::SizeValue,
-    height: crate::layout::SizeValue,
+    handlers: Vec<Box<dyn FnMut(i32)>>,
+    width: SizeValue,
+    height: SizeValue,
     node_id: Option<taffy::NodeId>,
     enabled: bool,
 }
@@ -33,10 +26,9 @@ impl ComboBox {
     pub fn new(items: Vec<&str>) -> Self {
         ComboBox(Rc::new(RefCell::new(ComboBoxInner {
             hwnd: None,
-            id: ControlId::new(),
             items: items.into_iter().map(|s| s.to_string()).collect(),
             selected_index: 0,
-            event_handlers: Vec::new(),
+            handlers: Vec::new(),
             width: SizeValue::Percent(1.0),
             height: SizeValue::Points(25.0),
             node_id: None,
@@ -44,51 +36,48 @@ impl ComboBox {
         })))
     }
 
-    pub fn with_width(self, width: crate::layout::SizeValue) -> Self {
+    pub fn with_width(self, width: SizeValue) -> Self {
         self.0.borrow_mut().width = width;
         self
     }
 
-    pub fn with_height(self, height: crate::layout::SizeValue) -> Self {
+    pub fn with_height(self, height: SizeValue) -> Self {
         self.0.borrow_mut().height = height;
         self
     }
 
     pub fn selected(self, index: i32) -> Self {
-        self.0.borrow_mut().selected_index = index;
+        self.set_selected_index(index);
         self
     }
 
-    pub fn add_event_handler<F>(self, handler: F) -> Self
+    /// 選択変更時のハンドラを追加する
+    pub fn on_change<F>(self, handler: F) -> Self
     where
-        F: FnMut(ComboBoxEvent) + 'static,
+        F: FnMut(i32) + 'static,
     {
-        self.0.borrow_mut().event_handlers.push(Box::new(handler));
+        self.0.borrow_mut().handlers.push(Box::new(handler));
         self
     }
 
-    pub fn get_selected_index(&self) -> i32 {
-        if let Some(hwnd) = self.get_hwnd() {
-            unsafe {
-                let result = SendMessageW(hwnd, CB_GETCURSEL, None, None);
-                result.0 as i32
-            }
-        } else {
-            self.0.borrow().selected_index
+    pub fn selected_index(&self) -> i32 {
+        match self.hwnd() {
+            Some(hwnd) => unsafe { SendMessageW(hwnd, CB_GETCURSEL, None, None).0 as i32 },
+            None => self.0.borrow().selected_index,
         }
     }
 
     pub fn set_selected_index(&self, index: i32) {
         self.0.borrow_mut().selected_index = index;
-        if let Some(hwnd) = self.get_hwnd() {
+        if let Some(hwnd) = self.hwnd() {
             unsafe {
                 SendMessageW(hwnd, CB_SETCURSEL, Some(WPARAM(index as usize)), None);
             }
         }
     }
 
-    pub fn get_selected_text(&self) -> String {
-        let index = self.get_selected_index();
+    pub fn selected_text(&self) -> String {
+        let index = self.selected_index();
         let inner = self.0.borrow();
         if index >= 0 && (index as usize) < inner.items.len() {
             inner.items[index as usize].clone()
@@ -99,7 +88,7 @@ impl ComboBox {
 
     pub fn set_enabled(&self, enabled: bool) {
         self.0.borrow_mut().enabled = enabled;
-        if let Some(hwnd) = self.get_hwnd() {
+        if let Some(hwnd) = self.hwnd() {
             unsafe {
                 let _ = EnableWindow(hwnd, enabled);
             }
@@ -108,41 +97,7 @@ impl ComboBox {
 }
 
 impl Widget for ComboBox {
-    fn get_id(&self) -> ControlId {
-        self.0.borrow().id.clone()
-    }
-
-    fn get_hwnd(&self) -> Option<HWND> {
-        self.0.borrow().hwnd
-    }
-
-    fn handle_message(&mut self, msg: u32, wparam: WPARAM, _lparam: LPARAM) -> Option<LRESULT> {
-        match msg {
-            WM_COMMAND => {
-                let command_id = (wparam.0 & 0xFFFF) as i32;
-                let notification = (wparam.0 >> 16) as u16;
-
-                let id = self.0.borrow().id.as_raw();
-                if command_id == id && u32::from(notification) == CBN_SELCHANGE {
-                    let new_index = self.get_selected_index();
-                    self.0.borrow_mut().selected_index = new_index;
-
-                    for handler in &mut self.0.borrow_mut().event_handlers {
-                        handler(ComboBoxEvent::SelectionChanged(new_index));
-                    }
-                    return Some(LRESULT(0));
-                }
-            }
-            _ => {}
-        }
-        None
-    }
-
-    fn create_node(
-        &self,
-        tree: &mut taffy::TaffyTree,
-        _font: Option<HFONT>,
-    ) -> Result<taffy::NodeId> {
+    fn build_node(&self, tree: &mut taffy::TaffyTree, _ctx: &MeasureCtx) -> Result<taffy::NodeId> {
         let size = {
             let inner = self.0.borrow();
             taffy::Size {
@@ -155,45 +110,25 @@ impl Widget for ComboBox {
             size,
             ..Default::default()
         })?;
-
         self.0.borrow_mut().node_id = Some(node);
         Ok(node)
     }
 
-    fn create_window(
-        &mut self,
-        parent: HWND,
-        taffy: &taffy::TaffyTree,
-        position: (i32, i32),
-    ) -> Result<()> {
-        let node_id = self.0.borrow().node_id.ok_or_else(|| {
-            DialogError::InvalidOperation("Node ID not set for combobox".to_string())
-        })?;
-        let layout = taffy.layout(node_id)?;
+    fn create(&self, ctx: &mut CreateCtx, offset: (f32, f32)) -> Result<Vec<i32>> {
+        let node_id = require_node(self.0.borrow().node_id, "ComboBox")?;
+        let rect = ctx.control_rect(node_id, offset)?;
+        let id = ctx.alloc_id();
+
+        let hwnd = ctx.create_control(
+            w!("COMBOBOX"),
+            PCWSTR::null(),
+            WS_TABSTOP | WS_VSCROLL | WINDOW_STYLE(CBS_DROPDOWNLIST as u32),
+            WINDOW_EX_STYLE(0),
+            rect,
+            id,
+        )?;
 
         unsafe {
-            let hinstance = GetModuleHandleW(None)?;
-
-            let hwnd = CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                w!("COMBOBOX"),
-                PCWSTR::null(),
-                WS_CHILD
-                    | WS_VISIBLE
-                    | WS_TABSTOP
-                    | WS_VSCROLL
-                    | WINDOW_STYLE(CBS_DROPDOWNLIST as u32),
-                layout.location.x as i32 + position.0,
-                layout.location.y as i32 + position.1,
-                layout.size.width as i32,
-                (layout.size.height as i32) * self.0.borrow().items.len() as i32,
-                Some(parent),
-                Some(HMENU(self.0.borrow().id.as_raw() as *mut c_void)),
-                Some(HINSTANCE(hinstance.0)),
-                None,
-            )?;
-
-            // Add items to combobox
             for item in &self.0.borrow().items {
                 let hstring = HSTRING::from(item.as_str());
                 SendMessageW(
@@ -204,7 +139,23 @@ impl Widget for ComboBox {
                 );
             }
 
-            // Set initial selection
+            // CreateWindowExWに渡した高さは閉じた状態のもの。ドロップダウン
+            // リストの分を、フォント適用後の実際のアイテム高さから計算して確保する
+            let item_count = self.0.borrow().items.len() as i32;
+            let item_height = SendMessageW(hwnd, CB_GETITEMHEIGHT, Some(WPARAM(0)), None).0 as i32;
+            if item_height > 0 {
+                let total_height = rect.height + item_height * item_count.max(1) + 2;
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    0,
+                    0,
+                    rect.width,
+                    total_height,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+
             let selected_index = self.0.borrow().selected_index;
             SendMessageW(
                 hwnd,
@@ -213,25 +164,32 @@ impl Widget for ComboBox {
                 None,
             );
 
-            // Set initial enabled state
             let enabled = self.0.borrow().enabled;
             let _ = EnableWindow(hwnd, enabled);
+        }
 
-            self.0.borrow_mut().hwnd = Some(hwnd);
-            Ok(())
+        self.0.borrow_mut().hwnd = Some(hwnd);
+        Ok(vec![id])
+    }
+
+    fn on_command(&self, code: u16) {
+        if u32::from(code) == CBN_SELCHANGE {
+            let index = self.selected_index();
+            self.0.borrow_mut().selected_index = index;
+            dispatch_event(&self.0, |inner| &mut inner.handlers, index);
         }
     }
 
-    fn set_font(&self, font: HFONT) {
-        if let Some(hwnd) = self.get_hwnd() {
-            unsafe {
-                SendMessageW(
-                    hwnd,
-                    WM_SETFONT,
-                    Some(WPARAM(font.0 as usize)),
-                    Some(LPARAM(1)),
-                );
-            }
+    fn cache_state(&self) {
+        let index = self.selected_index();
+        let mut inner = self.0.borrow_mut();
+        if index >= 0 {
+            inner.selected_index = index;
         }
+        inner.hwnd = None;
+    }
+
+    fn hwnd(&self) -> Option<HWND> {
+        self.0.borrow().hwnd
     }
 }
