@@ -42,7 +42,7 @@ pub fn pa64_to_rgba8(input: &[u16], width: usize, height: usize) -> Vec<u8> {
 #[inline]
 fn unmultiply_pixel(r: u16, g: u16, b: u16, a: u16) -> [u8; 4] {
     let (r, g, b, a) = (r as u32, g as u32, b as u32, a as u32);
-    if a < 128 {
+    if a <= 128 {
         [0, 0, 0, 0]
     } else {
         [
@@ -218,7 +218,7 @@ mod avx2 {
         let mul = _mm256_setr_ps(255.0, 255.0, 255.0, 1.0, 255.0, 255.0, 255.0, 1.0);
         let c128 = _mm256_set1_ps(128.0);
         let c257 = _mm256_set1_ps(257.0);
-        let alpha_min = _mm256_set1_epi32(127);
+        let alpha_min = _mm256_set1_epi32(128);
 
         let a_i = _mm256_shuffle_epi32(v, 0b11_11_11_11); // [a a a a | a a a a]
         let a_half = _mm256_srli_epi32(a_i, 1); // floor(a / 2)
@@ -234,7 +234,7 @@ mod avx2 {
 
         let q = _mm256_cvttps_epi32(_mm256_div_ps(num, den));
 
-        // a < 128 のピクセルは全チャンネル0 (a=0の除算はここでマスクされる)
+        // a <= 128 のピクセルは全チャンネル0 (a=0の除算はここでマスクされる)
         let mask = _mm256_cmpgt_epi32(a_i, alpha_min);
         _mm256_and_si256(q, mask)
     }
