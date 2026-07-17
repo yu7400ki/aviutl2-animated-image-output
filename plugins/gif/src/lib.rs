@@ -129,6 +129,8 @@ const fn init_plugin_table() -> OutputPluginTable {
         func_output: Some(output_func),
         func_config: Some(config_func),
         func_get_config_text: None,
+        func_load_project_config: None,
+        func_save_project_config: None,
     }
 }
 

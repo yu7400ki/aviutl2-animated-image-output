@@ -57,7 +57,8 @@ pub struct OutputInfo {
 
     /// DIB形式の画像データを取得
     /// - frame: フレーム番号
-    /// - format: 画像フォーマット (0 = RGB24bit / 'YUY2' = YUY2)
+    /// - format: 画像フォーマット
+    ///   (0 = RGB24bit / 'PA64' = PA64 / 'HF64' = HF64 / 'YUY2' = YUY2 / 'YC48' = YC48)
     /// - 戻り値: データへのポインタ
     pub func_get_video: Option<extern "C" fn(frame: c_int, format: DWORD) -> *mut c_void>,
 
@@ -190,10 +191,16 @@ impl OutputInfo {
     }
 }
 
+/// プロジェクトファイル構造体 (plugin2.hに定義されています)
+#[repr(C)]
+pub struct ProjectFile {
+    _opaque: [u8; 0],
+}
+
 /// 出力プラグイン構造体
 #[repr(C)]
 pub struct OutputPluginTable {
-    /// フラグ (未使用)
+    /// フラグ
     pub flag: c_int,
     /// プラグインの名前
     pub name: LPCWSTR,
@@ -210,6 +217,14 @@ pub struct OutputPluginTable {
 
     /// 出力設定のテキスト情報を取得する時に呼ばれる関数
     pub func_get_config_text: Option<extern "C" fn() -> LPCWSTR>,
+
+    /// プロジェクトファイル側から出力設定の読み込み要求時に呼ばれる関数
+    /// (FLAG_PROJECT_CONFIGが有効の時のみ呼ばれます)
+    pub func_load_project_config: Option<extern "C" fn(project: *mut ProjectFile) -> bool>,
+
+    /// プロジェクトファイル側への出力設定の書き込み要求時に呼ばれる関数
+    /// (FLAG_PROJECT_CONFIGが有効の時のみ呼ばれます)
+    pub func_save_project_config: Option<extern "C" fn(project: *mut ProjectFile) -> bool>,
 }
 
 impl OutputPluginTable {
@@ -217,6 +232,10 @@ impl OutputPluginTable {
     pub const FLAG_VIDEO: c_int = 1;
     /// フラグ定数: 音声をサポートする
     pub const FLAG_AUDIO: c_int = 2;
+    /// フラグ定数: 静止画出力のみサポートする (OUTPUT_INFOが1フレーム出力になります)
+    pub const FLAG_IMAGE: c_int = 4;
+    /// フラグ定数: プロジェクトファイルの設定保持をサポートする
+    pub const FLAG_PROJECT_CONFIG: c_int = 8;
 }
 
 /// 画像フォーマット定数
@@ -233,6 +252,9 @@ pub mod video_format {
     /// HF64
     /// DXGI_FORMAT_R16G16B16A16_FLOAT(乗算済みα)
     pub const HF64: DWORD = u32::from_le_bytes(*b"HF64");
+    /// YC48
+    /// 互換対応のフォーマット
+    pub const YC48: DWORD = u32::from_le_bytes(*b"YC48");
 }
 
 /// 音声フォーマット定数
