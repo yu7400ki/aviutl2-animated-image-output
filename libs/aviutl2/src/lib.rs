@@ -7,6 +7,7 @@ pub use aviutl2_sys as sys;
 pub use ini;
 
 pub mod config;
+pub mod convert;
 pub mod module;
 pub mod output;
 pub mod pixel;

@@ -114,59 +114,23 @@ impl<'a> OutputInfo<'a> {
     /// BGRフォーマットのフレームデータをRGBに変換して取得
     pub fn get_video_rgb(&self, frame: i32) -> Option<Vec<u8>> {
         let data_ptr = unsafe { self.get_video_raw(frame, sys::BI_RGB) }?;
-        let (w, h) = (self.raw.w, self.raw.h);
+        let (w, h) = (self.raw.w as usize, self.raw.h as usize);
 
-        unsafe {
-            let input_stride = ((w * 3 + 3) / 4) * 4; // RGB24のストライド（4バイト境界アライメント）
-            let data_slice =
-                std::slice::from_raw_parts(data_ptr as *const u8, (input_stride * h) as usize);
+        let input_stride = (w * 3).next_multiple_of(4); // RGB24のストライド（4バイト境界アライメント）
+        let data_slice =
+            unsafe { std::slice::from_raw_parts(data_ptr as *const u8, input_stride * h) };
 
-            let mut image_buffer = Vec::with_capacity((w * h * 3) as usize);
-
-            // BMPは下から上に格納されているので反転してBGR→RGB変換
-            for y in (0..h).rev() {
-                let row_start = (y * input_stride) as usize;
-                let row_end = row_start + (w * 3) as usize;
-                for bgr_pixel in data_slice[row_start..row_end].chunks_exact(3) {
-                    image_buffer.push(bgr_pixel[2]); // R
-                    image_buffer.push(bgr_pixel[1]); // G
-                    image_buffer.push(bgr_pixel[0]); // B
-                }
-            }
-            Some(image_buffer)
-        }
+        Some(crate::convert::bgr_bottomup_to_rgb(data_slice, w, h))
     }
 
     /// PA64フォーマットのフレームデータをRGBAに変換して取得（アルファチャンネル付き）
     pub fn get_video_rgba(&self, frame: i32) -> Option<Vec<u8>> {
         let data_ptr = unsafe { self.get_video_raw(frame, sys::PA64) }?;
-        let (w, h) = (self.raw.w, self.raw.h);
+        let (w, h) = (self.raw.w as usize, self.raw.h as usize);
 
-        let data_slice =
-            unsafe { std::slice::from_raw_parts(data_ptr as *const u16, (w * h * 4) as usize) };
+        let data_slice = unsafe { std::slice::from_raw_parts(data_ptr as *const u16, w * h * 4) };
 
-        let mut image_buffer = Vec::with_capacity((w * h * 4) as usize);
-
-        for chunk in data_slice.chunks_exact(4) {
-            let r = chunk[0] as u32;
-            let g = chunk[1] as u32;
-            let b = chunk[2] as u32;
-            let a = chunk[3] as u32;
-
-            let (r8, g8, b8, a8) = if a < 128 {
-                (0, 0, 0, 0)
-            } else {
-                (
-                    ((r * 255 + a / 2) / a) as u8,
-                    ((g * 255 + a / 2) / a) as u8,
-                    ((b * 255 + a / 2) / a) as u8,
-                    ((a + 128) / 257) as u8,
-                )
-            };
-            image_buffer.extend_from_slice(&[r8, g8, b8, a8]);
-        }
-
-        Some(image_buffer)
+        Some(crate::convert::pa64_to_rgba8(data_slice, w, h))
     }
 
     /// [`ColorFormat`] に応じてフレームデータを取得する
