@@ -31,3 +31,28 @@ macro_rules! register_output_plugin {
         }
     };
 }
+
+/// [`crate::logger`] を有効化する `InitializeLogger` のDLLエクスポートを生成する
+///
+/// ホストがプラグインを読み込む際 `InitializePlugin` より先に呼ばれ、ログ出力用の
+/// ハンドルが渡される。呼び出すと [`crate::logger`] の関数
+/// (`log`/`info`/`warn`/`error`/`verbose`) がホストのログへ出力されるようになる。
+///
+/// **[`register_output_plugin!`] とは別呼び出しになる。呼び忘れると [`crate::logger`]
+/// の関数は無言でno-opのままになるため、両方セットで呼ぶこと。**
+///
+/// ```ignore
+/// register_output_plugin!(MyPlugin);
+/// register_logger!();
+/// ```
+#[macro_export]
+macro_rules! register_logger {
+    () => {
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn InitializeLogger(logger: *mut $crate::sys::LOG_HANDLE) {
+            let _ = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| unsafe {
+                $crate::logger::init(logger);
+            }));
+        }
+    };
+}

@@ -48,5 +48,7 @@ THE SOFTWARE.
 pub type DWORD = u32;
 pub type LPCWSTR = *const u16;
 
+pub mod logger2;
 pub mod output2;
+pub use logger2::*;
 pub use output2::*;
