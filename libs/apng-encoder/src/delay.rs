@@ -60,7 +60,8 @@ fn approximate(num: u64, den: u64) -> (u16, u16) {
     // 直前の2つの収束分数
     let (mut p0, mut q0) = (0u64, 1u64);
     let (mut p1, mut q1) = (1u64, 0u64);
-    let mut best: Option<(u64, u64)> = None;
+    // 表現できる最小の遅延。すべての候補が退けられた場合の下限を兼ねる
+    let mut best = (1u64, MAX);
 
     while d != 0 {
         let a = n / d;
@@ -70,8 +71,11 @@ fn approximate(num: u64, den: u64) -> (u16, u16) {
             // 上限に収まる範囲で最大の半収束分数
             let limit_p = (MAX - p0).checked_div(p1).unwrap_or(a);
             let limit_q = (MAX - q0).checked_div(q1).unwrap_or(a);
+            // t=0は上限に収まる半収束分数が存在しないことを意味する
             let t = a.min(limit_p).min(limit_q);
-            best = better(best, (p0 + t * p1, q0 + t * q1), num, den);
+            if t > 0 {
+                best = better(best, (p0 + t * p1, q0 + t * q1), num, den);
+            }
             break;
         }
 
@@ -80,19 +84,16 @@ fn approximate(num: u64, den: u64) -> (u16, u16) {
         (n, d) = (d, n % d);
     }
 
-    match best {
-        // 分子0への丸めは「可能な限り速く」の意味になってしまうため最小値へ寄せる
-        Some((p, q)) if p > 0 => (p as u16, q as u16),
-        _ => (1, MAX as u16),
-    }
+    (best.0 as u16, best.1 as u16)
 }
 
 /// 2つの候補のうち `num / den` に近い方を返す
-fn better(best: Option<(u64, u64)>, cand: (u64, u64), num: u64, den: u64) -> Option<(u64, u64)> {
-    if cand.1 == 0 || cand.0 == 0 {
+///
+/// 分子0への丸めは「可能な限り速く」の意味になってしまうため候補にしない。
+fn better(best: (u64, u64), cand: (u64, u64), num: u64, den: u64) -> (u64, u64) {
+    if cand.0 == 0 {
         return best;
     }
-    let Some(best) = best else { return Some(cand) };
 
     // |p/q - num/den| の比較を、共通の分母を払った整数比較へ落とす
     let error = |(p, q): (u64, u64)| {
@@ -102,11 +103,7 @@ fn better(best: Option<(u64, u64)>, cand: (u64, u64), num: u64, den: u64) -> Opt
     let (be, bq) = error(best);
     let (ce, cq) = error(cand);
 
-    if ce * bq < be * cq {
-        Some(cand)
-    } else {
-        Some(best)
-    }
+    if ce * bq < be * cq { cand } else { best }
 }
 
 #[cfg(test)]
@@ -184,5 +181,7 @@ mod tests {
     #[test]
     fn huge_values_are_clamped_to_the_maximum() {
         assert_eq!(parts(u32::MAX, 1), (MAX as u16, 1));
+        // 半収束分数が存在しない (t=0) 境界
+        assert_eq!(parts(131071, 2), (MAX as u16, 1));
     }
 }
