@@ -12,7 +12,6 @@ pub(crate) struct Compressor {
 impl Compressor {
     /// 圧縮レベル `level` (1..=9) の圧縮器を作る
     pub(crate) fn new(level: u32) -> Self {
-        debug_assert!((1..=9).contains(&level));
         Compressor {
             level: Compression::new(level),
         }
