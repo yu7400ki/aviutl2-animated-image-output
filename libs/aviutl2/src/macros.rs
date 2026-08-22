@@ -38,6 +38,10 @@ macro_rules! register_output_plugin {
 /// ハンドルが渡される。呼び出すと [`crate::logger`] の関数
 /// (`log`/`info`/`warn`/`error`/`verbose`) がホストのログへ出力されるようになる。
 ///
+/// [`crate::OutputPlugin::output`] の開始・完了 (フレーム数/出力サイズ/所要時間) と
+/// 失敗は [`register_output_plugin!`] が生成するシムが自動で記録するため、
+/// プラグイン側で書く必要はない。
+///
 /// **[`register_output_plugin!`] とは別呼び出しになる。呼び忘れると [`crate::logger`]
 /// の関数は無言でno-opのままになるため、両方セットで呼ぶこと。**
 ///

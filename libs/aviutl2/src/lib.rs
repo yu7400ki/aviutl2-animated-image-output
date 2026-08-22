@@ -12,6 +12,7 @@ pub use ini;
 pub mod config;
 pub mod convert;
 pub mod logger;
+mod metrics;
 pub mod module;
 pub mod output;
 pub mod pixel;

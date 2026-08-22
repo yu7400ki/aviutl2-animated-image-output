@@ -3,9 +3,11 @@
 //! このモジュールの内容は公開APIではない。
 
 use crate::output::{OutputInfo, OutputPlugin};
-use crate::sys;
+use crate::{logger, metrics, sys};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
 use windows::core::HSTRING;
@@ -98,23 +100,57 @@ fn show_error_message_box(message: &str) {
     }
 }
 
+/// パニックのペイロードから表示可能なメッセージを取り出す
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("不明なパニック")
+}
+
+/// 出力ファイルのサイズを整形する。取得できない場合は `"不明"`。
+fn output_size(path: &Path) -> String {
+    std::fs::metadata(path)
+        .map(|m| metrics::format_bytes(m.len()))
+        .unwrap_or_else(|_| "不明".to_string())
+}
+
 // catch_unwindはrelease(panic = "abort")では実質no-opだが、
 // devビルドでFFI境界を越えるunwindを防ぐ。
 
 extern "C" fn output_shim<T: OutputPlugin>(oip: *mut sys::OUTPUT_INFO) -> bool {
-    catch_unwind(AssertUnwindSafe(|| {
+    let name = T::info().name;
+    let result = catch_unwind(AssertUnwindSafe(|| {
         let Some(info) = (unsafe { OutputInfo::from_raw(oip) }) else {
+            logger::error(&format!("{name}: 出力情報の取得に失敗しました"));
             return false;
         };
+        logger::info(&format!("{name}: 出力を開始します"));
+        let start = Instant::now();
         match T::output(&info) {
-            Ok(()) => true,
+            Ok(()) => {
+                logger::info(&format!(
+                    "{name}: 出力完了 {}フレーム, {}, {:.2}秒",
+                    info.num_frames(),
+                    output_size(&info.savefile()),
+                    start.elapsed().as_secs_f64()
+                ));
+                true
+            }
             Err(e) => {
-                show_error_message_box(&e.to_string());
+                let message = e.to_string();
+                logger::error(&format!("{name}: {message}"));
+                show_error_message_box(&message);
                 false
             }
         }
-    }))
-    .unwrap_or(false)
+    }));
+
+    result.unwrap_or_else(|payload| {
+        logger::error(&format!("{name}: {}", panic_message(&*payload)));
+        false
+    })
 }
 
 extern "C" fn config_shim<T: OutputPlugin>(hwnd: HWND, dll_hinst: HINSTANCE) -> bool {

@@ -2,8 +2,8 @@ mod config;
 mod dialog;
 
 use aviutl2::{
-    FileFilter, IniConfig, OutputInfo, OutputPlugin, PluginFlags, PluginInfo,
-    register_output_plugin,
+    FileFilter, IniConfig, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
+    register_logger, register_output_plugin,
 };
 use gif::{Encoder, Frame, Repeat};
 use std::fs::File;
@@ -105,6 +105,7 @@ impl OutputPlugin for GifOutputPlugin {
                     // 設定を保存
                     if let Err(e) = config.save() {
                         let error_msg = format!("設定保存エラー: {}", e);
+                        logger::warn(&error_msg);
                         MessageBox::warning(Some(hwnd), &error_msg, "警告");
                     }
                     true
@@ -112,6 +113,7 @@ impl OutputPlugin for GifOutputPlugin {
                 None => false,
             }
         } else {
+            logger::error("設定の取得に失敗しました。");
             MessageBox::error(Some(hwnd), "設定の取得に失敗しました。", "エラー");
             false
         }
@@ -119,3 +121,4 @@ impl OutputPlugin for GifOutputPlugin {
 }
 
 register_output_plugin!(GifOutputPlugin);
+register_logger!();
