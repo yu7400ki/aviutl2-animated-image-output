@@ -338,3 +338,144 @@ fn invalid_parameters_are_rejected() {
         Err(Error::InvalidCompressionLevel(10))
     ));
 }
+
+/// 差分クロップの検証に使うキャンバスの大きさ
+const CROP_WIDTH: u32 = 8;
+const CROP_HEIGHT: u32 = 6;
+
+/// 一様な背景のフレームを作る
+fn solid(color_type: ColorType, value: u8) -> Vec<u8> {
+    let len = CROP_WIDTH as usize * CROP_HEIGHT as usize * color_type.bytes_per_pixel();
+    vec![value; len]
+}
+
+/// 指定した画素の全チャンネルを書き換える
+fn set_pixel(frame: &mut [u8], color_type: ColorType, x: u32, y: u32, value: u8) {
+    let bpp = color_type.bytes_per_pixel();
+    let start = (y as usize * CROP_WIDTH as usize + x as usize) * bpp;
+    frame[start..start + bpp].fill(value);
+}
+
+/// 各フレームのfcTLが示す矩形 (x, y, 幅, 高さ)
+fn rects(decoded: &[DecodedFrame]) -> Vec<(u32, u32, u32, u32)> {
+    decoded
+        .iter()
+        .map(|frame| {
+            let c = frame.control;
+            (c.x_offset, c.y_offset, c.width, c.height)
+        })
+        .collect()
+}
+
+/// フレーム列を符号化し、fcTLの矩形と合成結果の両方を確かめる
+fn assert_crop(color_type: ColorType, input: &[Vec<u8>], expected: &[(u32, u32, u32, u32)]) {
+    let bytes = encode(CROP_WIDTH, CROP_HEIGHT, color_type, input);
+    let (_, decoded) = decode(&bytes);
+
+    assert_eq!(rects(&decoded), expected, "{color_type:?}");
+
+    let mut canvas = vec![0u8; input[0].len()];
+    for (index, (frame, source)) in decoded.iter().zip(input).enumerate() {
+        composite(&mut canvas, frame, CROP_WIDTH, color_type);
+        assert_eq!(&canvas, source, "{color_type:?} フレーム {index}");
+    }
+}
+
+const WHOLE: (u32, u32, u32, u32) = (0, 0, CROP_WIDTH, CROP_HEIGHT);
+
+/// 差分の無いフレームは1x1の矩形になり、フレーム数はそのまま保たれる
+#[test]
+fn identical_frames_are_written_as_a_unit_rect() {
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        let input = vec![solid(color_type, 0x40); 3];
+        assert_crop(color_type, &input, &[WHOLE, (0, 0, 1, 1), (0, 0, 1, 1)]);
+    }
+}
+
+#[test]
+fn a_single_pixel_change_is_cropped() {
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        let base = solid(color_type, 0x40);
+        let mut changed = base.clone();
+        set_pixel(&mut changed, color_type, 3, 2, 0xFF);
+
+        assert_crop(color_type, &[base, changed], &[WHOLE, (3, 2, 1, 1)]);
+    }
+}
+
+#[test]
+fn corner_changes_are_cropped() {
+    let corners = [
+        (0, 0),
+        (CROP_WIDTH - 1, 0),
+        (0, CROP_HEIGHT - 1),
+        (CROP_WIDTH - 1, CROP_HEIGHT - 1),
+    ];
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        let mut input = vec![solid(color_type, 0x40)];
+        let mut expected = vec![WHOLE];
+        for (x, y) in corners {
+            let mut frame = input.last().unwrap().clone();
+            set_pixel(&mut frame, color_type, x, y, 0xFF);
+            input.push(frame);
+            expected.push((x, y, 1, 1));
+        }
+
+        assert_crop(color_type, &input, &expected);
+    }
+}
+
+#[test]
+fn an_edge_row_change_is_cropped() {
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        let base = solid(color_type, 0x40);
+        let mut changed = base.clone();
+        for x in 0..CROP_WIDTH {
+            set_pixel(&mut changed, color_type, x, CROP_HEIGHT - 1, 0xFF);
+        }
+
+        assert_crop(
+            color_type,
+            &[base, changed],
+            &[WHOLE, (0, CROP_HEIGHT - 1, CROP_WIDTH, 1)],
+        );
+    }
+}
+
+#[test]
+fn an_edge_column_change_is_cropped() {
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        let base = solid(color_type, 0x40);
+        let mut changed = base.clone();
+        for y in 0..CROP_HEIGHT {
+            set_pixel(&mut changed, color_type, CROP_WIDTH - 1, y, 0xFF);
+        }
+
+        assert_crop(
+            color_type,
+            &[base, changed],
+            &[WHOLE, (CROP_WIDTH - 1, 0, 1, CROP_HEIGHT)],
+        );
+    }
+}
+
+#[test]
+fn a_full_change_covers_the_canvas() {
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        let input = [solid(color_type, 0x40), solid(color_type, 0x80)];
+        assert_crop(color_type, &input, &[WHOLE, WHOLE]);
+    }
+}
+
+/// 離れた2画素の外接矩形は、変更されていない画素も含めて書き直す
+#[test]
+fn disjoint_changes_span_a_bounding_rect() {
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        let base = solid(color_type, 0x40);
+        let mut changed = base.clone();
+        set_pixel(&mut changed, color_type, 1, 1, 0xFF);
+        set_pixel(&mut changed, color_type, 6, 4, 0xFF);
+
+        assert_crop(color_type, &[base, changed], &[WHOLE, (1, 1, 6, 4)]);
+    }
+}
