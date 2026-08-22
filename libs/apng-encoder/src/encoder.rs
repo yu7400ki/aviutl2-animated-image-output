@@ -217,14 +217,21 @@ impl<W: Write> Encoder<W> {
     /// `rect` の領域をフィルタして圧縮し、[`Self::compressed`] へ格納する
     fn compress_region(&mut self, data: &[u8], rect: Rect) {
         let region_stride = rect.width as usize * self.bytes_per_pixel;
+        let head = rect.y as usize * self.stride + rect.x as usize * self.bytes_per_pixel;
 
         self.filtered.clear();
-        if rect.width == self.width && rect.height == self.height {
-            filter::filter_image(data, self.stride, self.bytes_per_pixel, &mut self.filtered);
+        if region_stride == self.stride {
+            // 全幅の矩形は `data` 上で既に連続している
+            let len = region_stride * rect.height as usize;
+            filter::filter_image(
+                &data[head..head + len],
+                region_stride,
+                self.bytes_per_pixel,
+                &mut self.filtered,
+            );
         } else {
             self.region.clear();
             self.region.reserve(region_stride * rect.height as usize);
-            let head = rect.y as usize * self.stride + rect.x as usize * self.bytes_per_pixel;
             for y in 0..rect.height as usize {
                 let start = head + y * self.stride;
                 self.region
