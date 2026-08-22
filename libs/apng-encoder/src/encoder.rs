@@ -2,6 +2,7 @@
 
 use crate::chunk;
 use crate::delay::FrameDelay;
+use crate::diff::{self, Rect};
 use crate::error::Error;
 use crate::filter;
 use crate::zlib::Compressor;
@@ -70,6 +71,12 @@ pub struct Encoder<W: Write> {
     /// 1フレームのバイト数
     frame_len: usize,
     compressor: Compressor,
+    /// 直前に書き出したフレーム
+    ///
+    /// dispose_op=NONE・blend_op=SOURCE のもとでは、合成後のキャンバスと一致する。
+    previous: Vec<u8>,
+    /// 差分矩形を切り出した連続バッファ
+    region: Vec<u8>,
     filtered: Vec<u8>,
     compressed: Vec<u8>,
 }
@@ -117,6 +124,8 @@ impl<W: Write> Encoder<W> {
             stride,
             frame_len,
             compressor: Compressor::new(config.compression_level),
+            previous: Vec::new(),
+            region: Vec::new(),
             filtered: Vec::new(),
             compressed: Vec::new(),
         };
@@ -167,22 +176,75 @@ impl<W: Write> Encoder<W> {
             });
         }
 
-        self.filtered.clear();
-        filter::filter_image(data, self.stride, self.bytes_per_pixel, &mut self.filtered);
-        self.compressed.clear();
-        self.compressor
-            .compress_into(&self.filtered, &mut self.compressed);
+        let rect = self.frame_rect(data);
+        self.compress_region(data, rect);
 
         // 途中で失敗するとfcTLだけが書かれた状態で残るため、以降の書き出しを拒否する
-        self.write_frame(delay)
+        self.write_frame(rect, delay)
             .inspect_err(|_| self.poisoned = true)?;
 
+        self.previous.clear();
+        self.previous.extend_from_slice(data);
         self.frames_written += 1;
         Ok(())
     }
 
-    fn write_frame(&mut self, delay: FrameDelay) -> Result<(), Error> {
-        self.write_fctl(delay)?;
+    /// フレームのうち実際に書き出す領域を決める
+    ///
+    /// 先頭フレームはIDATに入るためキャンバス全体とする。以降は直前のフレームとの
+    /// 差分の外接矩形を使い、差分が無い場合はfcTLの個数を保つために1画素だけ書き直す。
+    fn frame_rect(&self, data: &[u8]) -> Rect {
+        const UNCHANGED: Rect = Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        };
+
+        if self.frames_written == 0 {
+            return Rect {
+                x: 0,
+                y: 0,
+                width: self.width,
+                height: self.height,
+            };
+        }
+
+        diff::dirty_rect(&self.previous, data, self.stride, self.bytes_per_pixel)
+            .unwrap_or(UNCHANGED)
+    }
+
+    /// `rect` の領域をフィルタして圧縮し、[`Self::compressed`] へ格納する
+    fn compress_region(&mut self, data: &[u8], rect: Rect) {
+        let region_stride = rect.width as usize * self.bytes_per_pixel;
+
+        self.filtered.clear();
+        if rect.width == self.width && rect.height == self.height {
+            filter::filter_image(data, self.stride, self.bytes_per_pixel, &mut self.filtered);
+        } else {
+            self.region.clear();
+            self.region.reserve(region_stride * rect.height as usize);
+            let head = rect.y as usize * self.stride + rect.x as usize * self.bytes_per_pixel;
+            for y in 0..rect.height as usize {
+                let start = head + y * self.stride;
+                self.region
+                    .extend_from_slice(&data[start..start + region_stride]);
+            }
+            filter::filter_image(
+                &self.region,
+                region_stride,
+                self.bytes_per_pixel,
+                &mut self.filtered,
+            );
+        }
+
+        self.compressed.clear();
+        self.compressor
+            .compress_into(&self.filtered, &mut self.compressed);
+    }
+
+    fn write_frame(&mut self, rect: Rect, delay: FrameDelay) -> Result<(), Error> {
+        self.write_fctl(rect, delay)?;
 
         // 先頭フレームはIDATに入り、以降はfdATに入る
         if self.frames_written == 0 {
@@ -199,13 +261,15 @@ impl<W: Write> Encoder<W> {
         Ok(())
     }
 
-    fn write_fctl(&mut self, delay: FrameDelay) -> Result<(), Error> {
+    fn write_fctl(&mut self, rect: Rect, delay: FrameDelay) -> Result<(), Error> {
         let (delay_num, delay_den) = delay.to_parts();
 
         let mut fctl = [0u8; 26];
         fctl[0..4].copy_from_slice(&self.sequence.to_be_bytes());
-        fctl[4..8].copy_from_slice(&self.width.to_be_bytes());
-        fctl[8..12].copy_from_slice(&self.height.to_be_bytes());
+        fctl[4..8].copy_from_slice(&rect.width.to_be_bytes());
+        fctl[8..12].copy_from_slice(&rect.height.to_be_bytes());
+        fctl[12..16].copy_from_slice(&rect.x.to_be_bytes());
+        fctl[16..20].copy_from_slice(&rect.y.to_be_bytes());
         fctl[20..22].copy_from_slice(&delay_num.to_be_bytes());
         fctl[22..24].copy_from_slice(&delay_den.to_be_bytes());
         fctl[24] = DISPOSE_OP_NONE;

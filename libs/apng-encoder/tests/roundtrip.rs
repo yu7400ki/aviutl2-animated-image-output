@@ -68,16 +68,20 @@ fn decode(bytes: &[u8]) -> (u32, Vec<DecodedFrame>) {
     (animation.num_plays, decoded)
 }
 
-/// フレームをキャンバスへ合成する
-fn composite(canvas: &mut [u8], frame: &DecodedFrame, width: u32, height: u32) {
-    assert_eq!(frame.control.x_offset, 0);
-    assert_eq!(frame.control.y_offset, 0);
-    assert_eq!(frame.control.width, width);
-    assert_eq!(frame.control.height, height);
+/// フレームの矩形をキャンバスの該当位置へ書き込む
+fn composite(canvas: &mut [u8], frame: &DecodedFrame, width: u32, color_type: ColorType) {
     assert!(matches!(frame.control.dispose_op, png::DisposeOp::None));
     assert!(matches!(frame.control.blend_op, png::BlendOp::Source));
 
-    canvas.copy_from_slice(&frame.data);
+    let bpp = color_type.bytes_per_pixel();
+    let stride = width as usize * bpp;
+    let row_len = frame.control.width as usize * bpp;
+    let head = frame.control.y_offset as usize * stride + frame.control.x_offset as usize * bpp;
+    for y in 0..frame.control.height as usize {
+        let dst = head + y * stride;
+        let src = y * row_len;
+        canvas[dst..dst + row_len].copy_from_slice(&frame.data[src..src + row_len]);
+    }
 }
 
 fn assert_roundtrip(width: u32, height: u32, color_type: ColorType, count: u32) {
@@ -90,7 +94,7 @@ fn assert_roundtrip(width: u32, height: u32, color_type: ColorType, count: u32) 
 
     let mut canvas = vec![0u8; input[0].len()];
     for (index, (frame, expected)) in decoded.iter().zip(&input).enumerate() {
-        composite(&mut canvas, frame, width, height);
+        composite(&mut canvas, frame, width, color_type);
         assert_eq!(&canvas, expected, "フレーム {index}");
 
         // fcTLとfdATが共有する連番: 先頭フレームはfdATを持たない

@@ -2,6 +2,7 @@
 
 mod chunk;
 mod delay;
+mod diff;
 mod encoder;
 mod error;
 mod filter;
