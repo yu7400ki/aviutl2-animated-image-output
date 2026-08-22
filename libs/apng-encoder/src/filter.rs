@@ -536,6 +536,15 @@ mod tests {
         assert_eq!(sum, scalar::abs_sum(&out));
     }
 
+    /// 予測値の距離が同点のときはa, b, cの順に選ぶ
+    #[test]
+    fn paeth_prefers_the_earlier_candidate_on_ties() {
+        // a=6, b=12, c=10 では pa = 2, pb = 4, pc = 2 でaとcが同点
+        assert_eq!(paeth_predictor(6, 12, 10), 6);
+        // a=12, b=6, c=10 では pa = 4, pb = 2, pc = 2 でbとcが同点
+        assert_eq!(paeth_predictor(12, 6, 10), 6);
+    }
+
     /// 0x80は絶対値128として数える
     #[test]
     fn the_absolute_value_of_0x80_is_128() {
