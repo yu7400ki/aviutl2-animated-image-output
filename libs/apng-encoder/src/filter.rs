@@ -26,6 +26,15 @@ pub(crate) fn filter_image(data: &[u8], stride: usize, bpp: usize, out: &mut Vec
 }
 
 fn filter_image_bpp<const BPP: usize>(data: &[u8], stride: usize, out: &mut Vec<u8>) {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        filter_rows(data, stride, out, |cur, prev, choice| {
+            // SAFETY: avx2の存在をこのクロージャを渡す前に確認している
+            unsafe { avx2::select_row::<BPP>(cur, prev, choice) }
+        });
+        return;
+    }
+
     filter_rows(data, stride, out, scalar::select_row::<BPP>);
 }
 
@@ -189,6 +198,160 @@ mod scalar {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+mod avx2 {
+    use super::*;
+    use std::arch::x86_64::*;
+
+    /// 一度に処理するバイト数
+    const LANES: usize = 32;
+
+    /// [`scalar::select_row`] のAVX2版
+    ///
+    /// # Safety
+    /// AVX2が利用可能であること。
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn select_row<const BPP: usize>(
+        cur: &[u8],
+        prev: &[u8],
+        choice: &mut RowChoice,
+    ) {
+        choice.begin(abs_sum(cur));
+
+        // SAFETY: 呼び出し元がavx2の存在を確認している
+        unsafe {
+            let score = apply::<BPP, SUB>(cur, prev, &mut choice.candidate);
+            choice.offer(SUB, score);
+            let score = apply::<BPP, UP>(cur, prev, &mut choice.candidate);
+            choice.offer(UP, score);
+            let score = apply::<BPP, AVERAGE>(cur, prev, &mut choice.candidate);
+            choice.offer(AVERAGE, score);
+            let score = apply::<BPP, PAETH>(cur, prev, &mut choice.candidate);
+            choice.offer(PAETH, score);
+        }
+    }
+
+    /// [`scalar::abs_sum`] のAVX2版
+    ///
+    /// `_mm256_abs_epi8` は0x80を0x80のまま返すため、[`signed_abs`] と一致する。
+    /// `_mm256_sad_epu8` は8バイトごとの総和を64bitレーンへ入れるので桁溢れしない。
+    #[target_feature(enable = "avx2")]
+    pub(super) fn abs_sum(bytes: &[u8]) -> u64 {
+        let zero = _mm256_setzero_si256();
+        let mut acc = zero;
+
+        let mut chunks = bytes.chunks_exact(LANES);
+        for chunk in &mut chunks {
+            // SAFETY: chunks_exactが返すのはちょうどLANESバイト
+            let v = unsafe { _mm256_loadu_si256(chunk.as_ptr().cast()) };
+            acc = _mm256_add_epi64(acc, _mm256_sad_epu8(_mm256_abs_epi8(v), zero));
+        }
+
+        horizontal_sum(acc) + scalar::abs_sum(chunks.remainder())
+    }
+
+    /// [`scalar::apply`] のAVX2版
+    ///
+    /// フィルタの適用と絶対値の総和を同じパスで行い、レジスタ上の結果から直接
+    /// 総和を積む。行頭の `BPP` バイトと末尾の端数はスカラー実装に委ねる。
+    ///
+    /// # Safety
+    /// AVX2が利用可能で、`cur`・`prev`・`out` の長さが等しいこと。
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn apply<const BPP: usize, const FILTER: u8>(
+        cur: &[u8],
+        prev: &[u8],
+        out: &mut [u8],
+    ) -> u64 {
+        debug_assert_eq!(cur.len(), prev.len());
+        debug_assert_eq!(cur.len(), out.len());
+
+        // 左と左上を参照するフィルタは、行頭のBPPバイトだけ予測値の作り方が変わる
+        let head = if FILTER == UP { 0 } else { BPP.min(cur.len()) };
+        let mut sum = scalar::apply_range::<BPP, FILTER>(cur, prev, out, 0..head);
+
+        let zero = _mm256_setzero_si256();
+        let ones = _mm256_set1_epi8(1);
+        let mut acc = zero;
+
+        let mut i = head;
+        while i + LANES <= cur.len() {
+            // SAFETY: i + LANES <= cur.len() で3つのスライスは同じ長さ。
+            //         左と左上を読むフィルタでは head >= BPP なので i - BPP も行内。
+            unsafe {
+                let x = _mm256_loadu_si256(cur.as_ptr().add(i).cast());
+                let predictor = match FILTER {
+                    SUB => _mm256_loadu_si256(cur.as_ptr().add(i - BPP).cast()),
+                    UP => _mm256_loadu_si256(prev.as_ptr().add(i).cast()),
+                    AVERAGE => {
+                        let a = _mm256_loadu_si256(cur.as_ptr().add(i - BPP).cast());
+                        let b = _mm256_loadu_si256(prev.as_ptr().add(i).cast());
+                        // avg_epu8は(a + b + 1) / 2 を返すため、a + b が奇数の
+                        // レーンから1引いて floor((a + b) / 2) に直す
+                        let odd = _mm256_and_si256(_mm256_xor_si256(a, b), ones);
+                        _mm256_sub_epi8(_mm256_avg_epu8(a, b), odd)
+                    }
+                    PAETH => {
+                        let a = _mm256_loadu_si256(cur.as_ptr().add(i - BPP).cast());
+                        let b = _mm256_loadu_si256(prev.as_ptr().add(i).cast());
+                        let c = _mm256_loadu_si256(prev.as_ptr().add(i - BPP).cast());
+                        let lo = paeth_epi16(
+                            _mm256_unpacklo_epi8(a, zero),
+                            _mm256_unpacklo_epi8(b, zero),
+                            _mm256_unpacklo_epi8(c, zero),
+                        );
+                        let hi = paeth_epi16(
+                            _mm256_unpackhi_epi8(a, zero),
+                            _mm256_unpackhi_epi8(b, zero),
+                            _mm256_unpackhi_epi8(c, zero),
+                        );
+                        _mm256_packus_epi16(lo, hi)
+                    }
+                    other => unreachable!("予測値を持つフィルタ種別は1..=4のみ: {other}"),
+                };
+
+                let v = _mm256_sub_epi8(x, predictor);
+                _mm256_storeu_si256(out.as_mut_ptr().add(i).cast(), v);
+                acc = _mm256_add_epi64(acc, _mm256_sad_epu8(_mm256_abs_epi8(v), zero));
+            }
+            i += LANES;
+        }
+
+        sum += horizontal_sum(acc);
+        sum + scalar::apply_range::<BPP, FILTER>(cur, prev, out, i..cur.len())
+    }
+
+    /// 16bitレーン16本ぶんのPaeth予測 (同点はa, b, cの順)
+    ///
+    /// `p = a + b - c` より `p - a = b - c`、`p - b = a - c`、`p - c = a + b - 2c`
+    /// で、いずれも16bitに収まる。比較は仕様の `pa <= pb` と `pa <= pc`、`pb <= pc`
+    /// の否定なので、同点では先の候補が残る。
+    #[target_feature(enable = "avx2")]
+    fn paeth_epi16(a: __m256i, b: __m256i, c: __m256i) -> __m256i {
+        let pa = _mm256_abs_epi16(_mm256_sub_epi16(b, c));
+        let pb = _mm256_abs_epi16(_mm256_sub_epi16(a, c));
+        let pc = _mm256_abs_epi16(_mm256_sub_epi16(
+            _mm256_add_epi16(a, b),
+            _mm256_add_epi16(c, c),
+        ));
+
+        let not_a = _mm256_or_si256(_mm256_cmpgt_epi16(pa, pb), _mm256_cmpgt_epi16(pa, pc));
+        let not_b = _mm256_cmpgt_epi16(pb, pc);
+        _mm256_blendv_epi8(a, _mm256_blendv_epi8(b, c, not_b), not_a)
+    }
+
+    /// 64bitレーン4本の総和
+    #[target_feature(enable = "avx2")]
+    fn horizontal_sum(acc: __m256i) -> u64 {
+        let lanes = _mm_add_epi64(
+            _mm256_castsi256_si128(acc),
+            _mm256_extracti128_si256(acc, 1),
+        );
+        let sum = _mm_add_epi64(lanes, _mm_unpackhi_epi64(lanes, lanes));
+        _mm_cvtsi128_si64(sum) as u64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,11 +430,44 @@ mod tests {
 
     fn filter_scalar(data: &[u8], stride: usize, bpp: usize) -> Vec<u8> {
         let mut out = Vec::new();
-        match bpp {
-            3 => filter_rows(data, stride, &mut out, scalar::select_row::<3>),
-            _ => filter_rows(data, stride, &mut out, scalar::select_row::<4>),
+        if !data.is_empty() {
+            match bpp {
+                3 => filter_rows(data, stride, &mut out, scalar::select_row::<3>),
+                _ => filter_rows(data, stride, &mut out, scalar::select_row::<4>),
+            }
         }
         out
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn filter_avx2(data: &[u8], stride: usize, bpp: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        if !data.is_empty() {
+            // SAFETY: 呼び出し元がavx2の存在を確認している
+            match bpp {
+                3 => filter_rows(data, stride, &mut out, |cur, prev, choice| unsafe {
+                    avx2::select_row::<3>(cur, prev, choice)
+                }),
+                _ => filter_rows(data, stride, &mut out, |cur, prev, choice| unsafe {
+                    avx2::select_row::<4>(cur, prev, choice)
+                }),
+            }
+        }
+        out
+    }
+
+    /// 端数と境界を含む行長 (bpp 3・4それぞれのBPP - 1, BPP, BPP + 1 を含む)
+    const ROW_LENGTHS: [usize; 13] = [0, 1, 2, 3, 4, 5, 31, 32, 33, 63, 64, 65, 96];
+
+    /// フィルタの分岐を広く踏むバイト列
+    fn patterns(len: usize, seed: u32) -> Vec<Vec<u8>> {
+        vec![
+            noise(len, seed),
+            vec![0x80; len],
+            (0..len).map(|i| i as u8).collect(),
+            (0..len).map(|i| (i / 16 * 16) as u8).collect(),
+            noise(len, seed + 100).iter().map(|v| v & 3).collect(),
+        ]
     }
 
     #[test]
@@ -405,5 +601,79 @@ mod tests {
         filter_image(&[], 0, 4, &mut filtered);
 
         assert_eq!(filtered, [0xAA]);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    macro_rules! assert_apply_parity {
+        ($bpp:literal, $filter:expr, $cur:expr, $prev:expr) => {{
+            let mut expected = vec![0u8; $cur.len()];
+            let mut actual = vec![0u8; $cur.len()];
+
+            let expected_sum = scalar::apply::<$bpp, { $filter }>($cur, $prev, &mut expected);
+            // SAFETY: 呼び出し元がavx2の存在を確認している
+            let actual_sum = unsafe { avx2::apply::<$bpp, { $filter }>($cur, $prev, &mut actual) };
+
+            let len = $cur.len();
+            assert_eq!(
+                actual, expected,
+                "bpp={} filter={} len={len}",
+                $bpp, $filter
+            );
+            assert_eq!(
+                actual_sum, expected_sum,
+                "bpp={} filter={} len={len}",
+                $bpp, $filter
+            );
+        }};
+    }
+
+    /// AVX2実装は、フィルタごとの適用結果も絶対値の総和もスカラー実装と一致する
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx2_applies_each_filter_like_the_scalar_implementation() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+
+        for len in ROW_LENGTHS {
+            for cur in patterns(len, 1) {
+                for prev in patterns(len, 2) {
+                    // SAFETY: avx2の存在をこの関数の冒頭で確認している
+                    assert_eq!(unsafe { avx2::abs_sum(&cur) }, scalar::abs_sum(&cur));
+
+                    assert_apply_parity!(3, SUB, &cur, &prev);
+                    assert_apply_parity!(3, UP, &cur, &prev);
+                    assert_apply_parity!(3, AVERAGE, &cur, &prev);
+                    assert_apply_parity!(3, PAETH, &cur, &prev);
+                    assert_apply_parity!(4, SUB, &cur, &prev);
+                    assert_apply_parity!(4, UP, &cur, &prev);
+                    assert_apply_parity!(4, AVERAGE, &cur, &prev);
+                    assert_apply_parity!(4, PAETH, &cur, &prev);
+                }
+            }
+        }
+    }
+
+    /// AVX2実装は、選ばれるフィルタ種別も含めて画像全体がスカラー実装と一致する
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx2_filters_images_like_the_scalar_implementation() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+
+        for bpp in [3, 4] {
+            for stride in ROW_LENGTHS {
+                for height in [1, 4] {
+                    for data in patterns(stride * height, 3) {
+                        assert_eq!(
+                            filter_avx2(&data, stride, bpp),
+                            filter_scalar(&data, stride, bpp),
+                            "bpp={bpp} stride={stride} height={height}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
