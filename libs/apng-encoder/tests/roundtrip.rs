@@ -479,3 +479,39 @@ fn disjoint_changes_span_a_bounding_rect() {
         assert_crop(color_type, &[base, changed], &[WHOLE, (1, 1, 6, 4)]);
     }
 }
+
+/// 部分矩形が連続するフレーム列
+///
+/// 毎フレーム別の位置へ擬似乱数で埋めた3x3のブロックを書き加える。矩形の
+/// 位置・内容がフレームごとに変わるため、行オフセットと切り出しバッファの
+/// 両方が正しくないと合成結果が一致しない。
+#[test]
+fn consecutive_partial_rects_carry_their_own_content() {
+    const BLOCK: u32 = 3;
+    const POSITIONS: [(u32, u32); 4] = [(0, 0), (5, 0), (0, 3), (5, 3)];
+
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        let bpp = color_type.bytes_per_pixel();
+        let mut input = vec![solid(color_type, 0x40)];
+        let mut expected = vec![WHOLE];
+
+        for (index, &(bx, by)) in POSITIONS.iter().enumerate() {
+            let mut frame = input.last().unwrap().clone();
+            let values = frame_data((BLOCK * BLOCK) as usize * bpp, index as u32 + 1);
+            for y in 0..BLOCK {
+                for x in 0..BLOCK {
+                    let src = (y * BLOCK + x) as usize * bpp;
+                    let dst = ((by + y) as usize * CROP_WIDTH as usize + (bx + x) as usize) * bpp;
+                    for ch in 0..bpp {
+                        // 背景と必ず異なる値にして、矩形が縮まないようにする
+                        frame[dst + ch] = 0x80 | (values[src + ch] & 0x3F);
+                    }
+                }
+            }
+            input.push(frame);
+            expected.push((bx, by, BLOCK, BLOCK));
+        }
+
+        assert_crop(color_type, &input, &expected);
+    }
+}
