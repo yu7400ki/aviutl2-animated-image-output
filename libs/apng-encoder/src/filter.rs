@@ -595,6 +595,26 @@ mod tests {
         assert_eq!(filtered, [NONE, 0, 0, 0, 0, 0, 0]);
     }
 
+    /// フィルタは行ごとに独立に選ばれ、前の行の選択を引きずらない
+    ///
+    /// 平坦な行はNone、勾配の行はSub、直前と同じ行はUpが最小になる。
+    #[test]
+    fn each_row_chooses_its_own_filter() {
+        const BPP: usize = 3;
+        const STRIDE: usize = 4 * BPP;
+        let ramp = [10, 10, 10, 20, 20, 20, 30, 30, 30, 40, 40, 40];
+        let data = [&[0u8; STRIDE][..], &ramp[..], &ramp[..]].concat();
+
+        let mut filtered = Vec::new();
+        filter_image(&data, STRIDE, BPP, &mut filtered);
+
+        assert_eq!(filters_of(&filtered, STRIDE), [NONE, SUB, UP]);
+        assert_eq!(
+            filters_of(&filter_scalar(&data, STRIDE, BPP), STRIDE),
+            [NONE, SUB, UP]
+        );
+    }
+
     /// 1行が1ピクセルに満たない幅でも左隣を参照しない
     #[test]
     fn rows_shorter_than_one_pixel_are_passed_through() {
