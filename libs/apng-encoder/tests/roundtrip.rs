@@ -184,6 +184,43 @@ fn oversized_image_is_rejected() {
     ));
 }
 
+/// 設定した圧縮レベルがdeflateまで届いていること
+#[test]
+fn compression_level_changes_the_output_size() {
+    let (width, height) = (128, 128);
+    let len = width as usize * height as usize * ColorType::Rgba8.bytes_per_pixel();
+    // 圧縮しやすい階調でレベル差を出す
+    let data: Vec<u8> = (0..len).map(|i| (i / 7) as u8).collect();
+
+    let size = |compression_level| {
+        let mut encoder = Encoder::new(
+            Vec::new(),
+            width,
+            height,
+            1,
+            Config {
+                compression_level,
+                ..config(ColorType::Rgba8)
+            },
+        )
+        .unwrap();
+        encoder
+            .add_frame(&data, FrameDelay::new(1, 30).unwrap())
+            .unwrap();
+        encoder.finish().unwrap().len()
+    };
+
+    let (low, middle, high) = (size(1), size(6), size(9));
+    assert!(
+        high < middle,
+        "レベル9 ({high}) はレベル6 ({middle}) より小さいこと"
+    );
+    assert!(
+        middle < low,
+        "レベル6 ({middle}) はレベル1 ({low}) より小さいこと"
+    );
+}
+
 /// 一定バイト数まで受け付け、それ以降は必ず失敗する書き出し先
 struct FailingWriter {
     remaining: usize,
