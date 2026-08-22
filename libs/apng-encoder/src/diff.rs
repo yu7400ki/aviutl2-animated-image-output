@@ -12,6 +12,8 @@ pub(crate) struct Rect {
 /// 2つのフレームで異なる画素をすべて含む最小の矩形を求める
 ///
 /// `prev` と `curr` は同じ長さで、`stride` バイトの行が隙間なく並んでいること。
+/// `stride` は `bpp` の整数倍で、`stride / bpp` が画像の幅と一致すること
+/// (行末に画素以外のバイトがあると、幅を超える `x` を返す)。
 /// 差分がまったく無い場合は `None`。
 pub(crate) fn dirty_rect(prev: &[u8], curr: &[u8], stride: usize, bpp: usize) -> Option<Rect> {
     let mut top = None;
@@ -25,19 +27,12 @@ pub(crate) fn dirty_rect(prev: &[u8], curr: &[u8], stride: usize, bpp: usize) ->
             continue;
         }
 
-        let mut diff = p
-            .iter()
-            .zip(c)
-            .enumerate()
-            .filter(|(_, (a, b))| a != b)
-            .map(|(i, _)| i);
-        let Some(first) = diff.next() else {
-            continue;
-        };
-        let last = diff.next_back().unwrap_or(first);
+        // 行が一致しない以上、前後の一致部分を除いた範囲は空にならない
+        let head = p.iter().zip(c).take_while(|(a, b)| a == b).count();
+        let tail = p.iter().zip(c).rev().take_while(|(a, b)| a == b).count();
 
-        left = left.min(first / bpp);
-        right = right.max(last / bpp);
+        left = left.min(head / bpp);
+        right = right.max((stride - 1 - tail) / bpp);
         top.get_or_insert(y);
         bottom = y;
     }
@@ -50,7 +45,6 @@ pub(crate) fn dirty_rect(prev: &[u8], curr: &[u8], stride: usize, bpp: usize) ->
         height: (bottom - top + 1) as u32,
     })
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
