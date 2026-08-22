@@ -492,7 +492,11 @@ mod tests {
     /// 5種のフィルタは、どれを強制しても逆適用で元に戻る
     #[test]
     fn every_filter_is_reversible() {
-        const BPP: usize = 4;
+        forced_filters_are_reversible::<3>();
+        forced_filters_are_reversible::<4>();
+    }
+
+    fn forced_filters_are_reversible<const BPP: usize>() {
         let (stride, height) = (13 * BPP, 6);
         let data = noise(stride * height, 7);
 
@@ -518,7 +522,11 @@ mod tests {
                 filtered.extend_from_slice(&row);
             }
 
-            assert_eq!(unfilter(&filtered, stride, BPP), data, "filter={filter}");
+            assert_eq!(
+                unfilter(&filtered, stride, BPP),
+                data,
+                "bpp={BPP} filter={filter}"
+            );
         }
     }
 
