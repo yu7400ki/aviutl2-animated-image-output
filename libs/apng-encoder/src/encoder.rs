@@ -62,6 +62,8 @@ pub struct Encoder<W: Write> {
     frames_written: u32,
     /// fcTLとfdATで共有する連番
     sequence: u32,
+    /// 書き出しに失敗し、チャンク列が中断しているか
+    poisoned: bool,
     bytes_per_pixel: usize,
     /// 1行のバイト数
     stride: usize,
@@ -110,6 +112,7 @@ impl<W: Write> Encoder<W> {
             num_frames,
             frames_written: 0,
             sequence: 0,
+            poisoned: false,
             bytes_per_pixel,
             stride,
             frame_len,
@@ -144,8 +147,12 @@ impl<W: Write> Encoder<W> {
     /// `data` は上から下・左から右の順に並んだ `幅 * 高さ * 1画素のバイト数` バイトであること。
     ///
     /// # Errors
-    /// `data` の長さが合わないとき、または宣言したフレーム数を超えたとき。
+    /// `data` の長さが合わないとき、宣言したフレーム数を超えたとき、書き出しに失敗したとき、
+    /// または過去の書き出し失敗でエンコーダが使用不能なとき。
     pub fn add_frame(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
+        if self.poisoned {
+            return Err(Error::Poisoned);
+        }
         if self.frames_written == self.num_frames {
             return Err(Error::FrameCountMismatch {
                 expected: self.num_frames,
@@ -166,6 +173,15 @@ impl<W: Write> Encoder<W> {
         self.compressor
             .compress_into(&self.filtered, &mut self.compressed);
 
+        // 途中で失敗するとfcTLだけが書かれた状態で残るため、以降の書き出しを拒否する
+        self.write_frame(delay)
+            .inspect_err(|_| self.poisoned = true)?;
+
+        self.frames_written += 1;
+        Ok(())
+    }
+
+    fn write_frame(&mut self, delay: FrameDelay) -> Result<(), Error> {
         self.write_fctl(delay)?;
 
         // 先頭フレームはIDATに入り、以降はfdATに入る
@@ -180,7 +196,6 @@ impl<W: Write> Encoder<W> {
             self.sequence += 1;
         }
 
-        self.frames_written += 1;
         Ok(())
     }
 
@@ -204,8 +219,12 @@ impl<W: Write> Encoder<W> {
     /// 終端して書き出し先を返す
     ///
     /// # Errors
-    /// 投入されたフレーム数が宣言したフレーム数に満たないとき。
+    /// 投入されたフレーム数が宣言したフレーム数に満たないとき、書き出しに失敗したとき、
+    /// または過去の書き出し失敗でエンコーダが使用不能なとき。
     pub fn finish(mut self) -> Result<W, Error> {
+        if self.poisoned {
+            return Err(Error::Poisoned);
+        }
         if self.frames_written != self.num_frames {
             return Err(Error::FrameCountMismatch {
                 expected: self.num_frames,

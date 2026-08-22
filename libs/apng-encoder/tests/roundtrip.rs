@@ -1,7 +1,7 @@
 //! 出力したAPNGを`png`クレートでデコードし、入力フレームと一致することを確認する
 
 use apng_encoder::{ColorType, Config, Encoder, Error, FrameDelay};
-use std::io::Cursor;
+use std::io::{self, Cursor, Write};
 
 /// 決定的な擬似乱数でフレームの内容を作る
 fn frame_data(len: usize, seed: u32) -> Vec<u8> {
@@ -182,6 +182,46 @@ fn oversized_image_is_rejected() {
             height: u32::MAX
         })
     ));
+}
+
+/// 一定バイト数まで受け付け、それ以降は必ず失敗する書き出し先
+struct FailingWriter {
+    remaining: usize,
+}
+
+impl Write for FailingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.len() > self.remaining {
+            self.remaining = 0;
+            return Err(io::Error::other("書き出し失敗"));
+        }
+        self.remaining -= buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// fcTLだけが書かれた状態で再開すると不正なAPNGになるため、失敗後は受け付けない
+#[test]
+fn a_failed_write_poisons_the_encoder() {
+    let input = frames(8, 8, ColorType::Rgba8, 2);
+    let delay = FrameDelay::new(1, 30).unwrap();
+    // シグネチャ・IHDR・acTL・fcTLは通り、IDATの途中で失敗する長さ
+    let writer = FailingWriter { remaining: 100 };
+    let mut encoder = Encoder::new(writer, 8, 8, 2, config(ColorType::Rgba8)).unwrap();
+
+    assert!(matches!(
+        encoder.add_frame(&input[0], delay),
+        Err(Error::Io(_))
+    ));
+    assert!(matches!(
+        encoder.add_frame(&input[1], delay),
+        Err(Error::Poisoned)
+    ));
+    assert!(matches!(encoder.finish(), Err(Error::Poisoned)));
 }
 
 #[test]

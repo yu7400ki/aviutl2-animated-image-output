@@ -23,6 +23,8 @@ pub enum Error {
     ChunkTooLarge { len: usize },
     /// 書き出し先のI/Oエラー
     Io(std::io::Error),
+    /// 書き出しに失敗したエンコーダを再利用しようとした
+    Poisoned,
 }
 
 impl fmt::Display for Error {
@@ -55,6 +57,7 @@ impl fmt::Display for Error {
                 write!(f, "チャンク長がPNGの上限を超えました: {len} バイト")
             }
             Error::Io(e) => write!(f, "書き出しに失敗しました: {e}"),
+            Error::Poisoned => write!(f, "書き出しに失敗したエンコーダは再利用できません"),
         }
     }
 }
