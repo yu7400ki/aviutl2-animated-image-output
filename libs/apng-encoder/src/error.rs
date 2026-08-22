@@ -9,6 +9,8 @@ pub enum Error {
     InvalidDimensions { width: u32, height: u32 },
     /// フレーム数が0
     InvalidFrameCount,
+    /// 1フレームのバイト数が `usize` で表現できない
+    ImageTooLarge { width: u32, height: u32 },
     /// 圧縮レベルが 1..=9 の範囲外
     InvalidCompressionLevel(u32),
     /// フレーム遅延の分母が0
@@ -28,6 +30,9 @@ impl fmt::Display for Error {
                 write!(f, "画像サイズが不正です: {width}x{height}")
             }
             Error::InvalidFrameCount => write!(f, "フレーム数は1以上である必要があります"),
+            Error::ImageTooLarge { width, height } => {
+                write!(f, "画像が大きすぎます: {width}x{height}")
+            }
             Error::InvalidCompressionLevel(level) => {
                 write!(f, "圧縮レベル {level} は 1..=9 の範囲外です")
             }

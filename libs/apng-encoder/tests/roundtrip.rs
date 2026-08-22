@@ -172,6 +172,18 @@ fn out_of_range_delay_is_approximated() {
     assert_eq!((control.delay_num, control.delay_den), (342, 40999));
 }
 
+/// 1フレームのバイト数が`usize`で表現できない大きさは`new`の時点で弾く
+#[test]
+fn oversized_image_is_rejected() {
+    assert!(matches!(
+        Encoder::new(Vec::new(), u32::MAX, u32::MAX, 1, config(ColorType::Rgba8)),
+        Err(Error::ImageTooLarge {
+            width: u32::MAX,
+            height: u32::MAX
+        })
+    ));
+}
+
 #[test]
 fn frame_of_the_wrong_size_is_rejected() {
     let mut encoder = Encoder::new(Vec::new(), 4, 4, 1, config(ColorType::Rgba8)).unwrap();

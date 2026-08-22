@@ -63,6 +63,10 @@ pub struct Encoder<W: Write> {
     /// fcTLとfdATで共有する連番
     sequence: u32,
     bytes_per_pixel: usize,
+    /// 1行のバイト数
+    stride: usize,
+    /// 1フレームのバイト数
+    frame_len: usize,
     compressor: Compressor,
     filtered: Vec<u8>,
     compressed: Vec<u8>,
@@ -72,7 +76,8 @@ impl<W: Write> Encoder<W> {
     /// シグネチャとヘッダを書き出し、`num_frames` フレームを受け付ける状態にする
     ///
     /// # Errors
-    /// 幅・高さ・フレーム数が0のとき、または圧縮レベルが範囲外のとき。
+    /// 幅・高さ・フレーム数が0のとき、1フレームのバイト数が `usize` で表現できないとき、
+    /// または圧縮レベルが範囲外のとき。
     pub fn new(
         writer: W,
         width: u32,
@@ -90,6 +95,14 @@ impl<W: Write> Encoder<W> {
             return Err(Error::InvalidCompressionLevel(config.compression_level));
         }
 
+        let bytes_per_pixel = config.color_type.bytes_per_pixel();
+        let stride = (width as usize)
+            .checked_mul(bytes_per_pixel)
+            .ok_or(Error::ImageTooLarge { width, height })?;
+        let frame_len = stride
+            .checked_mul(height as usize)
+            .ok_or(Error::ImageTooLarge { width, height })?;
+
         let mut encoder = Encoder {
             writer,
             width,
@@ -97,7 +110,9 @@ impl<W: Write> Encoder<W> {
             num_frames,
             frames_written: 0,
             sequence: 0,
-            bytes_per_pixel: config.color_type.bytes_per_pixel(),
+            bytes_per_pixel,
+            stride,
+            frame_len,
             compressor: Compressor::new(config.compression_level),
             filtered: Vec::new(),
             compressed: Vec::new(),
@@ -138,17 +153,15 @@ impl<W: Write> Encoder<W> {
             });
         }
 
-        let stride = self.width as usize * self.bytes_per_pixel;
-        let expected = stride * self.height as usize;
-        if data.len() != expected {
+        if data.len() != self.frame_len {
             return Err(Error::FrameSizeMismatch {
-                expected,
+                expected: self.frame_len,
                 actual: data.len(),
             });
         }
 
         self.filtered.clear();
-        filter::filter_image(data, stride, self.bytes_per_pixel, &mut self.filtered);
+        filter::filter_image(data, self.stride, self.bytes_per_pixel, &mut self.filtered);
         self.compressed.clear();
         self.compressor
             .compress_into(&self.filtered, &mut self.compressed);
