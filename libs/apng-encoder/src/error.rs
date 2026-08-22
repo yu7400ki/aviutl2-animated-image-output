@@ -19,6 +19,8 @@ pub enum Error {
     FrameSizeMismatch { expected: usize, actual: usize },
     /// 投入されたフレーム数が宣言したフレーム数と一致しない
     FrameCountMismatch { expected: u32, actual: u32 },
+    /// チャンク長がPNGの上限を超えた
+    ChunkTooLarge { len: usize },
     /// 書き出し先のI/Oエラー
     Io(std::io::Error),
 }
@@ -48,6 +50,9 @@ impl fmt::Display for Error {
                     f,
                     "フレーム数が一致しません: 宣言 {expected}、投入 {actual}"
                 )
+            }
+            Error::ChunkTooLarge { len } => {
+                write!(f, "チャンク長がPNGの上限を超えました: {len} バイト")
             }
             Error::Io(e) => write!(f, "書き出しに失敗しました: {e}"),
         }
