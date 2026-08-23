@@ -329,14 +329,14 @@ impl<W: Write> Encoder<W> {
 
         let in_bpp = self.bytes_per_pixel;
         let out_bpp = output.bytes_per_pixel();
-        for (region, frame) in spool.frames() {
+        for frame in spool.frames() {
             let region_stride = frame.rect.width as usize * out_bpp;
             if in_bpp == out_bpp {
-                self.compress(region, region_stride, out_bpp);
+                self.compress(&frame.data, region_stride, out_bpp);
             } else {
                 let mut converted = std::mem::take(&mut self.region);
                 converted.clear();
-                region::append_pixels(region, in_bpp, out_bpp, &mut converted);
+                region::append_pixels(&frame.data, in_bpp, out_bpp, &mut converted);
                 self.compress(&converted, region_stride, out_bpp);
                 self.region = converted;
             }

@@ -5,20 +5,20 @@ use crate::delay::FrameDelay;
 use crate::diff::Rect;
 use crate::region;
 
-/// 溜めたフレーム1つぶんの位置と属性
+/// 溜めたフレーム1つ
 pub(crate) struct Spooled {
     pub(crate) rect: Rect,
     pub(crate) delay: FrameDelay,
-    /// [`Spool::data`] 上でこのフレームの領域が終わる位置
-    end: usize,
+    /// 入力の画素表現のままのクロップ済み領域
+    pub(crate) data: Vec<u8>,
 }
 
 /// クロップ済みのRGBA8領域を、出力の色種別が決まるまで溜める
 pub(crate) struct Spool {
-    /// クロップ済み領域を入力の画素表現のまま連結したもの
-    data: Vec<u8>,
     frames: Vec<Spooled>,
-    /// [`Self::data`] に溜められるバイト数の上限
+    /// 溜めているバイト数
+    len: usize,
+    /// 溜められるバイト数の上限
     limit: usize,
     /// 不透明でない画素を見つけたか
     transparent: bool,
@@ -27,8 +27,8 @@ pub(crate) struct Spool {
 impl Spool {
     pub(crate) fn new(limit: usize) -> Self {
         Spool {
-            data: Vec::new(),
             frames: Vec::new(),
+            len: 0,
             limit,
             transparent: false,
         }
@@ -36,12 +36,12 @@ impl Spool {
 
     /// 溜めているバイト数
     pub(crate) fn len(&self) -> usize {
-        self.data.len()
+        self.len
     }
 
     /// `len` バイトを追加しても上限を超えないか
     pub(crate) fn can_hold(&self, len: usize) -> bool {
-        self.data.len() + len <= self.limit
+        self.len + len <= self.limit
     }
 
     /// 不透明でない画素をこれまでに見つけたか
@@ -49,6 +49,11 @@ impl Spool {
     /// 一度真になったら戻らないため、以降の走査は要らない。
     pub(crate) fn transparent(&self) -> bool {
         self.transparent
+    }
+
+    /// 溜めたフレームを、投入した順に返す
+    pub(crate) fn frames(&self) -> &[Spooled] {
+        &self.frames
     }
 
     /// `data` から `rect` を切り出して溜め、その領域のアルファを調べる
@@ -62,28 +67,19 @@ impl Spool {
         stride: usize,
         bpp: usize,
     ) {
-        let start = self.data.len();
-        region::crop(data, rect, stride, bpp, bpp, &mut self.data);
+        let mut region = Vec::new();
+        region::crop(data, rect, stride, bpp, bpp, &mut region);
 
         if !self.transparent {
-            self.transparent = alpha::has_transparency(&self.data[start..]);
+            self.transparent = alpha::has_transparency(&region);
         }
 
+        self.len += region.len();
         self.frames.push(Spooled {
             rect,
             delay,
-            end: self.data.len(),
+            data: region,
         });
-    }
-
-    /// 溜めたフレームを、投入した順に領域と属性の組で返す
-    pub(crate) fn frames(&self) -> impl Iterator<Item = (&[u8], &Spooled)> {
-        let mut start = 0;
-        self.frames.iter().map(move |frame| {
-            let region = &self.data[start..frame.end];
-            start = frame.end;
-            (region, frame)
-        })
     }
 }
 
@@ -116,15 +112,14 @@ mod tests {
     #[test]
     fn frames_come_back_in_the_order_they_were_pushed() {
         let mut spool = Spool::new(usize::MAX);
-        for _ in 0..3 {
-            spool.push(&frame(0xFF), whole(), delay(), STRIDE, 4);
+        for value in [0x10u8, 0x20, 0x30] {
+            let mut data = frame(0xFF);
+            data[0] = value;
+            spool.push(&data, whole(), delay(), STRIDE, 4);
         }
 
-        let regions: Vec<&[u8]> = spool.frames().map(|(region, _)| region).collect();
-        assert_eq!(regions.len(), 3);
-        for region in regions {
-            assert_eq!(region, frame(0xFF));
-        }
+        let heads: Vec<u8> = spool.frames().iter().map(|f| f.data[0]).collect();
+        assert_eq!(heads, [0x10, 0x20, 0x30]);
     }
 
     /// 溜めたバイト数は切り出した領域の合計
@@ -140,6 +135,7 @@ mod tests {
         spool.push(&frame(0xFF), rect, delay(), STRIDE, 4);
 
         assert_eq!(spool.len(), 2 * 2 * 4);
+        assert_eq!(spool.frames()[0].rect, rect);
     }
 
     #[test]
