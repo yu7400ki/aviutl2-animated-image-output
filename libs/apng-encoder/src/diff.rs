@@ -9,6 +9,13 @@ pub(crate) struct Rect {
     pub(crate) height: u32,
 }
 
+impl Rect {
+    /// 含む画素の数
+    pub(crate) fn area(self) -> u64 {
+        self.width as u64 * self.height as u64
+    }
+}
+
 /// 2つのフレームで異なる画素をすべて含む最小の矩形を求める
 ///
 /// `prev` と `curr` は同じ長さで、`stride` バイトの行が隙間なく並んでいること。

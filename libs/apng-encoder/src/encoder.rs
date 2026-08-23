@@ -13,6 +13,8 @@ use std::ops::RangeInclusive;
 
 /// 前のフレームを消さずに次のフレームを描画する
 const DISPOSE_OP_NONE: u8 = 0;
+/// フレームの領域を描画前の内容へ戻してから次のフレームを描画する
+const DISPOSE_OP_PREVIOUS: u8 = 2;
 /// フレームの内容で領域を置き換える
 const BLEND_OP_SOURCE: u8 = 0;
 
@@ -116,6 +118,13 @@ struct FilterChoice {
     fixed: Option<filter::Strategy>,
 }
 
+/// プローブ1回ぶんの、戦略ごとの圧縮後バイト数
+#[derive(Debug, Clone, Copy)]
+struct Probe {
+    adaptive: usize,
+    unfiltered: usize,
+}
+
 impl FilterChoice {
     fn new() -> Self {
         FilterChoice {
@@ -127,11 +136,11 @@ impl FilterChoice {
     }
 
     /// プローブ1回ぶんの圧縮後バイト数を記録し、残りが尽きたら戦略を固定する
-    fn record(&mut self, adaptive: usize, unfiltered: usize) {
+    fn record(&mut self, probe: Probe) {
         debug_assert!(self.fixed.is_none());
 
-        self.adaptive_bytes += adaptive as u64;
-        self.unfiltered_bytes += unfiltered as u64;
+        self.adaptive_bytes += probe.adaptive as u64;
+        self.unfiltered_bytes += probe.unfiltered as u64;
         self.remaining -= 1;
 
         if self.remaining == 0 {
@@ -144,11 +153,23 @@ impl FilterChoice {
     }
 }
 
+/// 書き出しを待っているフレーム
+///
+/// フレームのdispose_opは次のフレームの圧縮後サイズを見るまで決まらないため、
+/// fcTLを書けるようになるまで1つぶんを保持する。
+struct Pending {
+    rect: Rect,
+    delay: FrameDelay,
+    /// フィルタして圧縮した本体
+    body: Vec<u8>,
+}
+
 /// APNGエンコーダ
 ///
 /// [`Encoder::add_frame`] でフレームを1つずつ書き出し、[`Encoder::finish`] で終端する。
-/// 通常はフレームを保持せず、その場で書き出す。[`Config::reduce_color`] が有効なときだけ、
-/// 出力の色種別が決まるまでのフレームを内部に溜める。
+/// dispose_opは次のフレームの圧縮後サイズを見て決めるため、書き出しは1フレーム遅れる。
+/// [`Config::reduce_color`] が有効なときだけ、出力の色種別が決まるまでのフレームを
+/// さらに内部へ溜める。
 pub struct Encoder<W: Write> {
     writer: W,
     width: u32,
@@ -171,18 +192,25 @@ pub struct Encoder<W: Write> {
     frame_len: usize,
     /// 出力の色種別
     ///
-    /// [`Self::pending`] が `Some` の間は暫定で入力の色種別が入り、
+    /// [`Self::spool`] が `Some` の間は暫定で入力の色種別が入り、
     /// [`Self::commit`] で確定してヘッダに載る。
     output_color_type: ColorType,
     /// 出力の色種別が決まるまでフレームを溜める領域
-    pending: Option<Spool>,
+    spool: Option<Spool>,
     /// 溜めたバイト数の最大値
     peak_spool_bytes: usize,
     compressor: Compressor,
-    /// 直前に書き出したフレーム
+    /// 書き出しを待っているフレーム
+    pending: Option<Pending>,
+    /// 直前に投入されたフレーム
     ///
-    /// dispose_op=NONE・blend_op=SOURCE のもとでは、合成後のキャンバスと一致する。
+    /// blend_op=SOURCE のもとでは、それを描いた後のキャンバスと一致する。
     previous: Vec<u8>,
+    /// [`Self::previous`] を描く直前のキャンバス
+    ///
+    /// 保留中のフレームをdispose_op=PREVIOUSで捨てると、この内容が復元される。
+    /// 復元先は常に過去のいずれかのフレームそのものなので、1面あれば足りる。
+    canvas: Vec<u8>,
     /// 差分矩形を切り出した連続バッファ
     region: Vec<u8>,
     /// 行ごとのフィルタ選択に使う作業領域
@@ -193,6 +221,8 @@ pub struct Encoder<W: Write> {
     filter_choice: FilterChoice,
     /// プローブでもう一方の候補を圧縮しておく領域
     probed: Vec<u8>,
+    /// dispose_opの候補を比べるために、もう一方の候補を圧縮しておく領域
+    dispose_probed: Vec<u8>,
 }
 
 /// フレームを1つ受け付けたあとに取る行動
@@ -257,18 +287,21 @@ impl<W: Write> Encoder<W> {
             stride,
             frame_len,
             output_color_type: config.color_type,
-            pending: deferred.then(|| Spool::new(config.max_spool_bytes)),
+            spool: deferred.then(|| Spool::new(config.max_spool_bytes)),
             peak_spool_bytes: 0,
             compressor: Compressor::new(config.compression_level),
+            pending: None,
             previous: Vec::new(),
+            canvas: Vec::new(),
             region: Vec::new(),
             scratch: filter::Scratch::new(),
             filtered: Vec::new(),
             compressed: Vec::new(),
             filter_choice: FilterChoice::new(),
             probed: Vec::new(),
+            dispose_probed: Vec::new(),
         };
-        if encoder.pending.is_none() {
+        if encoder.spool.is_none() {
             encoder.write_header()?;
         }
         Ok(encoder)
@@ -322,30 +355,49 @@ impl<W: Write> Encoder<W> {
             });
         }
 
-        let rect = self.frame_rect(data);
-
         // 途中で失敗するとfcTLだけが書かれた状態で残るため、以降の書き出しを拒否する
-        self.take_step(data, rect, delay)
+        self.accept(data, delay)
             .inspect_err(|_| self.poisoned = true)?;
 
-        self.previous.clear();
-        self.previous.extend_from_slice(data);
         self.frames_accepted += 1;
         Ok(())
     }
 
-    /// フレームのうち実際に書き出す領域を決める
-    ///
-    /// 先頭フレームはIDATに入るためキャンバス全体とする。以降は直前のフレームとの
-    /// 差分の外接矩形を使い、差分が無い場合はfcTLの個数を保つために1画素だけ書き直す。
-    fn frame_rect(&self, data: &[u8]) -> Rect {
-        const UNCHANGED: Rect = Rect {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        };
+    /// 保留中のフレームを書き出し、投入されたフレームを保留にする
+    fn accept(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
+        // 出力の色種別が決まるまでは、候補を実際に書き出す色種別で圧縮できず
+        // 大きさを比べられない。溜めている間はdispose_opをNONEに固定し、
+        // 保留を挟まずに溜める側へ渡す。
+        if self.spool.is_some() {
+            let rect = self.kept_rect(data);
+            self.take_step(data, rect, delay, DISPOSE_OP_NONE)?;
+            self.advance(data, DISPOSE_OP_NONE);
+            return Ok(());
+        }
 
+        let (dispose, rect) = self.choose_dispose(data);
+        let mut body = self.flush_pending(dispose)?;
+        std::mem::swap(&mut self.compressed, &mut body);
+        self.pending = Some(Pending { rect, delay, body });
+        self.advance(data, dispose);
+        Ok(())
+    }
+
+    /// 投入されたフレームを直前のフレームとして覚え、キャンバスを進める
+    fn advance(&mut self, data: &[u8], dispose: u8) {
+        // 捨てない場合だけ、直前のフレームがそのままキャンバスとして残る
+        if dispose == DISPOSE_OP_NONE {
+            std::mem::swap(&mut self.canvas, &mut self.previous);
+        }
+        self.previous.clear();
+        self.previous.extend_from_slice(data);
+    }
+
+    /// 保留中のフレームを捨てないときの、投入されたフレームの矩形
+    ///
+    /// 先頭フレームはIDATに入るためキャンバス全体とする。以降は保留中のフレームとの
+    /// 差分の外接矩形を使う。
+    fn kept_rect(&self, data: &[u8]) -> Rect {
         if self.frames_accepted == 0 {
             return Rect {
                 x: 0,
@@ -355,16 +407,93 @@ impl<W: Write> Encoder<W> {
             };
         }
 
-        diff::dirty_rect(&self.previous, data, self.stride, self.bytes_per_pixel)
-            .unwrap_or(UNCHANGED)
+        self.bounding_rect(&self.previous, data)
+    }
+
+    /// 保留中のフレームをdispose_op=PREVIOUSで捨てるときの、投入されたフレームの矩形
+    ///
+    /// 次の場合は捨てても得にならないため、候補にせず `None` を返す。
+    /// - 書き出しを待っているフレームが無いとき
+    /// - 保留中のフレームが先頭フレームのとき。静止画に対応するfcTLの
+    ///   dispose_op=PREVIOUSはBACKGROUNDとして扱われ、キャンバスが復元されない
+    /// - 矩形が捨てない場合より小さくならないとき
+    fn restored_rect(&self, data: &[u8], kept: Rect) -> Option<Rect> {
+        if self.pending.is_none() || self.frames_accepted < 2 {
+            return None;
+        }
+
+        let rect = self.bounding_rect(&self.canvas, data);
+        (rect.area() < kept.area()).then_some(rect)
+    }
+
+    /// `base` と `data` の差分の外接矩形
+    ///
+    /// 差分が無い場合はfcTLの個数を保つために1画素だけ書き直す。
+    fn bounding_rect(&self, base: &[u8], data: &[u8]) -> Rect {
+        const UNCHANGED: Rect = Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        };
+
+        diff::dirty_rect(base, data, self.stride, self.bytes_per_pixel).unwrap_or(UNCHANGED)
+    }
+
+    /// 保留中のフレームのdispose_opと、投入されたフレームの矩形を決める
+    ///
+    /// 保留中のフレームをdispose_op=PREVIOUSで捨てると、投入されたフレームは
+    /// それを描く直前のキャンバスとの差分になる。両方の候補を圧縮して小さい方を採り、
+    /// 採った側の本体を [`Self::compressed`] へ残す。同じ大きさなら捨てない。
+    fn choose_dispose(&mut self, data: &[u8]) -> (u8, Rect) {
+        let kept = self.kept_rect(data);
+        let restored = self.restored_rect(data, kept);
+
+        let kept_probe = self.compress_rect(data, kept);
+        let Some(restored) = restored else {
+            self.record(kept_probe);
+            return (DISPOSE_OP_NONE, kept);
+        };
+
+        let kept_len = self.compressed.len();
+        std::mem::swap(&mut self.compressed, &mut self.dispose_probed);
+        let restored_probe = self.compress_rect(data, restored);
+
+        if self.compressed.len() < kept_len {
+            self.record(restored_probe);
+            (DISPOSE_OP_PREVIOUS, restored)
+        } else {
+            std::mem::swap(&mut self.compressed, &mut self.dispose_probed);
+            self.record(kept_probe);
+            (DISPOSE_OP_NONE, kept)
+        }
+    }
+
+    /// 保留中のフレームを `dispose` で書き出し、本体に使っていた領域を返す
+    fn flush_pending(&mut self, dispose: u8) -> Result<Vec<u8>, Error> {
+        let Some(pending) = self.pending.take() else {
+            return Ok(Vec::new());
+        };
+
+        let mut body = pending.body;
+        std::mem::swap(&mut self.compressed, &mut body);
+        self.write_frame(pending.rect, pending.delay, dispose)?;
+        std::mem::swap(&mut self.compressed, &mut body);
+        Ok(body)
     }
 
     /// フレームを溜めるか書き出すかを決め、決めたとおりに処理する
-    fn take_step(&mut self, data: &[u8], rect: Rect, delay: FrameDelay) -> Result<(), Error> {
+    fn take_step(
+        &mut self,
+        data: &[u8],
+        rect: Rect,
+        delay: FrameDelay,
+        dispose: u8,
+    ) -> Result<(), Error> {
         let is_last = self.frames_accepted + 1 == self.num_frames;
         let input_color_type = self.output_color_type;
 
-        let step = match &mut self.pending {
+        let step = match &mut self.spool {
             None => Step::Emit,
             Some(spool) => {
                 let region_len = rect.width as usize * rect.height as usize * self.bytes_per_pixel;
@@ -386,19 +515,19 @@ impl<W: Write> Encoder<W> {
         };
 
         match step {
-            Step::Emit => self.emit_frame(data, rect, delay),
+            Step::Emit => self.emit_frame(data, rect, delay, dispose),
             Step::Hold => Ok(()),
             Step::Commit(output) => self.commit(output),
             Step::Abandon => {
                 self.commit(input_color_type)?;
-                self.emit_frame(data, rect, delay)
+                self.emit_frame(data, rect, delay, dispose)
             }
         }
     }
 
     /// 出力の色種別を確定し、ヘッダに続けて溜めたフレームを書き出す
     fn commit(&mut self, output: ColorType) -> Result<(), Error> {
-        let Some(spool) = self.pending.take() else {
+        let Some(spool) = self.spool.take() else {
             return Ok(());
         };
 
@@ -409,23 +538,39 @@ impl<W: Write> Encoder<W> {
         let out_bpp = output.bytes_per_pixel();
         for frame in spool.frames() {
             let region_stride = frame.rect.width as usize * out_bpp;
-            if in_bpp == out_bpp {
-                self.compress(&frame.data, region_stride, out_bpp);
+            let probe = if in_bpp == out_bpp {
+                self.compress(&frame.data, region_stride, out_bpp)
             } else {
                 let mut converted = std::mem::take(&mut self.region);
                 converted.clear();
                 region::append_pixels(&frame.data, in_bpp, out_bpp, &mut converted);
-                self.compress(&converted, region_stride, out_bpp);
+                let probe = self.compress(&converted, region_stride, out_bpp);
                 self.region = converted;
-            }
-            self.write_frame(frame.rect, frame.delay)?;
+                probe
+            };
+            self.record(probe);
+            // 溜めている間はdispose_opを決められないため、捨てずに残す
+            self.write_frame(frame.rect, frame.delay, DISPOSE_OP_NONE)?;
         }
 
         Ok(())
     }
 
     /// 出力の色種別が確定したフレームを1つ書き出す
-    fn emit_frame(&mut self, data: &[u8], rect: Rect, delay: FrameDelay) -> Result<(), Error> {
+    fn emit_frame(
+        &mut self,
+        data: &[u8],
+        rect: Rect,
+        delay: FrameDelay,
+        dispose: u8,
+    ) -> Result<(), Error> {
+        let probe = self.compress_rect(data, rect);
+        self.record(probe);
+        self.write_frame(rect, delay, dispose)
+    }
+
+    /// フレームから `rect` を切り出してフィルタして圧縮し、[`Self::compressed`] へ格納する
+    fn compress_rect(&mut self, data: &[u8], rect: Rect) -> Option<Probe> {
         let in_bpp = self.bytes_per_pixel;
         let out_bpp = self.output_color_type.bytes_per_pixel();
         let region_stride = rect.width as usize * out_bpp;
@@ -434,25 +579,38 @@ impl<W: Write> Encoder<W> {
             // 変換の要らない全幅の矩形は `data` 上で既に連続している
             let head = rect.y as usize * self.stride;
             let len = region_stride * rect.height as usize;
-            self.compress(&data[head..head + len], region_stride, out_bpp);
+            self.compress(&data[head..head + len], region_stride, out_bpp)
         } else {
             let mut cropped = std::mem::take(&mut self.region);
             cropped.clear();
             region::crop(data, rect, self.stride, in_bpp, out_bpp, &mut cropped);
-            self.compress(&cropped, region_stride, out_bpp);
+            let probe = self.compress(&cropped, region_stride, out_bpp);
             self.region = cropped;
+            probe
         }
-
-        self.write_frame(rect, delay)
     }
 
     /// 連続した領域をフィルタして圧縮し、[`Self::compressed`] へ格納する
     ///
     /// フィルタ戦略が固まるまでは両方を試し、それ以降は固めた戦略だけを使う。
-    fn compress(&mut self, region: &[u8], region_stride: usize, bpp: usize) {
+    /// 両方を試した場合は、そのバイト数を戦略ごとに返す。
+    fn compress(&mut self, region: &[u8], region_stride: usize, bpp: usize) -> Option<Probe> {
         match self.filter_choice.fixed {
-            Some(strategy) => self.compress_with(region, region_stride, bpp, strategy),
-            None => self.probe(region, region_stride, bpp),
+            Some(strategy) => {
+                self.compress_with(region, region_stride, bpp, strategy);
+                None
+            }
+            None => Some(self.probe(region, region_stride, bpp)),
+        }
+    }
+
+    /// 書き出すフレーム1つぶんのプローブを記録する
+    ///
+    /// dispose_opの候補を選ぶための圧縮は、採らなかった側を二重に数えないよう
+    /// 記録しない。
+    fn record(&mut self, probe: Option<Probe>) {
+        if let Some(probe) = probe {
+            self.filter_choice.record(probe);
         }
     }
 
@@ -479,10 +637,10 @@ impl<W: Write> Encoder<W> {
             .compress_into(&self.filtered, &mut self.compressed);
     }
 
-    /// 両方の戦略で圧縮し、小さい方を [`Self::compressed`] に残して結果を記録する
+    /// 両方の戦略で圧縮し、小さい方を [`Self::compressed`] に残して結果を返す
     ///
     /// 同じ大きさなら [`filter::Strategy::Unfiltered`] を残す。
-    fn probe(&mut self, region: &[u8], region_stride: usize, bpp: usize) {
+    fn probe(&mut self, region: &[u8], region_stride: usize, bpp: usize) -> Probe {
         self.compress_with(region, region_stride, bpp, filter::Strategy::Adaptive);
         std::mem::swap(&mut self.compressed, &mut self.probed);
         self.compress_with(region, region_stride, bpp, filter::Strategy::Unfiltered);
@@ -491,11 +649,14 @@ impl<W: Write> Encoder<W> {
         if adaptive < unfiltered {
             std::mem::swap(&mut self.compressed, &mut self.probed);
         }
-        self.filter_choice.record(adaptive, unfiltered);
+        Probe {
+            adaptive,
+            unfiltered,
+        }
     }
 
-    fn write_frame(&mut self, rect: Rect, delay: FrameDelay) -> Result<(), Error> {
-        self.write_fctl(rect, delay)?;
+    fn write_frame(&mut self, rect: Rect, delay: FrameDelay, dispose: u8) -> Result<(), Error> {
+        self.write_fctl(rect, delay, dispose)?;
 
         // 先頭フレームはIDATに入り、以降はfdATに入る
         if self.frames_emitted == 0 {
@@ -513,7 +674,7 @@ impl<W: Write> Encoder<W> {
         Ok(())
     }
 
-    fn write_fctl(&mut self, rect: Rect, delay: FrameDelay) -> Result<(), Error> {
+    fn write_fctl(&mut self, rect: Rect, delay: FrameDelay, dispose: u8) -> Result<(), Error> {
         let (delay_num, delay_den) = delay.to_parts();
 
         let mut fctl = [0u8; 26];
@@ -524,7 +685,7 @@ impl<W: Write> Encoder<W> {
         fctl[16..20].copy_from_slice(&rect.y.to_be_bytes());
         fctl[20..22].copy_from_slice(&delay_num.to_be_bytes());
         fctl[22..24].copy_from_slice(&delay_den.to_be_bytes());
-        fctl[24] = DISPOSE_OP_NONE;
+        fctl[24] = dispose;
         fctl[25] = BLEND_OP_SOURCE;
         chunk::write(&mut self.writer, *b"fcTL", &fctl)?;
 
@@ -547,6 +708,9 @@ impl<W: Write> Encoder<W> {
                 actual: self.frames_accepted,
             });
         }
+
+        // 次のフレームが無いため、最後のフレームは捨てても復元される先が無い
+        self.flush_pending(DISPOSE_OP_NONE)?;
 
         chunk::write(&mut self.writer, *b"IEND", &[])?;
         Ok(self.writer)
@@ -802,20 +966,27 @@ mod tests {
         }
     }
 
+    fn probe(adaptive: usize, unfiltered: usize) -> Probe {
+        Probe {
+            adaptive,
+            unfiltered,
+        }
+    }
+
     /// プローブは候補ごとの圧縮後バイト数を積み、合計の小さい方へ固める
     #[test]
     fn the_probe_fixes_the_candidate_with_the_smaller_total() {
         let mut choice = FilterChoice::new();
         for _ in 0..PROBE_FRAMES - 1 {
-            choice.record(100, 120);
+            choice.record(probe(100, 120));
             assert_eq!(choice.fixed, None);
         }
-        choice.record(100, 1);
+        choice.record(probe(100, 1));
         assert_eq!(choice.fixed, Some(filter::Strategy::Unfiltered));
 
         let mut choice = FilterChoice::new();
         for _ in 0..PROBE_FRAMES {
-            choice.record(100, 120);
+            choice.record(probe(100, 120));
         }
         assert_eq!(choice.fixed, Some(filter::Strategy::Adaptive));
     }
@@ -825,7 +996,7 @@ mod tests {
     fn a_tie_settles_on_the_unfiltered_strategy() {
         let mut choice = FilterChoice::new();
         for _ in 0..PROBE_FRAMES {
-            choice.record(64, 64);
+            choice.record(probe(64, 64));
         }
         assert_eq!(choice.fixed, Some(filter::Strategy::Unfiltered));
     }

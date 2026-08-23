@@ -69,20 +69,53 @@ fn decode(bytes: &[u8]) -> (u32, Vec<DecodedFrame>) {
     (animation.num_plays, decoded)
 }
 
-/// フレームの矩形をキャンバスの該当位置へ書き込む
-fn composite(canvas: &mut [u8], frame: &DecodedFrame, width: u32, color_type: ColorType) {
-    assert!(matches!(frame.control.dispose_op, png::DisposeOp::None));
+/// フレームを描いた後、次のフレームを描く前にキャンバスへ施す後始末
+struct Disposal {
+    /// 戻す行の、キャンバス上の先頭バイト位置と内容
+    rows: Vec<(usize, Vec<u8>)>,
+}
+
+impl Disposal {
+    /// キャンバスをフレームを描く前の内容へ戻す
+    fn apply(&self, canvas: &mut [u8]) {
+        for (head, row) in &self.rows {
+            canvas[*head..*head + row.len()].copy_from_slice(row);
+        }
+    }
+}
+
+/// フレームの矩形をキャンバスの該当位置へ書き込み、dispose_opの後始末を返す
+fn composite(
+    canvas: &mut [u8],
+    frame: &DecodedFrame,
+    width: u32,
+    color_type: ColorType,
+) -> Disposal {
     assert!(matches!(frame.control.blend_op, png::BlendOp::Source));
 
     let bpp = color_type.bytes_per_pixel();
     let stride = width as usize * bpp;
     let row_len = frame.control.width as usize * bpp;
     let head = frame.control.y_offset as usize * stride + frame.control.x_offset as usize * bpp;
+
+    let rows = match frame.control.dispose_op {
+        png::DisposeOp::None => Vec::new(),
+        png::DisposeOp::Previous => (0..frame.control.height as usize)
+            .map(|y| {
+                let dst = head + y * stride;
+                (dst, canvas[dst..dst + row_len].to_vec())
+            })
+            .collect(),
+        png::DisposeOp::Background => panic!("BACKGROUNDは書き出さない"),
+    };
+
     for y in 0..frame.control.height as usize {
         let dst = head + y * stride;
         let src = y * row_len;
         canvas[dst..dst + row_len].copy_from_slice(&frame.data[src..src + row_len]);
     }
+
+    Disposal { rows }
 }
 
 fn assert_roundtrip(width: u32, height: u32, color_type: ColorType, count: u32) {
@@ -95,8 +128,9 @@ fn assert_roundtrip(width: u32, height: u32, color_type: ColorType, count: u32) 
 
     let mut canvas = vec![0u8; input[0].len()];
     for (index, (frame, expected)) in decoded.iter().zip(&input).enumerate() {
-        composite(&mut canvas, frame, width, color_type);
+        let disposal = composite(&mut canvas, frame, width, color_type);
         assert_eq!(&canvas, expected, "フレーム {index}");
+        disposal.apply(&mut canvas);
 
         // fcTLとfdATが共有する連番: 先頭フレームはfdATを持たない
         let expected_sequence = if index == 0 { 0 } else { index as u32 * 2 - 1 };
@@ -247,20 +281,23 @@ impl Write for FailingWriter {
 }
 
 /// fcTLだけが書かれた状態で再開すると不正なAPNGになるため、失敗後は受け付けない
+///
+/// 先頭フレームはdispose_opが決まる2フレーム目の投入まで書き出されない。
 #[test]
 fn a_failed_write_poisons_the_encoder() {
-    let input = frames(8, 8, ColorType::Rgba8, 2);
+    let input = frames(8, 8, ColorType::Rgba8, 3);
     let delay = FrameDelay::new(1, 30).unwrap();
     // シグネチャ・IHDR・acTL・fcTLは通り、IDATの途中で失敗する長さ
     let writer = FailingWriter { remaining: 100 };
-    let mut encoder = Encoder::new(writer, 8, 8, 2, config(ColorType::Rgba8)).unwrap();
+    let mut encoder = Encoder::new(writer, 8, 8, 3, config(ColorType::Rgba8)).unwrap();
 
+    encoder.add_frame(&input[0], delay).unwrap();
     assert!(matches!(
-        encoder.add_frame(&input[0], delay),
+        encoder.add_frame(&input[1], delay),
         Err(Error::Io(_))
     ));
     assert!(matches!(
-        encoder.add_frame(&input[1], delay),
+        encoder.add_frame(&input[2], delay),
         Err(Error::Poisoned)
     ));
     assert!(matches!(encoder.finish(), Err(Error::Poisoned)));
@@ -377,8 +414,9 @@ fn assert_crop(color_type: ColorType, input: &[Vec<u8>], expected: &[(u32, u32, 
 
     let mut canvas = vec![0u8; input[0].len()];
     for (index, (frame, source)) in decoded.iter().zip(input).enumerate() {
-        composite(&mut canvas, frame, CROP_WIDTH, color_type);
+        let disposal = composite(&mut canvas, frame, CROP_WIDTH, color_type);
         assert_eq!(&canvas, source, "{color_type:?} フレーム {index}");
+        disposal.apply(&mut canvas);
     }
 }
 
@@ -517,6 +555,156 @@ fn consecutive_partial_rects_carry_their_own_content() {
     }
 }
 
+/// 各フレームのfcTLが示すdispose_op
+fn dispose_ops(decoded: &[DecodedFrame]) -> Vec<png::DisposeOp> {
+    decoded
+        .iter()
+        .map(|frame| frame.control.dispose_op)
+        .collect()
+}
+
+/// `value` で埋めた `block` の領域を持つフレームを作る
+fn with_block(color_type: ColorType, block: (u32, u32, u32, u32), value: u8) -> Vec<u8> {
+    let mut frame = solid(color_type, 0x40);
+    for y in 0..block.3 {
+        for x in 0..block.2 {
+            set_pixel(&mut frame, color_type, block.0 + x, block.1 + y, value);
+        }
+    }
+    frame
+}
+
+/// 1フレームだけ現れる領域はPREVIOUSで捨て、次のフレームで塗り戻さない
+///
+/// 捨てたフレームの次はそれを描く前のキャンバスとの差分になるため、内容が戻った
+/// フレームは差分を持たない。
+#[test]
+fn a_transient_region_is_disposed_to_previous() {
+    const BLOCK: (u32, u32, u32, u32) = (2, 1, 3, 2);
+    const UNIT: (u32, u32, u32, u32) = (0, 0, 1, 1);
+
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        let base = solid(color_type, 0x40);
+        let marked = with_block(color_type, BLOCK, 0xFF);
+        let input = vec![base.clone(), marked.clone(), base.clone(), marked, base];
+
+        let bytes = encode(CROP_WIDTH, CROP_HEIGHT, color_type, &input);
+        let (_, decoded) = decode(&bytes);
+
+        // 最終フレームは戻す先が無いため捨てない
+        assert_eq!(
+            dispose_ops(&decoded),
+            [
+                png::DisposeOp::None,
+                png::DisposeOp::Previous,
+                png::DisposeOp::None,
+                png::DisposeOp::Previous,
+                png::DisposeOp::None
+            ],
+            "{color_type:?}"
+        );
+        assert_eq!(
+            rects(&decoded),
+            [WHOLE, BLOCK, UNIT, BLOCK, UNIT],
+            "{color_type:?}"
+        );
+        assert_composites_to(&bytes, CROP_WIDTH, color_type, &input);
+    }
+}
+
+/// 変更が積み上がる列では、捨てると矩形が広がるため捨てない
+#[test]
+fn cumulative_changes_are_never_disposed() {
+    const POSITIONS: [(u32, u32); 3] = [(1, 1), (6, 4), (3, 2)];
+
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        let mut input = vec![solid(color_type, 0x40)];
+        for (index, &(x, y)) in POSITIONS.iter().enumerate() {
+            let mut frame = input.last().unwrap().clone();
+            set_pixel(&mut frame, color_type, x, y, 0x80 + index as u8);
+            input.push(frame);
+        }
+
+        let bytes = encode(CROP_WIDTH, CROP_HEIGHT, color_type, &input);
+        let (_, decoded) = decode(&bytes);
+
+        assert!(
+            dispose_ops(&decoded)
+                .iter()
+                .all(|op| matches!(op, png::DisposeOp::None)),
+            "{color_type:?}"
+        );
+        assert_composites_to(&bytes, CROP_WIDTH, color_type, &input);
+    }
+}
+
+/// 捨てた場合の矩形が広いときは、圧縮して比べる前に候補から外す
+///
+/// 広い方が一様で小さく圧縮できる場合でも、面積で先に落とす。
+#[test]
+fn a_wider_restored_rect_is_not_tried() {
+    const TOP: (u32, u32, u32, u32) = (0, 0, CROP_WIDTH, 3);
+    const PATCH: (u32, u32, u32, u32) = (2, 4, 4, 2);
+
+    let color_type = ColorType::Rgb8;
+    let bpp = color_type.bytes_per_pixel();
+    let noise = frame_data(PATCH.2 as usize * PATCH.3 as usize * bpp, 1);
+
+    // 上半分が一様、下半分に擬似乱数のパッチを持つフレーム
+    let mut third = solid(color_type, 0x40);
+    for y in 0..PATCH.3 {
+        for x in 0..PATCH.2 {
+            let src = ((y * PATCH.2 + x) as usize) * bpp;
+            let dst = (((PATCH.1 + y) * CROP_WIDTH + PATCH.0 + x) as usize) * bpp;
+            third[dst..dst + bpp].copy_from_slice(&noise[src..src + bpp]);
+        }
+    }
+
+    // パッチだけが違うフレーム
+    let mut second = third.clone();
+    for y in 0..PATCH.3 {
+        for x in 0..PATCH.2 {
+            set_pixel(&mut second, color_type, PATCH.0 + x, PATCH.1 + y, 0x40);
+        }
+    }
+
+    // 上半分だけが違うフレーム
+    let mut first = third.clone();
+    for y in 0..TOP.3 {
+        for x in 0..TOP.2 {
+            set_pixel(&mut first, color_type, x, y, 0x80);
+        }
+    }
+
+    let input = vec![first, second, third];
+    let bytes = encode(CROP_WIDTH, CROP_HEIGHT, color_type, &input);
+    let (_, decoded) = decode(&bytes);
+
+    assert!(
+        dispose_ops(&decoded)
+            .iter()
+            .all(|op| matches!(op, png::DisposeOp::None))
+    );
+    assert_eq!(rects(&decoded)[2], PATCH);
+    assert_composites_to(&bytes, CROP_WIDTH, color_type, &input);
+}
+
+/// 静止画に対応するfcTLのPREVIOUSはBACKGROUNDとして扱われるため、選ばない
+#[test]
+fn the_first_frame_is_never_disposed_to_previous() {
+    // 2フレーム目を透明な黒にすると、捨てて再生開始時のキャンバスへ戻すのが最小になる
+    let opaque = solid(ColorType::Rgba8, 0x40);
+    let cleared = vec![0u8; opaque.len()];
+    let input = vec![opaque, cleared.clone(), cleared];
+
+    let bytes = encode(CROP_WIDTH, CROP_HEIGHT, ColorType::Rgba8, &input);
+    let (_, decoded) = decode(&bytes);
+
+    assert_eq!(dispose_ops(&decoded)[0], png::DisposeOp::None);
+    assert_eq!(rects(&decoded)[1], WHOLE);
+    assert_composites_to(&bytes, CROP_WIDTH, ColorType::Rgba8, &input);
+}
+
 /// 色種別を落とす検証に使うキャンバスの大きさ
 const REDUCE_WIDTH: u32 = 8;
 const REDUCE_HEIGHT: u32 = 6;
@@ -595,13 +783,14 @@ fn assert_reduced_roundtrip(bytes: &[u8], input: &[Vec<u8>], expected: png::Colo
 
     let mut canvas = vec![0u8; REDUCE_FRAME_LEN / 4 * color_type.bytes_per_pixel()];
     for (index, (frame, source)) in decoded.iter().zip(input).enumerate() {
-        composite(&mut canvas, frame, REDUCE_WIDTH, color_type);
+        let disposal = composite(&mut canvas, frame, REDUCE_WIDTH, color_type);
 
         let expected_frame = match color_type {
             ColorType::Rgb8 => without_alpha(source),
             ColorType::Rgba8 => source.clone(),
         };
         assert_eq!(canvas, expected_frame, "フレーム {index}");
+        disposal.apply(&mut canvas);
 
         let expected_sequence = if index == 0 { 0 } else { index as u32 * 2 - 1 };
         assert_eq!(frame.control.sequence_number, expected_sequence);
@@ -809,6 +998,65 @@ fn alpha_anywhere_inside_a_partial_rect_is_found() {
     }
 }
 
+/// 1フレームだけ現れる領域を持つRGBA8のフレーム列
+///
+/// `transparent` が真なら、先頭フレームから不透明でない画素を含む。
+fn transient_frames(transparent: bool) -> Vec<Vec<u8>> {
+    let mut base = vec![0xFFu8; REDUCE_FRAME_LEN];
+    if transparent {
+        base[3] = 0x80;
+    }
+
+    let mut marked = base.clone();
+    for y in 1..3usize {
+        for x in 2..5usize {
+            let start = (y * REDUCE_WIDTH as usize + x) * 4;
+            marked[start..start + 3].fill(0x10);
+        }
+    }
+
+    vec![base.clone(), marked.clone(), base.clone(), marked, base]
+}
+
+/// 溜めるのをやめた後のdispose_opは、最初から溜めない場合と変わらない
+#[test]
+fn disposal_after_the_spool_matches_not_reducing() {
+    let input = transient_frames(true);
+    let plain = encode(REDUCE_WIDTH, REDUCE_HEIGHT, ColorType::Rgba8, &input);
+    let (reduced, _) = encode_with(
+        REDUCE_WIDTH,
+        REDUCE_HEIGHT,
+        reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+        &input,
+    );
+
+    assert_eq!(reduced, plain);
+
+    let (_, decoded) = decode(&reduced);
+    assert!(dispose_ops(&decoded).contains(&png::DisposeOp::Previous));
+    assert_reduced_roundtrip(&reduced, &input, png::ColorType::Rgba);
+}
+
+/// 溜めている間は出力の色種別が決まらず候補を比べられないため、捨てない
+#[test]
+fn spooled_frames_are_never_disposed() {
+    let input = transient_frames(false);
+    let (bytes, _) = encode_with(
+        REDUCE_WIDTH,
+        REDUCE_HEIGHT,
+        reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+        &input,
+    );
+
+    let (_, decoded) = decode(&bytes);
+    assert!(
+        dispose_ops(&decoded)
+            .iter()
+            .all(|op| matches!(op, png::DisposeOp::None))
+    );
+    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Rgb);
+}
+
 /// フィルタ戦略の検証に使うキャンバスの大きさ
 const FILTER_WIDTH: u32 = 40;
 const FILTER_HEIGHT: u32 = 24;
@@ -868,8 +1116,9 @@ fn assert_composites_to(bytes: &[u8], width: u32, color_type: ColorType, expecte
 
     let mut canvas = vec![0u8; expected[0].len()];
     for (index, (frame, source)) in decoded.iter().zip(expected).enumerate() {
-        composite(&mut canvas, frame, width, color_type);
+        let disposal = composite(&mut canvas, frame, width, color_type);
         assert_eq!(&canvas, source, "フレーム {index}");
+        disposal.apply(&mut canvas);
     }
 }
 
