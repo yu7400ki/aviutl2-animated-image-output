@@ -1228,6 +1228,14 @@ mod tests {
         assert!(types[4].iter().any(|&f| f != 0), "{:?}", types[4]);
     }
 
+    /// 圧縮後の合計が同じならアルファを落とす
+    #[test]
+    fn a_tie_drops_the_alpha() {
+        assert_eq!(smaller_output(64, 64), Output::Rgb8);
+        assert_eq!(smaller_output(63, 64), Output::Rgb8);
+        assert_eq!(smaller_output(65, 64), Output::Rgba8);
+    }
+
     fn probe(adaptive: usize, unfiltered: usize) -> Probe {
         Probe {
             adaptive,
