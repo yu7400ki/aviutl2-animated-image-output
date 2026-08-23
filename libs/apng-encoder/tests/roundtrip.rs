@@ -156,15 +156,37 @@ impl Disposal {
     }
 }
 
-/// フレームの矩形をキャンバスの該当位置へ書き込み、dispose_opの後始末を返す
+/// APNGのblend_op=OVERが定めるアルファ合成
+///
+/// 完全に透明な前景はキャンバスを残し、不透明な前景と完全に透明なキャンバスは
+/// 前景を残す。それ以外は両者を混ぜる。
+fn blend_over(foreground: [u8; 4], background: [u8; 4]) -> [u8; 4] {
+    let (front_alpha, back_alpha) = (foreground[3] as u32, background[3] as u32);
+    if front_alpha == 0 {
+        return background;
+    }
+    if front_alpha == u8::MAX as u32 || back_alpha == 0 {
+        return foreground;
+    }
+
+    let carried = back_alpha * (u8::MAX as u32 - front_alpha) / u8::MAX as u32;
+    let alpha = front_alpha + carried;
+    let mut out = [0u8; 4];
+    for (channel, out) in out[..3].iter_mut().enumerate() {
+        let sum = foreground[channel] as u32 * front_alpha + background[channel] as u32 * carried;
+        *out = (sum / alpha) as u8;
+    }
+    out[3] = alpha as u8;
+    out
+}
+
+/// フレームの矩形をキャンバスの該当位置へ合成し、dispose_opの後始末を返す
 fn composite(
     canvas: &mut [u8],
     frame: &DecodedFrame,
     width: u32,
     color_type: ColorType,
 ) -> Disposal {
-    assert!(matches!(frame.control.blend_op, png::BlendOp::Source));
-
     let bpp = color_type.bytes_per_pixel();
     let stride = width as usize * bpp;
     let row_len = frame.control.width as usize * bpp;
@@ -184,7 +206,21 @@ fn composite(
     for y in 0..frame.control.height as usize {
         let dst = head + y * stride;
         let src = y * row_len;
-        canvas[dst..dst + row_len].copy_from_slice(&frame.data[src..src + row_len]);
+        let row = &frame.data[src..src + row_len];
+        match frame.control.blend_op {
+            png::BlendOp::Source => canvas[dst..dst + row_len].copy_from_slice(row),
+            png::BlendOp::Over => {
+                assert_eq!(color_type, ColorType::Rgba8, "OVERはアルファを要する");
+                for (x, foreground) in row.chunks_exact(bpp).enumerate() {
+                    let at = dst + x * bpp;
+                    let blended = blend_over(
+                        foreground.try_into().unwrap(),
+                        canvas[at..at + bpp].try_into().unwrap(),
+                    );
+                    canvas[at..at + bpp].copy_from_slice(&blended);
+                }
+            }
+        }
     }
 
     Disposal { rows }
@@ -843,6 +879,248 @@ fn a_tie_keeps_the_pending_frame() {
     // 捨てれば矩形は上から ROWS 行に縮むが、一様なので圧縮後は全面と同じ大きさになる
     assert_eq!(rects(&decoded)[2], WHOLE);
     assert_composites_to(&bytes, CROP_WIDTH, color_type, &input);
+}
+
+/// blend_opの検証に使うキャンバスの大きさ
+///
+/// 潰した画素の並びが圧縮に効くだけの画素を取る。
+const BLEND_WIDTH: u32 = 24;
+const BLEND_HEIGHT: u32 = 16;
+/// 1フレームの画素数
+const BLEND_PIXELS: usize = BLEND_WIDTH as usize * BLEND_HEIGHT as usize;
+
+/// 画素ごとに違う不透明な色を敷いたRGBA8のフレーム
+///
+/// 隣り合う画素が揃わないため、そのまま書くとほとんど縮まない。
+fn blend_frame(seed: u32) -> Vec<u8> {
+    frame_data(BLEND_PIXELS * 3, seed)
+        .chunks_exact(3)
+        .flat_map(|color| [color[0], color[1], color[2], 0xFF])
+        .collect()
+}
+
+/// RGBA8の1画素を書き換える
+fn set_rgba(frame: &mut [u8], x: u32, y: u32, color: [u8; 4]) {
+    let at = (y as usize * BLEND_WIDTH as usize + x as usize) * 4;
+    frame[at..at + 4].copy_from_slice(&color);
+}
+
+/// 矩形の対角にある2画素だけを不透明な色へ書き換えたフレーム
+///
+/// 矩形はキャンバスのほぼ全体に広がり、その中のほとんどの画素が変化しない。
+fn with_opaque_corners(base: &[u8]) -> Vec<u8> {
+    let mut frame = base.to_vec();
+    set_rgba(&mut frame, 1, 1, [0xFF, 0x00, 0x00, 0xFF]);
+    set_rgba(
+        &mut frame,
+        BLEND_WIDTH - 2,
+        BLEND_HEIGHT - 2,
+        [0x00, 0xFF, 0x00, 0xFF],
+    );
+    frame
+}
+
+/// 各フレームのfcTLが示すblend_op
+fn blend_ops(decoded: &[DecodedFrame]) -> Vec<png::BlendOp> {
+    decoded.iter().map(|frame| frame.control.blend_op).collect()
+}
+
+/// RGBA8のフレーム列を符号化し、blend_opの並びと合成結果の両方を確かめる
+fn assert_blend(input: &[Vec<u8>], expected: &[png::BlendOp]) {
+    let bytes = encode(BLEND_WIDTH, BLEND_HEIGHT, ColorType::Rgba8, input);
+    let (_, decoded) = decode(&bytes);
+
+    assert_eq!(blend_ops(&decoded), expected);
+    assert_composites_to(&bytes, BLEND_WIDTH, ColorType::Rgba8, input);
+}
+
+/// 変化した画素がわずかな矩形は、潰した候補の方が小さくOVERで書かれる
+#[test]
+fn a_mostly_unchanged_rect_is_written_with_over() {
+    let base = blend_frame(1);
+    let changed = with_opaque_corners(&base);
+
+    assert_blend(
+        &[base, changed],
+        &[png::BlendOp::Source, png::BlendOp::Over],
+    );
+}
+
+/// OVERで書いた矩形では、変化していない画素が完全な透明に潰れている
+#[test]
+fn unchanged_pixels_inside_an_over_rect_are_transparent() {
+    let base = blend_frame(1);
+    let changed = with_opaque_corners(&base);
+    let bytes = encode(
+        BLEND_WIDTH,
+        BLEND_HEIGHT,
+        ColorType::Rgba8,
+        &[base, changed],
+    );
+    let (_, decoded) = decode(&bytes);
+
+    assert_eq!(blend_ops(&decoded)[1], png::BlendOp::Over);
+    // 矩形は (1, 1) から対角の画素までで、その両端だけが変化している
+    let region = &decoded[1].data;
+    assert_eq!(
+        region.len(),
+        (BLEND_WIDTH as usize - 2) * (BLEND_HEIGHT as usize - 2) * 4
+    );
+    assert_eq!(&region[..4], &[0xFF, 0x00, 0x00, 0xFF]);
+    assert_eq!(&region[region.len() - 4..], &[0x00, 0xFF, 0x00, 0xFF]);
+    assert!(region[4..region.len() - 4].iter().all(|&byte| byte == 0));
+}
+
+/// 変化していない画素は、アルファがいくつでもキャンバスから復元される
+///
+/// 完全に透明な画素も半透明の画素も潰す先は同じで、キャンバスの側が残る。
+#[test]
+fn unchanged_pixels_of_any_alpha_survive_over() {
+    let mut base = blend_frame(1);
+    set_rgba(&mut base, 4, 4, [0x00, 0x00, 0x00, 0x00]);
+    set_rgba(&mut base, 5, 4, [0x11, 0x22, 0x33, 0x00]);
+    set_rgba(&mut base, 6, 4, [0x44, 0x55, 0x66, 0x40]);
+    let changed = with_opaque_corners(&base);
+
+    assert_blend(
+        &[base, changed],
+        &[png::BlendOp::Source, png::BlendOp::Over],
+    );
+}
+
+/// 完全に透明へ変わった画素があればSOURCEで書く
+#[test]
+fn a_transparent_change_falls_back_to_source() {
+    let base = blend_frame(1);
+    let mut changed = with_opaque_corners(&base);
+    set_rgba(&mut changed, 8, 8, [0x00, 0x00, 0x00, 0x00]);
+
+    assert_blend(
+        &[base, changed],
+        &[png::BlendOp::Source, png::BlendOp::Source],
+    );
+}
+
+/// 完全に透明でRGBが残る画素へ変わってもSOURCEで書く
+#[test]
+fn a_transparent_change_that_keeps_its_color_falls_back_to_source() {
+    let base = blend_frame(1);
+    let mut changed = with_opaque_corners(&base);
+    set_rgba(&mut changed, 8, 8, [0x77, 0x88, 0x99, 0x00]);
+
+    assert_blend(
+        &[base, changed],
+        &[png::BlendOp::Source, png::BlendOp::Source],
+    );
+}
+
+/// 矩形の中に半透明へ変わった画素が1つでもあればSOURCEで書く
+#[test]
+fn a_semi_transparent_change_falls_back_to_source() {
+    let base = blend_frame(1);
+    let mut changed = with_opaque_corners(&base);
+    set_rgba(&mut changed, 8, 8, [0x77, 0x88, 0x99, 0x80]);
+
+    assert_blend(
+        &[base, changed],
+        &[png::BlendOp::Source, png::BlendOp::Source],
+    );
+}
+
+/// 変化していない画素が1つも無い矩形はSOURCEで書く
+#[test]
+fn a_rect_without_an_unchanged_pixel_stays_on_source() {
+    let base = blend_frame(1);
+    let changed: Vec<u8> = base
+        .chunks_exact(4)
+        .flat_map(|p| [p[0] ^ 0xFF, p[1], p[2], 0xFF])
+        .collect();
+
+    assert_blend(
+        &[base, changed],
+        &[png::BlendOp::Source, png::BlendOp::Source],
+    );
+}
+
+/// 捨てたフレームの次は、復元されたキャンバスとの差分をOVERで書く
+///
+/// 重ねる先を取り違えると、潰した画素が別の内容の上に載って復元されない。
+#[test]
+fn an_over_rect_after_a_disposal_is_layered_on_the_restored_canvas() {
+    const BLOCK: u32 = 6;
+
+    let base = blend_frame(1);
+    let mut transient = base.clone();
+    let overlay = blend_frame(2);
+    for y in 0..BLOCK {
+        for x in 0..BLOCK {
+            let at = (y as usize * BLEND_WIDTH as usize + x as usize) * 4;
+            let color = [overlay[at], overlay[at + 1], overlay[at + 2], 0xFF];
+            set_rgba(&mut transient, x, y, color);
+        }
+    }
+    let restored = with_opaque_corners(&base);
+
+    let input = vec![base, transient, restored];
+    let bytes = encode(BLEND_WIDTH, BLEND_HEIGHT, ColorType::Rgba8, &input);
+    let (_, decoded) = decode(&bytes);
+
+    assert_eq!(decoded[1].control.dispose_op, png::DisposeOp::Previous);
+    assert_eq!(blend_ops(&decoded)[2], png::BlendOp::Over);
+    assert_composites_to(&bytes, BLEND_WIDTH, ColorType::Rgba8, &input);
+}
+
+/// 出力の色種別が決まるまで溜めたフレームはSOURCEで書く
+///
+/// 溜めている間はどの表現で書き出すかが決まらず、候補を圧縮して比べられない。
+#[test]
+fn frames_spooled_for_the_color_type_are_written_with_source() {
+    let base = blend_frame(1);
+    let mut translucent = base.clone();
+    set_rgba(&mut translucent, 3, 3, [0x11, 0x22, 0x33, 0x80]);
+    let changed = with_opaque_corners(&translucent);
+
+    let input = vec![base, translucent, changed];
+    let (bytes, _) = encode_with(
+        BLEND_WIDTH,
+        BLEND_HEIGHT,
+        reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+        &input,
+    );
+
+    let (_, decoded) = decode(&bytes);
+    assert_eq!(
+        blend_ops(&decoded),
+        [
+            png::BlendOp::Source,
+            png::BlendOp::Source,
+            png::BlendOp::Over
+        ]
+    );
+    assert_composites_to(&bytes, BLEND_WIDTH, ColorType::Rgba8, &input);
+}
+
+/// アルファを持たない出力にはOVERを使わない
+#[test]
+fn an_output_without_alpha_is_never_written_with_over() {
+    let base: Vec<u8> = blend_frame(1)
+        .chunks_exact(4)
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect();
+    let mut changed = base.clone();
+    let at = (BLEND_WIDTH as usize + 1) * 3;
+    changed[at..at + 3].copy_from_slice(&[0xFF, 0x00, 0x00]);
+
+    let input = vec![base, changed];
+    let bytes = encode(BLEND_WIDTH, BLEND_HEIGHT, ColorType::Rgb8, &input);
+    let (_, decoded) = decode(&bytes);
+
+    assert!(
+        blend_ops(&decoded)
+            .iter()
+            .all(|op| matches!(op, png::BlendOp::Source))
+    );
+    assert_composites_to(&bytes, BLEND_WIDTH, ColorType::Rgb8, &input);
 }
 
 /// 色種別を落とす検証に使うキャンバスの大きさ

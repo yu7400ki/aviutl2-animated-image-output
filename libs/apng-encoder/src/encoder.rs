@@ -18,6 +18,8 @@ const DISPOSE_OP_NONE: u8 = 0;
 const DISPOSE_OP_PREVIOUS: u8 = 2;
 /// フレームの内容で領域を置き換える
 const BLEND_OP_SOURCE: u8 = 0;
+/// フレームの内容をキャンバスへアルファ合成する
+const BLEND_OP_OVER: u8 = 1;
 
 /// 画素の色種別 (ビット深度8固定)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,6 +257,8 @@ fn smaller_output(dropped: u64, kept: u64) -> Output {
 struct Pending {
     rect: Rect,
     delay: FrameDelay,
+    /// キャンバスへ重ねる方法
+    blend: u8,
     /// フィルタして圧縮した本体
     body: Vec<u8>,
 }
@@ -310,7 +314,8 @@ pub struct Encoder<W: Write> {
     pending: Option<Pending>,
     /// 直前に投入されたフレーム
     ///
-    /// blend_op=SOURCE のもとでは、それを描いた後のキャンバスと一致する。
+    /// 書き出しは合成後が投入された内容と一致するように選ぶため、それを描いた後の
+    /// キャンバスと一致する。
     previous: Vec<u8>,
     /// [`Self::previous`] を描く直前のキャンバス
     ///
@@ -329,6 +334,10 @@ pub struct Encoder<W: Write> {
     probed: Vec<u8>,
     /// dispose_opの候補を比べるために、もう一方の候補を圧縮しておく領域
     dispose_probed: Vec<u8>,
+    /// blend_op=OVERの候補を切り出した連続バッファ
+    over: Vec<u8>,
+    /// blend_opの候補を比べるために、もう一方の候補を圧縮しておく領域
+    blend_probed: Vec<u8>,
 }
 
 impl<W: Write> Encoder<W> {
@@ -397,6 +406,8 @@ impl<W: Write> Encoder<W> {
             filter_choice: FilterChoice::new(),
             probed: Vec::new(),
             dispose_probed: Vec::new(),
+            over: Vec::new(),
+            blend_probed: Vec::new(),
         };
         if encoder.spool.is_none() {
             encoder.write_header()?;
@@ -496,10 +507,18 @@ impl<W: Write> Encoder<W> {
             return Ok(());
         }
 
-        let (dispose, rect) = self.choose_dispose(data);
+        let (dispose, rect, probe) = self.choose_dispose(data);
+        let (blend, probe) = self.choose_blend(data, dispose, rect, probe);
+        self.record(probe);
+
         let mut body = self.flush_pending(dispose)?;
         std::mem::swap(&mut self.compressed, &mut body);
-        self.pending = Some(Pending { rect, delay, body });
+        self.pending = Some(Pending {
+            rect,
+            delay,
+            blend,
+            body,
+        });
         self.advance(data, dispose);
         Ok(())
     }
@@ -568,15 +587,15 @@ impl<W: Write> Encoder<W> {
     ///
     /// 保留中のフレームをdispose_op=PREVIOUSで捨てると、投入されたフレームは
     /// それを描く直前のキャンバスとの差分になる。両方の候補を圧縮して小さい方を採り、
-    /// 採った側の本体を [`Self::compressed`] へ残す。同じ大きさなら捨てない。
-    fn choose_dispose(&mut self, data: &[u8]) -> (u8, Rect) {
+    /// 採った側の本体を [`Self::compressed`] へ、そのプローブを戻り値へ残す。
+    /// 同じ大きさなら捨てない。
+    fn choose_dispose(&mut self, data: &[u8]) -> (u8, Rect, Option<Probe>) {
         let kept = self.kept_rect(data);
         let restored = self.restored_rect(data, kept);
 
         let kept_probe = self.compress_rect(data, kept);
         let Some(restored) = restored else {
-            self.record(kept_probe);
-            return (DISPOSE_OP_NONE, kept);
+            return (DISPOSE_OP_NONE, kept, kept_probe);
         };
 
         let kept_len = self.compressed.len();
@@ -584,12 +603,59 @@ impl<W: Write> Encoder<W> {
         let restored_probe = self.compress_rect(data, restored);
 
         if self.compressed.len() < kept_len {
-            self.record(restored_probe);
-            (DISPOSE_OP_PREVIOUS, restored)
+            (DISPOSE_OP_PREVIOUS, restored, restored_probe)
         } else {
             std::mem::swap(&mut self.compressed, &mut self.dispose_probed);
-            self.record(kept_probe);
-            (DISPOSE_OP_NONE, kept)
+            (DISPOSE_OP_NONE, kept, kept_probe)
+        }
+    }
+
+    /// 投入されたフレームをキャンバスへ重ねる方法を決める
+    ///
+    /// 矩形の中で変化した画素がすべて不透明なら、変化していない画素を完全な透明へ
+    /// 潰した候補が立つ。blend_op=OVERはその画素でキャンバスを残すため、潰しても
+    /// 元の値に戻る。`source` の候補と両方を圧縮して小さい方を採り、採った側の本体を
+    /// [`Self::compressed`] へ、そのプローブを戻り値へ残す。同じ大きさならSOURCEを採る。
+    ///
+    /// アルファを持たない出力には重ねる先が無いため、候補が立つのは出力がRGBA8のとき
+    /// だけになる。先頭フレームはキャンバスがまだ空で、重ねる先が無い。
+    fn choose_blend(
+        &mut self,
+        data: &[u8],
+        dispose: u8,
+        rect: Rect,
+        source: Option<Probe>,
+    ) -> (u8, Option<Probe>) {
+        if self.output != Output::Rgba8 || self.frames_accepted == 0 {
+            return (BLEND_OP_SOURCE, source);
+        }
+
+        // 保留中のフレームを捨てると、キャンバスはそれを描く直前の内容へ戻る
+        let base = if dispose == DISPOSE_OP_NONE {
+            &self.previous
+        } else {
+            &self.canvas
+        };
+        let mut over = std::mem::take(&mut self.over);
+        over.clear();
+        let packed = diff::pack_over(base, data, self.stride, rect, &mut over);
+
+        if !packed {
+            self.over = over;
+            return (BLEND_OP_SOURCE, source);
+        }
+
+        let out_bpp = self.output.bytes_per_pixel();
+        let source_len = self.compressed.len();
+        std::mem::swap(&mut self.compressed, &mut self.blend_probed);
+        let over_probe = self.compress(&over, rect.width as usize * out_bpp, out_bpp);
+        self.over = over;
+
+        if self.compressed.len() < source_len {
+            (BLEND_OP_OVER, over_probe)
+        } else {
+            std::mem::swap(&mut self.compressed, &mut self.blend_probed);
+            (BLEND_OP_SOURCE, source)
         }
     }
 
@@ -601,7 +667,7 @@ impl<W: Write> Encoder<W> {
 
         let mut body = pending.body;
         std::mem::swap(&mut self.compressed, &mut body);
-        self.write_frame(pending.rect, pending.delay, dispose)?;
+        self.write_frame(pending.rect, pending.delay, dispose, pending.blend)?;
         std::mem::swap(&mut self.compressed, &mut body);
         Ok(body)
     }
@@ -710,8 +776,8 @@ impl<W: Write> Encoder<W> {
         for frame in &frames {
             let probe = self.compress_spooled(frame, output);
             self.record(probe);
-            // 溜めている間はdispose_opを決められないため、捨てずに残す
-            self.write_frame(frame.rect, frame.delay, DISPOSE_OP_NONE)?;
+            // 溜めている間は出力の色種別が決まらず、blend_opの候補も圧縮できない
+            self.write_frame(frame.rect, frame.delay, DISPOSE_OP_NONE, BLEND_OP_SOURCE)?;
         }
 
         Ok(())
@@ -760,11 +826,11 @@ impl<W: Write> Encoder<W> {
 
     /// 溜めるのをやめたフレームを1つ書き出す
     ///
-    /// 溜めている間はdispose_opを決められないため、捨てずに残す。
+    /// 溜めている間はdispose_opを決められず、blend_opの候補も圧縮できない。
     fn emit_frame(&mut self, data: &[u8], rect: Rect, delay: FrameDelay) -> Result<(), Error> {
         let probe = self.compress_rect(data, rect);
         self.record(probe);
-        self.write_frame(rect, delay, DISPOSE_OP_NONE)
+        self.write_frame(rect, delay, DISPOSE_OP_NONE, BLEND_OP_SOURCE)
     }
 
     /// 入力の画素列を `output` の表現へ直しながら `out` へ追記する
@@ -819,8 +885,8 @@ impl<W: Write> Encoder<W> {
 
     /// 書き出すフレーム1つぶんのプローブを記録する
     ///
-    /// dispose_opの候補を選ぶための圧縮は、採らなかった側を二重に数えないよう
-    /// 記録しない。
+    /// dispose_opとblend_opの候補を選ぶための圧縮は、採らなかった側を二重に
+    /// 数えないよう記録しない。
     fn record(&mut self, probe: Option<Probe>) {
         if let Some(probe) = probe {
             self.filter_choice.record(probe);
@@ -868,8 +934,14 @@ impl<W: Write> Encoder<W> {
         }
     }
 
-    fn write_frame(&mut self, rect: Rect, delay: FrameDelay, dispose: u8) -> Result<(), Error> {
-        self.write_fctl(rect, delay, dispose)?;
+    fn write_frame(
+        &mut self,
+        rect: Rect,
+        delay: FrameDelay,
+        dispose: u8,
+        blend: u8,
+    ) -> Result<(), Error> {
+        self.write_fctl(rect, delay, dispose, blend)?;
 
         // 先頭フレームはIDATに入り、以降はfdATに入る
         if self.frames_emitted == 0 {
@@ -887,7 +959,13 @@ impl<W: Write> Encoder<W> {
         Ok(())
     }
 
-    fn write_fctl(&mut self, rect: Rect, delay: FrameDelay, dispose: u8) -> Result<(), Error> {
+    fn write_fctl(
+        &mut self,
+        rect: Rect,
+        delay: FrameDelay,
+        dispose: u8,
+        blend: u8,
+    ) -> Result<(), Error> {
         let (delay_num, delay_den) = delay.to_parts();
 
         let mut fctl = [0u8; 26];
@@ -899,7 +977,7 @@ impl<W: Write> Encoder<W> {
         fctl[20..22].copy_from_slice(&delay_num.to_be_bytes());
         fctl[22..24].copy_from_slice(&delay_den.to_be_bytes());
         fctl[24] = dispose;
-        fctl[25] = BLEND_OP_SOURCE;
+        fctl[25] = blend;
         chunk::write(&mut self.writer, *b"fcTL", &fctl)?;
 
         self.sequence += 1;
@@ -1244,6 +1322,51 @@ mod tests {
         for (index, frame) in types.iter().enumerate().skip(PROBE_FRAMES as usize) {
             assert!(frame.iter().all(|&f| f == 0), "フレーム {index}: {frame:?}");
         }
+    }
+
+    /// アルファを保つ設定
+    fn rgba_config() -> Config {
+        Config {
+            color_type: ColorType::Rgba8,
+            ..Config::default()
+        }
+    }
+
+    /// 1行おきに `other` の内容へ差し替えたフレーム
+    ///
+    /// 矩形はキャンバス全体に広がり、その中の半分の画素が変化しない。
+    fn interleaved(base: &[u8], other: &[u8], bpp: usize) -> Vec<u8> {
+        let stride = WIDTH as usize * bpp;
+        let mut frame = base.to_vec();
+        for y in (1..HEIGHT as usize).step_by(2) {
+            let row = y * stride..(y + 1) * stride;
+            frame[row.clone()].copy_from_slice(&other[row]);
+        }
+        frame
+    }
+
+    /// blend_opの候補を2つ圧縮しても、プローブは1フレームにつき1回しか進まない
+    ///
+    /// 2フレーム目は矩形の半分が変化しないため、潰した候補が立って両方が圧縮される。
+    /// 二重に数えるとプローブが1フレーム早く尽き、4フレーム目が固めた戦略で書かれる。
+    #[test]
+    fn blend_candidates_do_not_consume_extra_probes() {
+        let base = with_alpha(&detailed_frame(0));
+        let input = vec![
+            interleaved(&base, &with_alpha(&detailed_frame(1)), 4),
+            base,
+            with_alpha(&detailed_frame(2)),
+            with_alpha(&flat_frame(0)),
+            with_alpha(&flat_frame(1)),
+        ];
+        let bytes = encode(&input, rgba_config());
+
+        let types = filter_types(&bytes, 4);
+        assert_eq!(types.len(), input.len());
+        // プローブの最後の1回に入るため、フィルタを掛けない方が小さいこのフレームはNoneだけになる
+        assert!(types[3].iter().all(|&f| f == 0), "{:?}", types[3]);
+        // 固めた戦略は適応フィルタなので、同じ素材でもNone以外を選ぶ
+        assert!(types[4].iter().any(|&f| f != 0), "{:?}", types[4]);
     }
 
     /// 色種別を落とす設定
