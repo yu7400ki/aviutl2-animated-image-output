@@ -808,3 +808,116 @@ fn alpha_anywhere_inside_a_partial_rect_is_found() {
         assert_reduced_roundtrip(&bytes, &input, png::ColorType::Rgba);
     }
 }
+
+/// フィルタ戦略の検証に使うキャンバスの大きさ
+const FILTER_WIDTH: u32 = 40;
+const FILTER_HEIGHT: u32 = 24;
+
+/// 行の中で同じバイト列が繰り返すフレーム
+///
+/// フィルタを掛けずに渡した方が小さくなる。
+fn flat_frame(color_type: ColorType, seed: u32) -> Vec<u8> {
+    const PALETTE: [[u8; 3]; 4] = [
+        [0x1E, 0x1E, 0x28],
+        [0xD0, 0xD0, 0xC8],
+        [0x40, 0x80, 0xC0],
+        [0xC0, 0x40, 0x60],
+    ];
+
+    let blocks = frame_data((FILTER_WIDTH * FILTER_HEIGHT) as usize, seed + 1);
+    let mut frame = Vec::new();
+    for y in 0..FILTER_HEIGHT as usize {
+        for x in 0..FILTER_WIDTH as usize {
+            let block = x / 7 + y / 5 * 9;
+            let index = (blocks[block % blocks.len()] as usize + seed as usize) % PALETTE.len();
+            frame.extend_from_slice(&PALETTE[index]);
+            if color_type == ColorType::Rgba8 {
+                frame.push(0xFF);
+            }
+        }
+    }
+    frame
+}
+
+/// なだらかな階調に微小なノイズを載せたフレーム
+///
+/// 隣接画素の差が小さく、行ごとの適応フィルタが効く。
+fn detailed_frame(color_type: ColorType, seed: u32) -> Vec<u8> {
+    let bpp = color_type.bytes_per_pixel();
+    let grain = frame_data((FILTER_WIDTH * FILTER_HEIGHT) as usize * 3, seed + 1);
+    let mut frame = Vec::new();
+    for y in 0..FILTER_HEIGHT as usize {
+        for x in 0..FILTER_WIDTH as usize {
+            for channel in 0..3 {
+                let base = (x * 3 + y * 5 + channel * 17 + seed as usize * 2) as u8;
+                let index = (y * FILTER_WIDTH as usize + x) * 3 + channel;
+                frame.push(base.wrapping_add(grain[index] & 7));
+            }
+            if bpp == 4 {
+                frame.push(0xFF);
+            }
+        }
+    }
+    frame
+}
+
+/// 出力を合成し、フレームごとに `expected` と一致することを確かめる
+fn assert_composites_to(bytes: &[u8], width: u32, color_type: ColorType, expected: &[Vec<u8>]) {
+    let (_, decoded) = decode(bytes);
+    assert_eq!(decoded.len(), expected.len());
+
+    let mut canvas = vec![0u8; expected[0].len()];
+    for (index, (frame, source)) in decoded.iter().zip(expected).enumerate() {
+        composite(&mut canvas, frame, width, color_type);
+        assert_eq!(&canvas, source, "フレーム {index}");
+    }
+}
+
+/// プローブの前後をまたぐ長さで、どちらの戦略に決まっても可逆であること
+#[test]
+fn both_filter_strategies_are_reversible() {
+    let sources = [flat_frame as fn(ColorType, u32) -> Vec<u8>, detailed_frame];
+
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        for source in sources {
+            for count in [1u32, 3, 5, 9] {
+                let input: Vec<Vec<u8>> = (0..count).map(|seed| source(color_type, seed)).collect();
+                let bytes = encode(FILTER_WIDTH, FILTER_HEIGHT, color_type, &input);
+
+                assert_composites_to(&bytes, FILTER_WIDTH, color_type, &input);
+            }
+        }
+    }
+}
+
+/// 色種別を落とす経路でも、どちらの戦略に決まっても可逆であること
+#[test]
+fn both_filter_strategies_are_reversible_while_reducing_color() {
+    let sources = [flat_frame as fn(ColorType, u32) -> Vec<u8>, detailed_frame];
+
+    for source in sources {
+        for count in [1u32, 3, 5, 9] {
+            let opaque: Vec<Vec<u8>> = (0..count)
+                .map(|seed| source(ColorType::Rgba8, seed))
+                .collect();
+            let config = Config {
+                reduce_color: true,
+                ..config(ColorType::Rgba8)
+            };
+
+            let (bytes, _) = encode_with(FILTER_WIDTH, FILTER_HEIGHT, config, &opaque);
+            assert_eq!(output_color_type(&bytes), png::ColorType::Rgb);
+            let expected: Vec<Vec<u8>> = opaque.iter().map(|f| without_alpha(f)).collect();
+            assert_composites_to(&bytes, FILTER_WIDTH, ColorType::Rgb8, &expected);
+
+            // 透過を含む入力は、溜めずにそのまま書き出す経路へ移る
+            let mut transparent = opaque.clone();
+            for frame in &mut transparent {
+                frame[3] = 0x80;
+            }
+            let (bytes, _) = encode_with(FILTER_WIDTH, FILTER_HEIGHT, config, &transparent);
+            assert_eq!(output_color_type(&bytes), png::ColorType::Rgba);
+            assert_composites_to(&bytes, FILTER_WIDTH, ColorType::Rgba8, &transparent);
+        }
+    }
+}
