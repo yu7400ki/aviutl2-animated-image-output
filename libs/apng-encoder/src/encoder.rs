@@ -1184,6 +1184,26 @@ mod tests {
         assert_eq!(output_bytes_per_pixel(&bytes), 4);
     }
 
+    /// 比べるのは先頭のフレームで、後ろのフレームは色種別を動かさない
+    ///
+    /// 見る位置がずれると、比べたかったフレームの性質が結果に出なくなる。
+    #[test]
+    fn the_color_types_are_compared_over_the_leading_frames() {
+        let span = COLOR_PROBE_FRAMES;
+
+        let mut frames: Vec<Vec<u8>> = (0..span).map(dithered_frame).collect();
+        frames.extend((0..span).map(detailed_frame));
+        let input: Vec<Vec<u8>> = frames.iter().map(|frame| with_alpha(frame)).collect();
+        let bytes = encode(&input, reduce_rgba_config());
+        assert_eq!(output_bytes_per_pixel(&bytes), 4);
+
+        let mut frames: Vec<Vec<u8>> = (0..span).map(detailed_frame).collect();
+        frames.extend((0..span).map(dithered_frame));
+        let input: Vec<Vec<u8>> = frames.iter().map(|frame| with_alpha(frame)).collect();
+        let bytes = encode(&input, reduce_rgba_config());
+        assert_eq!(output_bytes_per_pixel(&bytes), 3);
+    }
+
     /// 色種別の候補を2つ圧縮しても、プローブは1フレームにつき1回しか進まない
     ///
     /// 二重に数えるとプローブが尽きるのが早まり、書き出しの先頭から固めた戦略になる。
