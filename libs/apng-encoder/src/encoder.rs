@@ -312,6 +312,37 @@ fn smaller_output(dropped: u64, kept: u64) -> Output {
     }
 }
 
+/// 使い終わったバッファを溜めて配り直す領域
+///
+/// 圧縮した本体と切り出した領域はフレームごとに同じ大きさへ落ち着くため、
+/// 一度確保した容量をそのまま次のフレームへ回す。
+struct BufferPool {
+    free: Vec<Vec<u8>>,
+}
+
+impl BufferPool {
+    fn new() -> Self {
+        BufferPool { free: Vec::new() }
+    }
+
+    /// 空のバッファを1つ借りる
+    fn take(&mut self) -> Vec<u8> {
+        let mut buffer = self.free.pop().unwrap_or_default();
+        buffer.clear();
+        buffer
+    }
+
+    /// 借りたバッファを返す
+    fn give(&mut self, buffer: Vec<u8>) {
+        self.free.push(buffer);
+    }
+}
+
+/// 圧縮した本体と、両方の戦略を試したときのバイト数
+///
+/// 採らなかった候補のプローブを記録できないよう、本体と対で受け渡す。
+type Candidate = (Vec<u8>, Option<Probe>);
+
 /// 書き出しを待っているフレーム
 ///
 /// フレームのdispose_opは次のフレームの圧縮後サイズを見るまで決まらないため、
@@ -384,22 +415,14 @@ pub struct Encoder<W: Write> {
     /// 保留中のフレームをdispose_op=PREVIOUSで捨てると、この内容が復元される。
     /// 復元先は常に過去のいずれかのフレームそのものなので、1面あれば足りる。
     canvas: Vec<u8>,
-    /// 差分矩形を切り出した連続バッファ
-    region: Vec<u8>,
     /// 行ごとのフィルタ選択に使う作業領域
     scratch: filter::Scratch,
+    /// フィルタ後のバイト列を組み立てる領域
     filtered: Vec<u8>,
-    compressed: Vec<u8>,
+    /// 切り出した領域と圧縮した本体を回すバッファ
+    pool: BufferPool,
     /// フィルタ戦略の決定
     filter_choice: FilterChoice,
-    /// プローブでもう一方の候補を圧縮しておく領域
-    probed: Vec<u8>,
-    /// dispose_opの候補を比べるために、もう一方の候補を圧縮しておく領域
-    dispose_probed: Vec<u8>,
-    /// blend_op=OVERの候補を切り出した連続バッファ
-    over: Vec<u8>,
-    /// blend_opの候補を比べるために、もう一方の候補を圧縮しておく領域
-    blend_probed: Vec<u8>,
     /// blend_op=OVERの候補を立てるかどうかの間合い
     blend_pacing: BlendPacing,
 }
@@ -463,15 +486,10 @@ impl<W: Write> Encoder<W> {
             pending: None,
             previous: Vec::new(),
             canvas: Vec::new(),
-            region: Vec::new(),
             scratch: filter::Scratch::new(),
             filtered: Vec::new(),
-            compressed: Vec::new(),
+            pool: BufferPool::new(),
             filter_choice: FilterChoice::new(),
-            probed: Vec::new(),
-            dispose_probed: Vec::new(),
-            over: Vec::new(),
-            blend_probed: Vec::new(),
             blend_pacing: BlendPacing::new(),
         };
         if encoder.spool.is_none() {
@@ -572,12 +590,11 @@ impl<W: Write> Encoder<W> {
             return Ok(());
         }
 
-        let (dispose, rect, probe) = self.choose_dispose(data);
-        let (blend, probe) = self.choose_blend(data, dispose, rect, probe);
+        let (dispose, rect, candidate) = self.choose_dispose(data);
+        let (blend, (body, probe)) = self.choose_blend(data, dispose, rect, candidate);
         self.record(probe);
 
-        let mut body = self.flush_pending(dispose)?;
-        std::mem::swap(&mut self.compressed, &mut body);
+        self.flush_pending(dispose)?;
         self.pending = Some(Pending {
             rect,
             delay,
@@ -652,26 +669,24 @@ impl<W: Write> Encoder<W> {
     ///
     /// 保留中のフレームをdispose_op=PREVIOUSで捨てると、投入されたフレームは
     /// それを描く直前のキャンバスとの差分になる。両方の候補を圧縮して小さい方を採り、
-    /// 採った側の本体を [`Self::compressed`] へ、そのプローブを戻り値へ残す。
-    /// 同じ大きさなら捨てない。
-    fn choose_dispose(&mut self, data: &[u8]) -> (u8, Rect, Option<Probe>) {
+    /// 採った側を戻り値へ残して、退けた側のバッファはプールへ返す。同じ大きさなら捨てない。
+    fn choose_dispose(&mut self, data: &[u8]) -> (u8, Rect, Candidate) {
         let kept = self.kept_rect(data);
         let restored = self.restored_rect(data, kept);
 
-        let kept_probe = self.compress_rect(data, kept);
+        let kept_candidate = self.compress_rect(data, kept);
         let Some(restored) = restored else {
-            return (DISPOSE_OP_NONE, kept, kept_probe);
+            return (DISPOSE_OP_NONE, kept, kept_candidate);
         };
 
-        let kept_len = self.compressed.len();
-        std::mem::swap(&mut self.compressed, &mut self.dispose_probed);
-        let restored_probe = self.compress_rect(data, restored);
+        let restored_candidate = self.compress_rect(data, restored);
 
-        if self.compressed.len() < kept_len {
-            (DISPOSE_OP_PREVIOUS, restored, restored_probe)
+        if restored_candidate.0.len() < kept_candidate.0.len() {
+            self.pool.give(kept_candidate.0);
+            (DISPOSE_OP_PREVIOUS, restored, restored_candidate)
         } else {
-            std::mem::swap(&mut self.compressed, &mut self.dispose_probed);
-            (DISPOSE_OP_NONE, kept, kept_probe)
+            self.pool.give(restored_candidate.0);
+            (DISPOSE_OP_NONE, kept, kept_candidate)
         }
     }
 
@@ -679,8 +694,8 @@ impl<W: Write> Encoder<W> {
     ///
     /// 矩形の中で変化した画素がすべて不透明なら、変化していない画素を完全な透明へ
     /// 潰した候補が立つ。blend_op=OVERはその画素でキャンバスを残すため、潰しても
-    /// 元の値に戻る。`source` の候補と両方を圧縮して小さい方を採り、採った側の本体を
-    /// [`Self::compressed`] へ、そのプローブを戻り値へ残す。同じ大きさならSOURCEを採る。
+    /// 元の値に戻る。`source` の候補と両方を圧縮して小さい方を採り、採った側を戻り値へ
+    /// 残して、退けた側のバッファはプールへ返す。同じ大きさならSOURCEを採る。
     ///
     /// アルファを持たない出力には重ねる先が無いため、候補が立つのは出力がRGBA8のとき
     /// だけになる。先頭フレームはキャンバスがまだ空で、重ねる先が無い。負けが続く間は
@@ -690,8 +705,8 @@ impl<W: Write> Encoder<W> {
         data: &[u8],
         dispose: u8,
         rect: Rect,
-        source: Option<Probe>,
-    ) -> (u8, Option<Probe>) {
+        source: Candidate,
+    ) -> (u8, Candidate) {
         if self.output != Output::Rgba8 || self.frames_accepted == 0 {
             return (BLEND_OP_SOURCE, source);
         }
@@ -705,40 +720,43 @@ impl<W: Write> Encoder<W> {
         } else {
             &self.canvas
         };
-        let mut over = std::mem::take(&mut self.over);
-        over.clear();
-        let chosen = if diff::pack_over(base, data, self.stride, rect, &mut over) {
-            let out_bpp = self.output.bytes_per_pixel();
-            let source_len = self.compressed.len();
-            std::mem::swap(&mut self.compressed, &mut self.blend_probed);
-            let over_probe = self.compress(&over, rect.width as usize * out_bpp, out_bpp);
+        let mut over = self.pool.take();
+        let packed = diff::pack_over(base, data, self.stride, rect, &mut over);
+        if !packed {
+            self.pool.give(over);
+            return (BLEND_OP_SOURCE, source);
+        }
 
-            let taken = self.compressed.len() < source_len;
-            self.blend_pacing.record(taken);
-            if taken {
-                (BLEND_OP_OVER, over_probe)
-            } else {
-                std::mem::swap(&mut self.compressed, &mut self.blend_probed);
-                (BLEND_OP_SOURCE, source)
-            }
+        let out_bpp = self.output.bytes_per_pixel();
+        let over_candidate = self.compress(&over, rect.width as usize * out_bpp, out_bpp);
+        self.pool.give(over);
+
+        let taken = over_candidate.0.len() < source.0.len();
+        self.blend_pacing.record(taken);
+        if taken {
+            self.pool.give(source.0);
+            (BLEND_OP_OVER, over_candidate)
         } else {
+            self.pool.give(over_candidate.0);
             (BLEND_OP_SOURCE, source)
-        };
-        self.over = over;
-        chosen
+        }
     }
 
-    /// 保留中のフレームを `dispose` で書き出し、本体に使っていた領域を返す
-    fn flush_pending(&mut self, dispose: u8) -> Result<Vec<u8>, Error> {
+    /// 保留中のフレームを `dispose` で書き出す
+    fn flush_pending(&mut self, dispose: u8) -> Result<(), Error> {
         let Some(pending) = self.pending.take() else {
-            return Ok(Vec::new());
+            return Ok(());
         };
 
-        let mut body = pending.body;
-        std::mem::swap(&mut self.compressed, &mut body);
-        self.write_frame(pending.rect, pending.delay, dispose, pending.blend)?;
-        std::mem::swap(&mut self.compressed, &mut body);
-        Ok(body)
+        self.write_frame(
+            pending.rect,
+            pending.delay,
+            dispose,
+            pending.blend,
+            &pending.body,
+        )?;
+        self.pool.give(pending.body);
+        Ok(())
     }
 
     /// 溜めているフレームへ1つ加え、決めたとおりに処理する
@@ -843,10 +861,17 @@ impl<W: Write> Encoder<W> {
         self.write_header()?;
 
         for frame in &frames {
-            let probe = self.compress_spooled(frame, output);
+            let (body, probe) = self.compress_spooled(frame, output);
             self.record(probe);
             // 溜めている間は出力の色種別が決まらず、blend_opの候補も圧縮できない
-            self.write_frame(frame.rect, frame.delay, DISPOSE_OP_NONE, BLEND_OP_SOURCE)?;
+            self.write_frame(
+                frame.rect,
+                frame.delay,
+                DISPOSE_OP_NONE,
+                BLEND_OP_SOURCE,
+                &body,
+            )?;
+            self.pool.give(body);
         }
 
         Ok(())
@@ -867,17 +892,19 @@ impl<W: Write> Encoder<W> {
 
         let (mut dropped, mut kept) = (0u64, 0u64);
         for frame in frames.iter().take(COLOR_PROBE_FRAMES as usize) {
-            self.compress_spooled(frame, Output::Rgb8);
-            dropped += self.compressed.len() as u64;
-            self.compress_spooled(frame, Output::Rgba8);
-            kept += self.compressed.len() as u64;
+            let (body, _) = self.compress_spooled(frame, Output::Rgb8);
+            dropped += body.len() as u64;
+            self.pool.give(body);
+            let (body, _) = self.compress_spooled(frame, Output::Rgba8);
+            kept += body.len() as u64;
+            self.pool.give(body);
         }
 
         smaller_output(dropped, kept)
     }
 
-    /// 溜めたフレームを `output` の表現へ直してフィルタして圧縮し、[`Self::compressed`] へ格納する
-    fn compress_spooled(&mut self, frame: &Spooled, output: Output) -> Option<Probe> {
+    /// 溜めたフレームを `output` の表現へ直してフィルタして圧縮する
+    fn compress_spooled(&mut self, frame: &Spooled, output: Output) -> Candidate {
         let out_bpp = output.bytes_per_pixel();
         let region_stride = frame.rect.width as usize * out_bpp;
 
@@ -885,21 +912,22 @@ impl<W: Write> Encoder<W> {
             return self.compress(&frame.data, region_stride, out_bpp);
         }
 
-        let mut converted = std::mem::take(&mut self.region);
-        converted.clear();
+        let mut converted = self.pool.take();
         self.append_output(&frame.data, output, &mut converted);
-        let probe = self.compress(&converted, region_stride, out_bpp);
-        self.region = converted;
-        probe
+        let candidate = self.compress(&converted, region_stride, out_bpp);
+        self.pool.give(converted);
+        candidate
     }
 
     /// 溜めるのをやめたフレームを1つ書き出す
     ///
     /// 溜めている間はdispose_opを決められず、blend_opの候補も圧縮できない。
     fn emit_frame(&mut self, data: &[u8], rect: Rect, delay: FrameDelay) -> Result<(), Error> {
-        let probe = self.compress_rect(data, rect);
+        let (body, probe) = self.compress_rect(data, rect);
         self.record(probe);
-        self.write_frame(rect, delay, DISPOSE_OP_NONE, BLEND_OP_SOURCE)
+        self.write_frame(rect, delay, DISPOSE_OP_NONE, BLEND_OP_SOURCE, &body)?;
+        self.pool.give(body);
+        Ok(())
     }
 
     /// 入力の画素列を `output` の表現へ直しながら `out` へ追記する
@@ -912,11 +940,11 @@ impl<W: Write> Encoder<W> {
         }
     }
 
-    /// フレームから `rect` を切り出してフィルタして圧縮し、[`Self::compressed`] へ格納する
+    /// フレームから `rect` を切り出してフィルタして圧縮する
     ///
     /// この経路を通るのは出力が決まった後のフレームだけで、その表現は入力と同じか
     /// アルファを落としたものになる。
-    fn compress_rect(&mut self, data: &[u8], rect: Rect) -> Option<Probe> {
+    fn compress_rect(&mut self, data: &[u8], rect: Rect) -> Candidate {
         debug_assert!(self.palette.is_none());
 
         let in_bpp = self.bytes_per_pixel;
@@ -929,26 +957,28 @@ impl<W: Write> Encoder<W> {
             let len = region_stride * rect.height as usize;
             self.compress(&data[head..head + len], region_stride, out_bpp)
         } else {
-            let mut cropped = std::mem::take(&mut self.region);
-            cropped.clear();
+            let mut cropped = self.pool.take();
             region::crop(data, rect, self.stride, in_bpp, out_bpp, &mut cropped);
-            let probe = self.compress(&cropped, region_stride, out_bpp);
-            self.region = cropped;
-            probe
+            let candidate = self.compress(&cropped, region_stride, out_bpp);
+            self.pool.give(cropped);
+            candidate
         }
     }
 
-    /// 連続した領域をフィルタして圧縮し、[`Self::compressed`] へ格納する
+    /// 連続した領域をフィルタして圧縮する
     ///
     /// フィルタ戦略が固まるまでは両方を試し、それ以降は固めた戦略だけを使う。
-    /// 両方を試した場合は、そのバイト数を戦略ごとに返す。
-    fn compress(&mut self, region: &[u8], region_stride: usize, bpp: usize) -> Option<Probe> {
+    /// 両方を試した場合は、そのバイト数を戦略ごとに添えて返す。
+    fn compress(&mut self, region: &[u8], region_stride: usize, bpp: usize) -> Candidate {
         match self.filter_choice.fixed {
-            Some(strategy) => {
-                self.compress_with(region, region_stride, bpp, strategy);
-                None
+            Some(strategy) => (
+                self.compress_with(region, region_stride, bpp, strategy),
+                None,
+            ),
+            None => {
+                let (body, probe) = self.probe(region, region_stride, bpp);
+                (body, Some(probe))
             }
-            None => Some(self.probe(region, region_stride, bpp)),
         }
     }
 
@@ -962,14 +992,14 @@ impl<W: Write> Encoder<W> {
         }
     }
 
-    /// `strategy` でフィルタして圧縮し、[`Self::compressed`] へ格納する
+    /// `strategy` でフィルタして圧縮する
     fn compress_with(
         &mut self,
         region: &[u8],
         region_stride: usize,
         bpp: usize,
         strategy: filter::Strategy,
-    ) {
+    ) -> Vec<u8> {
         self.filtered.clear();
         filter::filter_image(
             region,
@@ -980,27 +1010,35 @@ impl<W: Write> Encoder<W> {
             &mut self.filtered,
         );
 
-        self.compressed.clear();
-        self.compressor
-            .compress_into(&self.filtered, &mut self.compressed);
+        let mut body = self.pool.take();
+        self.compressor.compress_into(&self.filtered, &mut body);
+        body
     }
 
-    /// 両方の戦略で圧縮し、小さい方を [`Self::compressed`] に残して結果を返す
+    /// 両方の戦略で圧縮し、小さい方を結果と合わせて返す
     ///
     /// 同じ大きさなら [`filter::Strategy::Unfiltered`] を残す。
-    fn probe(&mut self, region: &[u8], region_stride: usize, bpp: usize) -> Probe {
-        self.compress_with(region, region_stride, bpp, filter::Strategy::Adaptive);
-        std::mem::swap(&mut self.compressed, &mut self.probed);
-        self.compress_with(region, region_stride, bpp, filter::Strategy::Unfiltered);
+    fn probe(&mut self, region: &[u8], region_stride: usize, bpp: usize) -> (Vec<u8>, Probe) {
+        let adaptive_body =
+            self.compress_with(region, region_stride, bpp, filter::Strategy::Adaptive);
+        let unfiltered_body =
+            self.compress_with(region, region_stride, bpp, filter::Strategy::Unfiltered);
 
-        let (adaptive, unfiltered) = (self.probed.len(), self.compressed.len());
-        if adaptive < unfiltered {
-            std::mem::swap(&mut self.compressed, &mut self.probed);
-        }
-        Probe {
-            adaptive,
-            unfiltered,
-        }
+        let (adaptive, unfiltered) = (adaptive_body.len(), unfiltered_body.len());
+        let body = if adaptive < unfiltered {
+            self.pool.give(unfiltered_body);
+            adaptive_body
+        } else {
+            self.pool.give(adaptive_body);
+            unfiltered_body
+        };
+        (
+            body,
+            Probe {
+                adaptive,
+                unfiltered,
+            },
+        )
     }
 
     fn write_frame(
@@ -1009,17 +1047,18 @@ impl<W: Write> Encoder<W> {
         delay: FrameDelay,
         dispose: u8,
         blend: u8,
+        body: &[u8],
     ) -> Result<(), Error> {
         self.write_fctl(rect, delay, dispose, blend)?;
 
         // 先頭フレームはIDATに入り、以降はfdATに入る
         if self.frames_emitted == 0 {
-            chunk::write(&mut self.writer, *b"IDAT", &self.compressed)?;
+            chunk::write(&mut self.writer, *b"IDAT", body)?;
         } else {
             chunk::write_parts(
                 &mut self.writer,
                 *b"fdAT",
-                &[&self.sequence.to_be_bytes(), &self.compressed],
+                &[&self.sequence.to_be_bytes(), body],
             )?;
             self.sequence += 1;
         }
