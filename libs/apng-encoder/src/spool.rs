@@ -80,6 +80,11 @@ impl Spool {
         (self.frames, self.colors)
     }
 
+    /// 溜めた内容を [`Self::into_parts`] と同じ形で取り出し、空へ戻す
+    pub(crate) fn drain(&mut self) -> (Vec<Spooled>, Colors) {
+        std::mem::replace(self, Spool::new(self.limit)).into_parts()
+    }
+
     /// `data` から `rect` を切り出して溜め、その領域のアルファと色を調べる
     ///
     /// 矩形の外は直前のフレームから変わっていないため、走査は矩形の中だけで足りる。

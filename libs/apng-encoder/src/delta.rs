@@ -5,8 +5,6 @@ use crate::diff::{self, Rect};
 use crate::layout::Layout;
 
 /// 直前のフレームと、それを描く直前のキャンバス
-///
-/// 1920x1080のRGBA8で約16.6MBの2面を常に抱える。
 pub(crate) struct Delta {
     /// 直前に投入されたフレーム
     ///
