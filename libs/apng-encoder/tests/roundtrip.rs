@@ -1811,10 +1811,13 @@ fn an_input_that_keeps_its_alpha_is_decided_before_the_last_frame() {
         dispose_ops(&decoded)
     );
 
-    // 溜めるのは比べるためのフレームまでで、残りは書き出しながら流れる
+    // 比べるためのフレームが溜まるまで確定できず、溜まったらそれ以上は溜めない
     let frame_len = (FILTER_WIDTH * FILTER_HEIGHT) as usize * 4;
-    let held = frame_len * (COLOR_PROBE_FRAMES as usize + 1);
-    assert!(peak < held, "{peak} バイト抱えた ({held} バイト未満のはず)");
+    let held = frame_len * COLOR_PROBE_FRAMES as usize;
+    assert!(
+        (held..held + frame_len).contains(&peak),
+        "{held} バイトの画素に対して抱えたのは {peak} バイト"
+    );
 }
 
 /// 色数が後から跳ねても、比べるのは先頭のフレーム
