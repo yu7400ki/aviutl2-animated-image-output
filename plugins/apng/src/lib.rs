@@ -12,6 +12,18 @@ use std::io::BufWriter;
 use win32_dialog::MessageBox;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
 
+/// 負の値をエンコーダへ渡さないためのi32からu32への変換
+fn to_u32(value: i32, name: &str) -> std::result::Result<u32, String> {
+    u32::try_from(value).map_err(|_| format!("{}が不正です: {}", name, value))
+}
+
+/// 1フレームの表示時間 (scale / rate 秒) を求める
+fn frame_delay(scale: i32, rate: i32) -> std::result::Result<FrameDelay, String> {
+    let scale = to_u32(scale, "フレームレートのスケール")?;
+    let rate = to_u32(rate, "フレームレート")?;
+    FrameDelay::new(scale, rate).map_err(|e| format!("フレームレート設定エラー: {}", e))
+}
+
 fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
     let output_path = info.savefile();
 
@@ -23,15 +35,13 @@ fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
         ColorFormat::Rgba32 => ColorType::Rgba8,
     };
 
-    // 1フレームの表示時間は scale / rate 秒
-    let delay = FrameDelay::new(info.scale() as u32, info.rate() as u32)
-        .map_err(|e| format!("フレームレート設定エラー: {}", e))?;
+    let delay = frame_delay(info.scale(), info.rate())?;
 
     let mut encoder = Encoder::new(
         BufWriter::new(output_file),
-        info.width() as u32,
-        info.height() as u32,
-        info.num_frames() as u32,
+        to_u32(info.width(), "幅")?,
+        to_u32(info.height(), "高さ")?,
+        to_u32(info.num_frames(), "フレーム数")?,
         EncoderConfig {
             color_type,
             compression_level: config.compression_level,
