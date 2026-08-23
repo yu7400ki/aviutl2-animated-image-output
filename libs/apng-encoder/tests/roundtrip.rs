@@ -1817,6 +1817,29 @@ fn an_input_that_keeps_its_alpha_is_decided_before_the_last_frame() {
     assert!(peak < held, "{peak} バイト抱えた ({held} バイト未満のはず)");
 }
 
+/// 色数が後から跳ねても、比べるのは先頭のフレーム
+///
+/// 溜めた全フレームを比べると、アルファを落とすと大きくなる後ろの区間に引きずられて
+/// 色種別が変わる。
+#[test]
+fn the_comparison_stays_on_the_leading_frames_when_the_colors_jump_late() {
+    // 先頭は4色しか使わないため、色数が跳ねるのは比べ始める枚数より後になる
+    let mut input: Vec<Vec<u8>> = (0..COLOR_PROBE_FRAMES + 2)
+        .map(|seed| flat_frame(ColorType::Rgba8, seed))
+        .collect();
+    input.extend((0..COLOR_PROBE_FRAMES).map(|seed| dithered_frame(ColorType::Rgba8, seed)));
+
+    let config = Config {
+        reduce_color: true,
+        ..config(ColorType::Rgba8)
+    };
+    let (bytes, _) = encode_with(FILTER_WIDTH, FILTER_HEIGHT, config, &input);
+
+    assert_eq!(output_color_type(&bytes), png::ColorType::Rgb);
+    let expected: Vec<Vec<u8>> = input.iter().map(|frame| without_alpha(frame)).collect();
+    assert_composites_to(&bytes, FILTER_WIDTH, ColorType::Rgb8, &expected);
+}
+
 /// アルファを落とすと決まっても、残りのフレームが不透明とは限らないため溜め続ける
 ///
 /// そこで確定すると、後から現れた透過を落としたまま書き出してしまう。
