@@ -208,8 +208,8 @@ impl FilterChoice {
 enum Decision {
     /// 溜めたフレームの内容だけで1つに定まった
     Fixed(Output),
-    /// アルファを落とせるが、落とすと得かは圧縮するまで分からない
-    Compare,
+    /// アルファを落とす表現と落とさない表現を圧縮して比べ、小さい方に定まった
+    Compared(Output),
     /// 溜めきれなくなったため、入力の色種別のままにする
     Abandoned,
 }
@@ -232,27 +232,6 @@ pub enum ColorReduction {
     Kept,
     /// 溜めたフレームが上限に達し、解析を打ち切って入力の色種別のままにした
     Abandoned,
-}
-
-/// 溜めたフレームから出力の画素表現を決める
-///
-/// 色の和集合がパレットに収まっている間は候補が残るため、最後のフレームを見るまで
-/// 決まらない。収まらないと分かった後は、アルファを落とせるかどうかだけが残る。
-/// まだ決まらないときは `None` を返す。
-///
-/// アルファが定数の列は圧縮がよく効くうえ、落とすと1画素のバイト数が変わって
-/// フィルタの当たり方も変わるため、落とすのが得かどうかは素材によって割れる。
-/// 落とせると分かった時点では決めず、圧縮して比べる余地を残す。
-fn decide_output(spool: &Spool, input: ColorType, is_last: bool) -> Option<Decision> {
-    if !spool.colors_exceeded() {
-        return is_last.then_some(Decision::Fixed(Output::Indexed8));
-    }
-
-    match input {
-        ColorType::Rgb8 => Some(Decision::Fixed(Output::Rgb8)),
-        ColorType::Rgba8 if spool.transparent() => Some(Decision::Fixed(Output::Rgba8)),
-        ColorType::Rgba8 => is_last.then_some(Decision::Compare),
-    }
 }
 
 /// 圧縮後の合計から、アルファを落とすかどうかを決める
@@ -317,6 +296,8 @@ pub struct Encoder<W: Write> {
     palette: Option<Palette>,
     /// 出力の色種別が決まるまでフレームを溜める領域
     spool: Option<Spool>,
+    /// アルファを落とすかどうかを圧縮して比べた結果。比べる前は `None`
+    alpha_choice: Option<Output>,
     /// 出力の色種別を落とした結果。決まるまでは `None`
     reduction: Option<ColorReduction>,
     /// 溜めたバイト数の最大値
@@ -399,6 +380,7 @@ impl<W: Write> Encoder<W> {
             spool: config
                 .reduce_color
                 .then(|| Spool::new(config.max_spool_bytes)),
+            alpha_choice: None,
             reduction: None,
             peak_spool_bytes: 0,
             compressor: Compressor::new(config.compression_level),
@@ -641,7 +623,7 @@ impl<W: Write> Encoder<W> {
         self.peak_spool_bytes = self.peak_spool_bytes.max(spool.len());
 
         let is_last = self.frames_accepted + 1 == self.num_frames;
-        match decide_output(&spool, self.input, is_last) {
+        match self.decide_output(&spool, is_last) {
             Some(decision) => self.commit(spool, decision),
             None => {
                 self.spool = Some(spool);
@@ -650,12 +632,56 @@ impl<W: Write> Encoder<W> {
         }
     }
 
+    /// 溜めたフレームから出力の画素表現を決める
+    ///
+    /// 色の和集合がパレットに収まっている間は候補が残るため、最後のフレームを見るまで
+    /// 決まらない。収まらないと分かった後は、アルファを落とせるかどうかだけが残る。
+    /// まだ決まらないときは `None` を返す。
+    fn decide_output(&mut self, spool: &Spool, is_last: bool) -> Option<Decision> {
+        if !spool.colors_exceeded() {
+            return is_last.then_some(Decision::Fixed(Output::Indexed8));
+        }
+
+        match self.input {
+            ColorType::Rgb8 => Some(Decision::Fixed(Output::Rgb8)),
+            ColorType::Rgba8 if spool.transparent() => Some(Decision::Fixed(Output::Rgba8)),
+            ColorType::Rgba8 => self.decide_alpha(spool, is_last),
+        }
+    }
+
+    /// 全画素が不透明なときに、アルファを落とすかどうかを決める
+    ///
+    /// アルファが定数の列は圧縮がよく効くうえ、落とすと1画素のバイト数が変わって
+    /// フィルタの当たり方も変わるため、落とすのが得かどうかは素材によって割れる。
+    /// 比べるのは先頭の [`COLOR_PROBE_FRAMES`] フレームまでなので、それだけ溜まれば
+    /// 結果は後のフレームで動かない。一度比べた結果を覚えて使い回す。
+    ///
+    /// アルファを残す側に決まれば、後のフレームに透過が現れてもその判断は覆らないため、
+    /// そこで確定して溜めるのをやめられる。落とす側は残りのフレームも不透明である
+    /// ことを要するため、最後のフレームまで溜め続ける。
+    fn decide_alpha(&mut self, spool: &Spool, is_last: bool) -> Option<Decision> {
+        let frames = spool.frames();
+        if !is_last && frames.len() < COLOR_PROBE_FRAMES as usize {
+            return None;
+        }
+
+        let output = match self.alpha_choice {
+            Some(output) => output,
+            None => {
+                let output = self.choose_output(frames);
+                self.alpha_choice = Some(output);
+                output
+            }
+        };
+
+        (is_last || output == Output::Rgba8).then_some(Decision::Compared(output))
+    }
+
     /// 出力の画素表現を確定し、ヘッダに続けて溜めたフレームを書き出す
     fn commit(&mut self, spool: Spool, decision: Decision) -> Result<(), Error> {
         let (frames, colors) = spool.into_parts();
         let output = match decision {
-            Decision::Fixed(output) => output,
-            Decision::Compare => self.choose_output(&frames),
+            Decision::Fixed(output) | Decision::Compared(output) => output,
             Decision::Abandoned => Output::from(self.input),
         };
 
@@ -664,7 +690,7 @@ impl<W: Write> Encoder<W> {
         self.reduction = Some(match decision {
             Decision::Abandoned => ColorReduction::Abandoned,
             // 圧縮して比べた結果なので、残った理由は落とすと大きくなること
-            Decision::Compare => match output {
+            Decision::Compared(_) => match output {
                 Output::Rgb8 => ColorReduction::AlphaDropped,
                 _ => ColorReduction::AlphaKept,
             },

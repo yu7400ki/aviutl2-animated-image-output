@@ -70,6 +70,11 @@ impl Spool {
         self.colors.exceeded()
     }
 
+    /// 溜めたフレームを投入した順に見る
+    pub(crate) fn frames(&self) -> &[Spooled] {
+        &self.frames
+    }
+
     /// 溜めたフレームを投入した順に、色の和集合と合わせて取り出す
     pub(crate) fn into_parts(self) -> (Vec<Spooled>, Colors) {
         (self.frames, self.colors)

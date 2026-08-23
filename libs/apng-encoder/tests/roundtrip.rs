@@ -1768,6 +1768,77 @@ fn an_opaque_input_that_grows_without_alpha_keeps_its_alpha() {
     }
 }
 
+/// アルファを落とすかどうかを比べるのに要るフレーム数
+const COLOR_PROBE_FRAMES: u32 = 8;
+
+/// 1フレームだけ現れる領域を `base` に書き加える
+fn with_transient_block(base: &[u8]) -> Vec<u8> {
+    let mut marked = base.to_vec();
+    for y in 1..3usize {
+        for x in 2..5usize {
+            let start = (y * FILTER_WIDTH as usize + x) * 4;
+            marked[start..start + 4].copy_from_slice(&[0xF0, 0xF1, 0xF2, 0xFF]);
+        }
+    }
+    marked
+}
+
+/// アルファを残すと決まった時点で確定し、そこから捨てる判断が立つ
+///
+/// 比べるだけのフレームが溜まれば結果は動かないため、最後のフレームまで待たない。
+/// 待つと、溜めた区間はdispose_opを決められないまま書き出され、抱えるメモリも増える。
+#[test]
+fn an_input_that_keeps_its_alpha_is_decided_before_the_last_frame() {
+    let mut input: Vec<Vec<u8>> = (0..COLOR_PROBE_FRAMES)
+        .map(|seed| dithered_frame(ColorType::Rgba8, seed))
+        .collect();
+    let base = dithered_frame(ColorType::Rgba8, COLOR_PROBE_FRAMES);
+    input.extend([base.clone(), with_transient_block(&base), base]);
+
+    let config = Config {
+        reduce_color: true,
+        ..config(ColorType::Rgba8)
+    };
+    let (bytes, peak) = encode_with(FILTER_WIDTH, FILTER_HEIGHT, config, &input);
+
+    assert_eq!(output_color_type(&bytes), png::ColorType::Rgba);
+    assert_composites_to(&bytes, FILTER_WIDTH, ColorType::Rgba8, &input);
+
+    let (_, decoded) = decode(&bytes);
+    assert!(
+        dispose_ops(&decoded).contains(&png::DisposeOp::Previous),
+        "{:?}",
+        dispose_ops(&decoded)
+    );
+
+    // 溜めるのは比べるためのフレームまでで、残りは書き出しながら流れる
+    let frame_len = (FILTER_WIDTH * FILTER_HEIGHT) as usize * 4;
+    let held = frame_len * (COLOR_PROBE_FRAMES as usize + 1);
+    assert!(peak < held, "{peak} バイト抱えた ({held} バイト未満のはず)");
+}
+
+/// アルファを落とすと決まっても、残りのフレームが不透明とは限らないため溜め続ける
+///
+/// そこで確定すると、後から現れた透過を落としたまま書き出してしまう。
+#[test]
+fn an_input_that_drops_its_alpha_keeps_spooling() {
+    let mut input: Vec<Vec<u8>> = (0..COLOR_PROBE_FRAMES)
+        .map(|seed| detailed_frame(ColorType::Rgba8, seed))
+        .collect();
+    let mut transparent = detailed_frame(ColorType::Rgba8, COLOR_PROBE_FRAMES);
+    transparent[3] = 0x80;
+    input.push(transparent);
+
+    let config = Config {
+        reduce_color: true,
+        ..config(ColorType::Rgba8)
+    };
+    let (bytes, _) = encode_with(FILTER_WIDTH, FILTER_HEIGHT, config, &input);
+
+    assert_eq!(output_color_type(&bytes), png::ColorType::Rgba);
+    assert_composites_to(&bytes, FILTER_WIDTH, ColorType::Rgba8, &input);
+}
+
 /// 符号化して、色種別を落とした結果を取り出す
 fn reduction_of(
     width: u32,
@@ -1840,6 +1911,23 @@ fn an_alpha_that_could_not_be_dropped_is_reported() {
 #[test]
 fn an_alpha_kept_for_its_size_is_reported() {
     let input: Vec<Vec<u8>> = (0..4)
+        .map(|seed| dithered_frame(ColorType::Rgba8, seed))
+        .collect();
+    assert_eq!(
+        reduction_of(
+            FILTER_WIDTH,
+            FILTER_HEIGHT,
+            reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+            &input
+        ),
+        Some(ColorReduction::AlphaKept)
+    );
+}
+
+/// 最後のフレームを待たずに残したときも、理由は落とすと大きくなること
+#[test]
+fn an_alpha_kept_before_the_last_frame_is_reported_the_same_way() {
+    let input: Vec<Vec<u8>> = (0..COLOR_PROBE_FRAMES + 4)
         .map(|seed| dithered_frame(ColorType::Rgba8, seed))
         .collect();
     assert_eq!(
