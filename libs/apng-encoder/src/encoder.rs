@@ -612,16 +612,16 @@ impl<W: Write> Parts<'_, W> {
     /// 書き出しのときに改めて行う。
     fn choose_output(&mut self, frames: &[Spooled]) -> Output {
         debug_assert_eq!(self.layout.input, ColorType::Rgba8);
-        debug_assert!(self.codec.choice.fixed.is_none());
+        debug_assert!(self.codec.is_probing());
 
         let (mut dropped, mut kept) = (0u64, 0u64);
         for frame in frames.iter().take(COLOR_PROBE_FRAMES as usize) {
-            let (body, _) = self.compress_spooled(frame, Output::Rgb8, None);
-            dropped += body.len() as u64;
-            self.codec.give(body);
-            let (body, _) = self.compress_spooled(frame, Output::Rgba8, None);
-            kept += body.len() as u64;
-            self.codec.give(body);
+            let candidate = self.compress_spooled(frame, Output::Rgb8, None);
+            dropped += candidate.len() as u64;
+            candidate.discard(self.codec);
+            let candidate = self.compress_spooled(frame, Output::Rgba8, None);
+            kept += candidate.len() as u64;
+            candidate.discard(self.codec);
         }
 
         smaller_output(dropped, kept)
@@ -658,8 +658,9 @@ impl<W: Write> Parts<'_, W> {
         self.write_header(output, palette.as_ref())?;
 
         for frame in &frames {
-            let (body, probe) = self.compress_spooled(frame, output, palette.as_ref());
-            self.codec.record(probe);
+            let body = self
+                .compress_spooled(frame, output, palette.as_ref())
+                .into_body(self.codec);
             // 溜めている間は出力の色種別が決まらず、blend_opの候補も圧縮できない
             self.chunks.write_frame(
                 frame.rect,
@@ -684,8 +685,7 @@ impl<W: Write> Parts<'_, W> {
         delay: FrameDelay,
         output: Output,
     ) -> Result<(), Error> {
-        let (body, probe) = self.compress_rect(data, rect, output);
-        self.codec.record(probe);
+        let body = self.compress_rect(data, rect, output).into_body(self.codec);
         self.chunks
             .write_frame(rect, delay, DISPOSE_OP_NONE, BLEND_OP_SOURCE, &body)?;
         self.codec.give(body);
@@ -701,8 +701,8 @@ impl<W: Write> Parts<'_, W> {
         delay: FrameDelay,
     ) -> Result<(), Error> {
         let (dispose, rect, candidate) = self.choose_dispose(data, output, pending.is_some());
-        let (blend, (body, probe)) = self.choose_blend(data, dispose, rect, candidate, output);
-        self.codec.record(probe);
+        let (blend, candidate) = self.choose_blend(data, dispose, rect, candidate, output);
+        let body = candidate.into_body(self.codec);
 
         self.flush_pending(pending, dispose)?;
         *pending = Some(Pending {
@@ -740,11 +740,11 @@ impl<W: Write> Parts<'_, W> {
 
         let restored_candidate = self.compress_rect(data, restored, output);
 
-        if restored_candidate.0.len() < kept_candidate.0.len() {
-            self.codec.give(kept_candidate.0);
+        if restored_candidate.len() < kept_candidate.len() {
+            kept_candidate.discard(self.codec);
             (DISPOSE_OP_PREVIOUS, restored, restored_candidate)
         } else {
-            self.codec.give(restored_candidate.0);
+            restored_candidate.discard(self.codec);
             (DISPOSE_OP_NONE, kept, kept_candidate)
         }
     }
@@ -793,13 +793,13 @@ impl<W: Write> Parts<'_, W> {
             .compress(&over, rect.width as usize * out_bpp, out_bpp);
         self.codec.give(over);
 
-        let taken = over_candidate.0.len() < source.0.len();
+        let taken = over_candidate.len() < source.len();
         self.blend_pacing.record(taken);
         if taken {
-            self.codec.give(source.0);
+            source.discard(self.codec);
             (BLEND_OP_OVER, over_candidate)
         } else {
-            self.codec.give(over_candidate.0);
+            over_candidate.discard(self.codec);
             (BLEND_OP_SOURCE, source)
         }
     }
@@ -1364,12 +1364,12 @@ mod tests {
             encoder
                 .add_frame(frame, FrameDelay::new(1, 30).unwrap())
                 .unwrap();
-            let choice = &encoder.codec.choice;
+            let probed = encoder.codec.probe_totals();
             recorded.push((
-                (choice.adaptive_bytes - totals.0) as usize,
-                (choice.unfiltered_bytes - totals.1) as usize,
+                (probed.0 - totals.0) as usize,
+                (probed.1 - totals.1) as usize,
             ));
-            totals = (choice.adaptive_bytes, choice.unfiltered_bytes);
+            totals = probed;
         }
         let bytes = encoder.finish().unwrap();
 

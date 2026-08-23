@@ -14,26 +14,26 @@ pub(crate) const PROBE_FRAMES: u32 = 4;
 /// 先頭の [`PROBE_FRAMES`] フレームは両方の戦略で圧縮して小さい方を採り、
 /// 圧縮後のバイト数を戦略ごとに積む。プローブを終えた時点で合計の小さい戦略へ
 /// 固定し、以降のフレームはその戦略だけを実行する。
-pub(crate) struct FilterChoice {
+struct FilterChoice {
     /// 残りのプローブ回数
     remaining: u32,
     /// プローブで [`filter::Strategy::Adaptive`] が出した圧縮後バイト数の合計
-    pub(crate) adaptive_bytes: u64,
+    adaptive_bytes: u64,
     /// プローブで [`filter::Strategy::Unfiltered`] が出した圧縮後バイト数の合計
-    pub(crate) unfiltered_bytes: u64,
+    unfiltered_bytes: u64,
     /// 固定した戦略。プローブが残っていれば `None`
-    pub(crate) fixed: Option<filter::Strategy>,
+    fixed: Option<filter::Strategy>,
 }
 
 /// プローブ1回ぶんの、戦略ごとの圧縮後バイト数
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Probe {
-    pub(crate) adaptive: usize,
-    pub(crate) unfiltered: usize,
+struct Probe {
+    adaptive: usize,
+    unfiltered: usize,
 }
 
 impl FilterChoice {
-    pub(crate) fn new() -> Self {
+    fn new() -> Self {
         FilterChoice {
             remaining: PROBE_FRAMES,
             adaptive_bytes: 0,
@@ -43,7 +43,7 @@ impl FilterChoice {
     }
 
     /// プローブ1回ぶんの圧縮後バイト数を記録し、残りが尽きたら戦略を固定する
-    pub(crate) fn record(&mut self, probe: Probe) {
+    fn record(&mut self, probe: Probe) {
         debug_assert!(self.fixed.is_none());
 
         self.adaptive_bytes += probe.adaptive as u64;
@@ -86,10 +86,41 @@ impl BufferPool {
     }
 }
 
-/// 圧縮した本体と、両方の戦略を試したときのバイト数
+/// 圧縮した候補1つ
 ///
-/// 採らなかった候補のプローブを記録できないよう、本体と対で受け渡す。
-pub(crate) type Candidate = (Vec<u8>, Option<Probe>);
+/// 本体とプローブを1つの値に閉じ込め、取り出す口を採否で分ける。
+/// [`Self::into_body`] を通らないとプローブに手が届かないため、退けた候補の
+/// バイト数を戦略の集計へ混ぜられない。
+#[must_use]
+pub(crate) struct Candidate {
+    /// フィルタして圧縮した本体
+    body: Vec<u8>,
+    /// 両方の戦略を試した場合の、戦略ごとの圧縮後バイト数
+    probe: Option<Probe>,
+}
+
+impl Candidate {
+    /// 圧縮した本体のバイト数
+    pub(crate) fn len(&self) -> usize {
+        self.body.len()
+    }
+
+    /// 書き出す候補として本体を取り出し、プローブを1回ぶん記録する
+    pub(crate) fn into_body(self, codec: &mut Codec) -> Vec<u8> {
+        if let Some(probe) = self.probe {
+            codec.choice.record(probe);
+        }
+        self.body
+    }
+
+    /// 退けた候補としてバッファをプールへ返す
+    ///
+    /// dispose_opとblend_opの候補を選ぶための圧縮や、出力の色種別を比べるための
+    /// 圧縮は、書き出す候補を二重に数えないよう記録しない。
+    pub(crate) fn discard(self, codec: &mut Codec) {
+        codec.give(self.body);
+    }
+}
 
 /// 領域をフィルタして圧縮する
 ///
@@ -103,7 +134,7 @@ pub(crate) struct Codec {
     /// 切り出した領域と圧縮した本体を回すバッファ
     pool: BufferPool,
     /// フィルタ戦略の決定
-    pub(crate) choice: FilterChoice,
+    choice: FilterChoice,
 }
 
 impl Codec {
@@ -128,14 +159,15 @@ impl Codec {
         self.pool.give(buffer);
     }
 
-    /// 書き出すフレーム1つぶんのプローブを記録する
-    ///
-    /// dispose_opとblend_opの候補を選ぶための圧縮は、採らなかった側を二重に
-    /// 数えないよう記録しない。
-    pub(crate) fn record(&mut self, probe: Option<Probe>) {
-        if let Some(probe) = probe {
-            self.choice.record(probe);
-        }
+    /// フィルタ戦略がまだ固まっていないか
+    pub(crate) fn is_probing(&self) -> bool {
+        self.choice.fixed.is_none()
+    }
+
+    /// プローブが積んだ、戦略ごとの圧縮後バイト数の合計
+    #[cfg(test)]
+    pub(crate) fn probe_totals(&self) -> (u64, u64) {
+        (self.choice.adaptive_bytes, self.choice.unfiltered_bytes)
     }
 
     /// 連続した領域をフィルタして圧縮する
@@ -149,13 +181,16 @@ impl Codec {
         bpp: usize,
     ) -> Candidate {
         match self.choice.fixed {
-            Some(strategy) => (
-                self.compress_with(region, region_stride, bpp, strategy),
-                None,
-            ),
+            Some(strategy) => Candidate {
+                body: self.compress_with(region, region_stride, bpp, strategy),
+                probe: None,
+            },
             None => {
                 let (body, probe) = self.probe(region, region_stride, bpp);
-                (body, Some(probe))
+                Candidate {
+                    body,
+                    probe: Some(probe),
+                }
             }
         }
     }
