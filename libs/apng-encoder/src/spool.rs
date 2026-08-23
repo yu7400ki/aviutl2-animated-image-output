@@ -13,12 +13,15 @@ pub(crate) struct Spooled {
     pub(crate) data: Vec<u8>,
 }
 
+/// フレーム1つを溜めるのに、画素データとは別にかかるバイト数
+const FRAME_OVERHEAD: usize = size_of::<Spooled>();
+
 /// クロップ済みのRGBA8領域を、出力の色種別が決まるまで溜める
 pub(crate) struct Spool {
     frames: Vec<Spooled>,
-    /// 溜めているバイト数
+    /// 抱えているメモリの概算バイト数
     len: usize,
-    /// 溜められるバイト数の上限
+    /// 抱えられるメモリの上限バイト数
     limit: usize,
     /// 不透明でない画素を見つけたか
     transparent: bool,
@@ -34,14 +37,19 @@ impl Spool {
         }
     }
 
-    /// 溜めているバイト数
+    /// 抱えているメモリの概算バイト数
+    ///
+    /// 画素データに、フレームごとの管理領域を加えたもの。
     pub(crate) fn len(&self) -> usize {
         self.len
     }
 
-    /// `len` バイトを追加しても上限を超えないか
-    pub(crate) fn can_hold(&self, len: usize) -> bool {
-        self.len + len <= self.limit
+    /// `region_len` バイトの領域をもう1つ抱えても上限を超えないか
+    pub(crate) fn can_hold(&self, region_len: usize) -> bool {
+        region_len
+            .checked_add(FRAME_OVERHEAD)
+            .and_then(|need| self.len.checked_add(need))
+            .is_some_and(|total| total <= self.limit)
     }
 
     /// 不透明でない画素をこれまでに見つけたか
@@ -74,7 +82,7 @@ impl Spool {
             self.transparent = alpha::has_transparency(&region);
         }
 
-        self.len += region.len();
+        self.len += region.len() + FRAME_OVERHEAD;
         self.frames.push(Spooled {
             rect,
             delay,
@@ -122,9 +130,9 @@ mod tests {
         assert_eq!(heads, [0x10, 0x20, 0x30]);
     }
 
-    /// 溜めたバイト数は切り出した領域の合計
+    /// 抱えているバイト数は、切り出した領域とフレームごとの管理領域の合計
     #[test]
-    fn the_length_counts_the_cropped_regions() {
+    fn the_length_counts_the_regions_and_their_overhead() {
         let mut spool = Spool::new(usize::MAX);
         let rect = Rect {
             x: 1,
@@ -134,15 +142,21 @@ mod tests {
         };
         spool.push(&frame(0xFF), rect, delay(), STRIDE, 4);
 
-        assert_eq!(spool.len(), 2 * 2 * 4);
+        assert_eq!(spool.len(), 2 * 2 * 4 + FRAME_OVERHEAD);
         assert_eq!(spool.frames()[0].rect, rect);
     }
 
     #[test]
     fn the_limit_is_reached_before_it_is_exceeded() {
-        let spool = Spool::new(8);
+        let spool = Spool::new(8 + FRAME_OVERHEAD);
         assert!(spool.can_hold(8));
         assert!(!spool.can_hold(9));
+    }
+
+    /// 加算が溢れる大きさは、上限に収まらないものとして扱う
+    #[test]
+    fn an_overflowing_request_does_not_fit() {
+        assert!(!Spool::new(usize::MAX).can_hold(usize::MAX));
     }
 
     #[test]

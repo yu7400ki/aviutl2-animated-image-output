@@ -674,8 +674,12 @@ fn a_fully_opaque_input_is_written_as_rgb() {
     );
 
     assert_reduced_roundtrip(&bytes, &input, png::ColorType::Rgb);
-    // 全フレームが全画面の差分になるため、溜めるのは入力そのものと同じ量
-    assert_eq!(peak, REDUCE_FRAME_LEN * COUNT as usize);
+    // 全フレームが全画面の差分になるため、画素だけで入力そのものと同じ量を抱える
+    let pixels = REDUCE_FRAME_LEN * COUNT as usize;
+    assert!(
+        (pixels..pixels * 2).contains(&peak),
+        "{pixels} バイトの画素に対して抱えたのは {peak} バイト"
+    );
     assert!(bytes.len() < encode(REDUCE_WIDTH, REDUCE_HEIGHT, ColorType::Rgba8, &input).len());
 }
 
