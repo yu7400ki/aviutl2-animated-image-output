@@ -16,51 +16,89 @@ const PAETH: u8 = 4;
 /// `data` は `stride` バイトの行が隙間なく並んでいること。`bpp` は3か4であること。
 /// 行ごとに5種すべてを適用し、フィルタ後のバイトを符号付きとみなした絶対値の
 /// 総和が最小のものを選ぶ。
-pub(crate) fn filter_image(data: &[u8], stride: usize, bpp: usize, out: &mut Vec<u8>) {
+pub(crate) fn filter_image(
+    data: &[u8],
+    stride: usize,
+    bpp: usize,
+    scratch: &mut Scratch,
+    out: &mut Vec<u8>,
+) {
     if data.is_empty() {
         return;
     }
 
+    scratch.resize(stride);
     out.reserve(data.len() + data.len() / stride);
     match bpp {
-        3 => filter_image_bpp::<3>(data, stride, out),
-        4 => filter_image_bpp::<4>(data, stride, out),
+        3 => filter_image_bpp::<3>(data, stride, scratch, out),
+        4 => filter_image_bpp::<4>(data, stride, scratch, out),
         other => panic!("1画素あたり3バイトか4バイトのみ扱える: {other}"),
     }
 }
 
-fn filter_image_bpp<const BPP: usize>(data: &[u8], stride: usize, out: &mut Vec<u8>) {
+fn filter_image_bpp<const BPP: usize>(
+    data: &[u8],
+    stride: usize,
+    scratch: &mut Scratch,
+    out: &mut Vec<u8>,
+) {
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
-        filter_rows(data, stride, out, |cur, prev, choice| {
+        filter_rows(data, stride, scratch, out, |cur, prev, choice| {
             // SAFETY: avx2の存在をこのクロージャを渡す前に確認している
             unsafe { avx2::select_row::<BPP>(cur, prev, choice) }
         });
         return;
     }
 
-    filter_rows(data, stride, out, scalar::select_row::<BPP>);
+    filter_rows(data, stride, scratch, out, scalar::select_row::<BPP>);
 }
 
 /// `select_row` で行ごとにフィルタを選びながら、画像全体を書き出す
 fn filter_rows(
     data: &[u8],
     stride: usize,
+    scratch: &mut Scratch,
     out: &mut Vec<u8>,
     select_row: impl Fn(&[u8], &[u8], &mut RowChoice),
 ) {
-    // 先頭行は上が存在しないため、予測値0として全0の行を上に置く
-    let zero_row = vec![0u8; stride];
-    let mut choice = RowChoice::new(stride);
+    let Scratch { zero_row, choice } = scratch;
 
     for (y, row) in data.chunks_exact(stride).enumerate() {
+        // 先頭行は上が存在しないため、予測値0として全0の行を上に置く
         let prev = if y == 0 {
             &zero_row[..]
         } else {
             &data[(y - 1) * stride..y * stride]
         };
-        select_row(row, prev, &mut choice);
+        select_row(row, prev, choice);
         choice.emit(row, out);
+    }
+}
+
+/// 行ごとの比較に使う作業領域
+///
+/// フレームをまたいで使い回す。
+pub(crate) struct Scratch {
+    /// 先頭行の上として使う全0の行
+    zero_row: Vec<u8>,
+    choice: RowChoice,
+}
+
+impl Scratch {
+    pub(crate) fn new() -> Self {
+        Scratch {
+            zero_row: Vec::new(),
+            choice: RowChoice::new(),
+        }
+    }
+
+    /// `stride` バイトの行を扱えるようにする
+    fn resize(&mut self, stride: usize) {
+        // 上の行として読むだけなので、伸ばした部分は0のまま残る
+        self.zero_row.resize(stride, 0);
+        self.choice.best.resize(stride, 0);
+        self.choice.candidate.resize(stride, 0);
     }
 }
 
@@ -79,12 +117,12 @@ struct RowChoice {
 }
 
 impl RowChoice {
-    fn new(stride: usize) -> Self {
+    fn new() -> Self {
         RowChoice {
             filter: NONE,
             score: 0,
-            best: vec![0; stride],
-            candidate: vec![0; stride],
+            best: Vec::new(),
+            candidate: Vec::new(),
         }
     }
 
@@ -451,10 +489,24 @@ mod tests {
 
     fn filter_scalar(data: &[u8], stride: usize, bpp: usize) -> Vec<u8> {
         let mut out = Vec::new();
+        let mut scratch = Scratch::new();
+        scratch.resize(stride);
         if !data.is_empty() {
             match bpp {
-                3 => filter_rows(data, stride, &mut out, scalar::select_row::<3>),
-                _ => filter_rows(data, stride, &mut out, scalar::select_row::<4>),
+                3 => filter_rows(
+                    data,
+                    stride,
+                    &mut scratch,
+                    &mut out,
+                    scalar::select_row::<3>,
+                ),
+                _ => filter_rows(
+                    data,
+                    stride,
+                    &mut scratch,
+                    &mut out,
+                    scalar::select_row::<4>,
+                ),
             }
         }
         out
@@ -463,13 +515,15 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     fn filter_avx2(data: &[u8], stride: usize, bpp: usize) -> Vec<u8> {
         let mut out = Vec::new();
+        let mut scratch = Scratch::new();
+        scratch.resize(stride);
         if !data.is_empty() {
             match bpp {
-                3 => filter_rows(data, stride, &mut out, |cur, prev, choice| {
+                3 => filter_rows(data, stride, &mut scratch, &mut out, |cur, prev, choice| {
                     // SAFETY: 呼び出し元がavx2の存在を確認している
                     unsafe { avx2::select_row::<3>(cur, prev, choice) }
                 }),
-                _ => filter_rows(data, stride, &mut out, |cur, prev, choice| {
+                _ => filter_rows(data, stride, &mut scratch, &mut out, |cur, prev, choice| {
                     // SAFETY: 呼び出し元がavx2の存在を確認している
                     unsafe { avx2::select_row::<4>(cur, prev, choice) }
                 }),
@@ -682,7 +736,7 @@ mod tests {
         let data = [&[0u8; STRIDE][..], &ramp[..], &ramp[..]].concat();
 
         let mut filtered = Vec::new();
-        filter_image(&data, STRIDE, BPP, &mut filtered);
+        filter_image(&data, STRIDE, BPP, &mut Scratch::new(), &mut filtered);
 
         assert_eq!(filters_of(&filtered, STRIDE), [NONE, SUB, UP]);
         assert_eq!(
@@ -695,7 +749,7 @@ mod tests {
     #[test]
     fn rows_shorter_than_one_pixel_are_passed_through() {
         let mut filtered = Vec::new();
-        filter_image(&[1, 2, 3], 3, 4, &mut filtered);
+        filter_image(&[1, 2, 3], 3, 4, &mut Scratch::new(), &mut filtered);
 
         assert_eq!(filtered, [NONE, 1, 2, 3]);
     }
@@ -703,7 +757,13 @@ mod tests {
     #[test]
     fn constant_rows_filter_to_zero() {
         let mut filtered = Vec::new();
-        filter_image(&[9, 9, 9, 9, 9, 9], 6, 3, &mut filtered);
+        filter_image(
+            &[9, 9, 9, 9, 9, 9],
+            6,
+            3,
+            &mut Scratch::new(),
+            &mut filtered,
+        );
 
         assert_eq!(filtered, [SUB, 9, 9, 9, 0, 0, 0]);
     }
@@ -711,7 +771,7 @@ mod tests {
     #[test]
     fn an_empty_image_produces_no_output() {
         let mut filtered = vec![0xAA];
-        filter_image(&[], 0, 4, &mut filtered);
+        filter_image(&[], 0, 4, &mut Scratch::new(), &mut filtered);
 
         assert_eq!(filtered, [0xAA]);
     }

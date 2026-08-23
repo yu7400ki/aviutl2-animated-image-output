@@ -77,6 +77,8 @@ pub struct Encoder<W: Write> {
     previous: Vec<u8>,
     /// 差分矩形を切り出した連続バッファ
     region: Vec<u8>,
+    /// 行ごとのフィルタ選択に使う作業領域
+    scratch: filter::Scratch,
     filtered: Vec<u8>,
     compressed: Vec<u8>,
 }
@@ -126,6 +128,7 @@ impl<W: Write> Encoder<W> {
             compressor: Compressor::new(config.compression_level),
             previous: Vec::new(),
             region: Vec::new(),
+            scratch: filter::Scratch::new(),
             filtered: Vec::new(),
             compressed: Vec::new(),
         };
@@ -227,6 +230,7 @@ impl<W: Write> Encoder<W> {
                 &data[head..head + len],
                 region_stride,
                 self.bytes_per_pixel,
+                &mut self.scratch,
                 &mut self.filtered,
             );
         } else {
@@ -241,6 +245,7 @@ impl<W: Write> Encoder<W> {
                 &self.region,
                 region_stride,
                 self.bytes_per_pixel,
+                &mut self.scratch,
                 &mut self.filtered,
             );
         }
