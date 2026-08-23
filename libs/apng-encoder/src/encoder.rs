@@ -65,7 +65,7 @@ pub struct Encoder<W: Write> {
     sequence: u32,
     /// 書き出しに失敗し、チャンク列が中断しているか
     poisoned: bool,
-    color_type: ColorType,
+    bytes_per_pixel: usize,
     /// 1行のバイト数
     stride: usize,
     /// 1フレームのバイト数
@@ -122,7 +122,7 @@ impl<W: Write> Encoder<W> {
             frames_written: 0,
             sequence: 0,
             poisoned: false,
-            color_type: config.color_type,
+            bytes_per_pixel,
             stride,
             frame_len,
             compressor: Compressor::new(config.compression_level),
@@ -213,20 +213,14 @@ impl<W: Write> Encoder<W> {
             };
         }
 
-        diff::dirty_rect(
-            &self.previous,
-            data,
-            self.stride,
-            self.color_type.bytes_per_pixel(),
-        )
-        .unwrap_or(UNCHANGED)
+        diff::dirty_rect(&self.previous, data, self.stride, self.bytes_per_pixel)
+            .unwrap_or(UNCHANGED)
     }
 
     /// `rect` の領域をフィルタして圧縮し、[`Self::compressed`] へ格納する
     fn compress_region(&mut self, data: &[u8], rect: Rect) {
-        let bpp = self.color_type.bytes_per_pixel();
-        let region_stride = rect.width as usize * bpp;
-        let head = rect.y as usize * self.stride + rect.x as usize * bpp;
+        let region_stride = rect.width as usize * self.bytes_per_pixel;
+        let head = rect.y as usize * self.stride + rect.x as usize * self.bytes_per_pixel;
 
         let region: &[u8] = if region_stride == self.stride {
             // 全幅の矩形は `data` 上で既に連続している
@@ -246,7 +240,7 @@ impl<W: Write> Encoder<W> {
         filter::filter_image(
             region,
             region_stride,
-            bpp,
+            self.bytes_per_pixel,
             &mut self.scratch,
             &mut self.filtered,
         );
