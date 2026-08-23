@@ -225,18 +225,6 @@ pub struct Encoder<W: Write> {
     dispose_probed: Vec<u8>,
 }
 
-/// フレームを1つ受け付けたあとに取る行動
-enum Step {
-    /// そのまま書き出す
-    Emit,
-    /// 溜めたまま次のフレームを待つ
-    Hold,
-    /// 出力の色種別を確定し、溜めたぶんを書き出す
-    Commit(ColorType),
-    /// 入力の色種別で確定して溜めたぶんを流し、このフレームは書き出す
-    Abandon,
-}
-
 impl<W: Write> Encoder<W> {
     /// `num_frames` フレームを受け付ける状態にする
     ///
@@ -368,9 +356,9 @@ impl<W: Write> Encoder<W> {
         // 出力の色種別が決まるまでは、候補を実際に書き出す色種別で圧縮できず
         // 大きさを比べられない。溜めている間はdispose_opをNONEに固定し、
         // 保留を挟まずに溜める側へ渡す。
-        if self.spool.is_some() {
+        if let Some(spool) = self.spool.take() {
             let rect = self.kept_rect(data);
-            self.take_step(data, rect, delay, DISPOSE_OP_NONE)?;
+            self.spool_frame(spool, data, rect, delay)?;
             self.advance(data, DISPOSE_OP_NONE);
             return Ok(());
         }
@@ -482,55 +470,39 @@ impl<W: Write> Encoder<W> {
         Ok(body)
     }
 
-    /// フレームを溜めるか書き出すかを決め、決めたとおりに処理する
-    fn take_step(
+    /// 溜めているフレームへ1つ加え、決めたとおりに処理する
+    fn spool_frame(
         &mut self,
+        mut spool: Spool,
         data: &[u8],
         rect: Rect,
         delay: FrameDelay,
-        dispose: u8,
     ) -> Result<(), Error> {
-        let is_last = self.frames_accepted + 1 == self.num_frames;
         let input_color_type = self.output_color_type;
+        let region_len = rect.width as usize * rect.height as usize * self.bytes_per_pixel;
 
-        let step = match &mut self.spool {
-            None => Step::Emit,
-            Some(spool) => {
-                let region_len = rect.width as usize * rect.height as usize * self.bytes_per_pixel;
-                if spool.can_hold(region_len) {
-                    spool.push(data, rect, delay, self.stride, self.bytes_per_pixel);
-                    self.peak_spool_bytes = self.peak_spool_bytes.max(spool.len());
+        // 抱えきれない大きさが来たら、入力の色種別で確定して溜めたぶんを流す
+        if !spool.can_hold(region_len) {
+            self.commit(spool, input_color_type)?;
+            return self.emit_frame(data, rect, delay);
+        }
 
-                    if spool.transparent() {
-                        Step::Commit(input_color_type)
-                    } else if is_last {
-                        Step::Commit(ColorType::Rgb8)
-                    } else {
-                        Step::Hold
-                    }
-                } else {
-                    Step::Abandon
-                }
-            }
-        };
+        spool.push(data, rect, delay, self.stride, self.bytes_per_pixel);
+        self.peak_spool_bytes = self.peak_spool_bytes.max(spool.len());
 
-        match step {
-            Step::Emit => self.emit_frame(data, rect, delay, dispose),
-            Step::Hold => Ok(()),
-            Step::Commit(output) => self.commit(output),
-            Step::Abandon => {
-                self.commit(input_color_type)?;
-                self.emit_frame(data, rect, delay, dispose)
-            }
+        let is_last = self.frames_accepted + 1 == self.num_frames;
+        if spool.transparent() {
+            self.commit(spool, input_color_type)
+        } else if is_last {
+            self.commit(spool, ColorType::Rgb8)
+        } else {
+            self.spool = Some(spool);
+            Ok(())
         }
     }
 
     /// 出力の色種別を確定し、ヘッダに続けて溜めたフレームを書き出す
-    fn commit(&mut self, output: ColorType) -> Result<(), Error> {
-        let Some(spool) = self.spool.take() else {
-            return Ok(());
-        };
-
+    fn commit(&mut self, spool: Spool, output: ColorType) -> Result<(), Error> {
         self.output_color_type = output;
         self.write_header()?;
 
@@ -556,17 +528,13 @@ impl<W: Write> Encoder<W> {
         Ok(())
     }
 
-    /// 出力の色種別が確定したフレームを1つ書き出す
-    fn emit_frame(
-        &mut self,
-        data: &[u8],
-        rect: Rect,
-        delay: FrameDelay,
-        dispose: u8,
-    ) -> Result<(), Error> {
+    /// 溜めるのをやめたフレームを1つ書き出す
+    ///
+    /// 溜めている間はdispose_opを決められないため、捨てずに残す。
+    fn emit_frame(&mut self, data: &[u8], rect: Rect, delay: FrameDelay) -> Result<(), Error> {
         let probe = self.compress_rect(data, rect);
         self.record(probe);
-        self.write_frame(rect, delay, dispose)
+        self.write_frame(rect, delay, DISPOSE_OP_NONE)
     }
 
     /// フレームから `rect` を切り出してフィルタして圧縮し、[`Self::compressed`] へ格納する
