@@ -1605,6 +1605,46 @@ mod tests {
         assert!(pacing.should_try());
     }
 
+    /// 書き出しの経路は、候補を立てる前に間合いを見る
+    ///
+    /// まだらな半透明の画素は不透明でないため候補が立たず、それを塗り潰すフレームだけが
+    /// 一様な矩形の候補を立てて必ず負ける。連敗が尽きた後は、フレームごとに休みが減る。
+    #[test]
+    fn the_write_path_consults_the_pacing() {
+        const PIXELS: usize = (WIDTH * HEIGHT) as usize;
+        /// まだらに置き換える画素の間隔
+        const STEP: usize = 7;
+
+        let uniform = with_alpha(&vec![0x30u8; PIXELS * 3]);
+        let mut speckled = uniform.clone();
+        for pixel in (0..PIXELS).step_by(STEP) {
+            speckled[pixel * 4..pixel * 4 + 4].copy_from_slice(&[0xC0, 0xB0, 0xA0, 0x80]);
+        }
+
+        let mut input = vec![uniform.clone()];
+        for _ in 0..BLEND_LOSS_STREAK {
+            input.push(speckled.clone());
+            input.push(uniform.clone());
+        }
+        let delay = FrameDelay::new(1, 30).unwrap();
+
+        let mut encoder = Encoder::new(
+            Vec::new(),
+            WIDTH,
+            HEIGHT,
+            input.len() as u32 + 1,
+            rgba_config(),
+        )
+        .unwrap();
+        for frame in &input {
+            encoder.add_frame(frame, delay).unwrap();
+        }
+        assert_eq!(encoder.blend_pacing.resting, BLEND_REST_FRAMES);
+
+        encoder.add_frame(&speckled, delay).unwrap();
+        assert_eq!(encoder.blend_pacing.resting, BLEND_REST_FRAMES - 1);
+    }
+
     /// 候補が採られると連敗は解ける
     #[test]
     fn a_taken_candidate_clears_the_losses() {
