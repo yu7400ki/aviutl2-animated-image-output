@@ -436,6 +436,7 @@ mod avx2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::noise;
 
     /// フィルタを逆適用して元の行を復元する
     ///
@@ -486,19 +487,6 @@ mod tests {
             out.extend_from_slice(&row);
         }
         out
-    }
-
-    /// 決定的な擬似乱数列
-    fn noise(len: usize, seed: u32) -> Vec<u8> {
-        let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
-        (0..len)
-            .map(|_| {
-                state ^= state << 13;
-                state ^= state >> 17;
-                state ^= state << 5;
-                (state >> 16) as u8
-            })
-            .collect()
     }
 
     /// 画像の各行のフィルタ種別バイト

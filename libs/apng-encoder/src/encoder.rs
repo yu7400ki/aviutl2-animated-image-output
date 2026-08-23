@@ -109,7 +109,7 @@ struct FilterChoice {
     adaptive_bytes: u64,
     /// プローブで [`filter::Strategy::Unfiltered`] が出した圧縮後バイト数の合計
     unfiltered_bytes: u64,
-    /// 固定した戦略
+    /// 固定した戦略。プローブが残っていれば `None`
     fixed: Option<filter::Strategy>,
 }
 
@@ -123,13 +123,10 @@ impl FilterChoice {
         }
     }
 
-    /// 固定した戦略。プローブが残っていれば `None`
-    fn fixed(&self) -> Option<filter::Strategy> {
-        self.fixed
-    }
-
     /// プローブ1回ぶんの圧縮後バイト数を記録し、残りが尽きたら戦略を固定する
     fn record(&mut self, adaptive: usize, unfiltered: usize) {
+        debug_assert!(self.fixed.is_none());
+
         self.adaptive_bytes += adaptive as u64;
         self.unfiltered_bytes += unfiltered as u64;
         self.remaining -= 1;
@@ -450,7 +447,7 @@ impl<W: Write> Encoder<W> {
     ///
     /// フィルタ戦略が固まるまでは候補すべてを試し、それ以降は固めた戦略だけを使う。
     fn compress(&mut self, region: &[u8], region_stride: usize, bpp: usize) {
-        match self.filter_choice.fixed() {
+        match self.filter_choice.fixed {
             Some(strategy) => self.compress_with(region, region_stride, bpp, strategy),
             None => self.probe(region, region_stride, bpp),
         }
@@ -556,24 +553,12 @@ impl<W: Write> Encoder<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::noise;
     use flate2::read::ZlibDecoder;
     use std::io::Read;
 
     const WIDTH: u32 = 64;
     const HEIGHT: u32 = 48;
-
-    /// 決定的な擬似乱数列
-    fn noise(len: usize, seed: u32) -> Vec<u8> {
-        let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
-        (0..len)
-            .map(|_| {
-                state ^= state << 13;
-                state ^= state >> 17;
-                state ^= state << 5;
-                (state >> 16) as u8
-            })
-            .collect()
-    }
 
     /// 少数の色のブロックが並ぶフレーム
     ///
@@ -820,16 +805,16 @@ mod tests {
         let mut choice = FilterChoice::new();
         for _ in 0..PROBE_FRAMES - 1 {
             choice.record(100, 120);
-            assert_eq!(choice.fixed(), None);
+            assert_eq!(choice.fixed, None);
         }
         choice.record(100, 1);
-        assert_eq!(choice.fixed(), Some(filter::Strategy::Unfiltered));
+        assert_eq!(choice.fixed, Some(filter::Strategy::Unfiltered));
 
         let mut choice = FilterChoice::new();
         for _ in 0..PROBE_FRAMES {
             choice.record(100, 120);
         }
-        assert_eq!(choice.fixed(), Some(filter::Strategy::Adaptive));
+        assert_eq!(choice.fixed, Some(filter::Strategy::Adaptive));
     }
 
     /// 合計が同じならフィルタを掛けない方へ固める
@@ -839,6 +824,6 @@ mod tests {
         for _ in 0..PROBE_FRAMES {
             choice.record(64, 64);
         }
-        assert_eq!(choice.fixed(), Some(filter::Strategy::Unfiltered));
+        assert_eq!(choice.fixed, Some(filter::Strategy::Unfiltered));
     }
 }
