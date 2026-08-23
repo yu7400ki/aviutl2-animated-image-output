@@ -61,6 +61,10 @@ fn filter_rows(
 }
 
 /// 1行ぶんの候補の比較と、勝っている候補の保持
+///
+/// [`Self::best`] は、その行で [`Self::offer`] が1度でも通ったときだけ内容が有効になる。
+/// [`Self::begin`] が種別をNoneへ戻し、[`Self::emit`] がNoneのときは行そのものを出すため、
+/// 前の行の内容が読まれることはない。
 struct RowChoice {
     filter: u8,
     score: u64,
@@ -489,6 +493,52 @@ mod tests {
         }
     }
 
+    /// 行ごとに勝つ種別が入れ替わる画像を、両経路で逆適用して元に戻す
+    ///
+    /// 直前と同じ行 (Upが0点になる) の次に平坦な行 (Noneが勝つ) を置き、
+    /// 行の比較が前の行の状態を引きずらないところまで踏む。
+    #[test]
+    fn images_with_varying_rows_are_reversible() {
+        for bpp in [3, 4] {
+            for width in [5usize, 64, 200] {
+                let stride = width * bpp;
+                let textured = noise(stride, width as u32);
+                let gradient: Vec<u8> = (0..stride).map(|i| (i / 8) as u8).collect();
+                let flat = vec![0u8; stride];
+                let level = vec![0xC0u8; stride];
+
+                let mut data = Vec::new();
+                for row in [
+                    &textured, &textured, &flat, &gradient, &flat, &level, &textured, &flat,
+                ] {
+                    data.extend_from_slice(row);
+                }
+
+                let filtered = filter_scalar(&data, stride, bpp);
+                let filters = filters_of(&filtered, stride);
+
+                assert!(filters.contains(&NONE), "bpp={bpp} w={width} {filters:?}");
+                assert!(
+                    filters.iter().any(|&f| f != NONE),
+                    "bpp={bpp} w={width} {filters:?}"
+                );
+                assert_eq!(
+                    unfilter(&filtered, stride, bpp),
+                    data,
+                    "bpp={bpp} w={width}"
+                );
+
+                #[cfg(target_arch = "x86_64")]
+                if is_x86_feature_detected!("avx2") {
+                    assert_eq!(
+                        filter_avx2(&data, stride, bpp),
+                        filtered,
+                        "bpp={bpp} w={width}"
+                    );
+                }
+            }
+        }
+    }
     /// 5種のフィルタは、どれを強制しても逆適用で元に戻る
     #[test]
     fn every_filter_is_reversible() {
