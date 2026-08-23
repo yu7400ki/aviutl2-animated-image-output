@@ -17,6 +17,18 @@ fn to_u32(value: i32, name: &str) -> std::result::Result<u32, String> {
     u32::try_from(value).map_err(|_| format!("{}が不正です: {}", name, value))
 }
 
+/// プラグイン設定をエンコーダの設定へ対応付ける
+fn encoder_config(config: &Config) -> EncoderConfig {
+    EncoderConfig {
+        color_type: match config.color_format {
+            ColorFormat::Rgb24 => ColorType::Rgb8,
+            ColorFormat::Rgba32 => ColorType::Rgba8,
+        },
+        compression_level: config.compression_level,
+        num_plays: config.repeat,
+    }
+}
+
 /// 1フレームの表示時間 (scale / rate 秒) を求める
 fn frame_delay(scale: i32, rate: i32) -> std::result::Result<FrameDelay, String> {
     let scale = to_u32(scale, "フレームレートのスケール")?;
@@ -30,11 +42,6 @@ fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
     let output_file =
         std::fs::File::create(&output_path).map_err(|e| format!("ファイル作成エラー: {}", e))?;
 
-    let color_type = match config.color_format {
-        ColorFormat::Rgb24 => ColorType::Rgb8,
-        ColorFormat::Rgba32 => ColorType::Rgba8,
-    };
-
     let delay = frame_delay(info.scale(), info.rate())?;
 
     let mut encoder = Encoder::new(
@@ -42,11 +49,7 @@ fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
         to_u32(info.width(), "幅")?,
         to_u32(info.height(), "高さ")?,
         to_u32(info.num_frames(), "フレーム数")?,
-        EncoderConfig {
-            color_type,
-            compression_level: config.compression_level,
-            num_plays: config.repeat,
-        },
+        encoder_config(config),
     )
     .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
 
@@ -127,3 +130,59 @@ impl OutputPlugin for ApngOutputPlugin {
 
 register_output_plugin!(ApngOutputPlugin);
 register_logger!();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_rate_becomes_a_delay_in_seconds() {
+        // 29.97fps
+        assert_eq!(
+            frame_delay(1001, 30000).unwrap().to_parts(),
+            FrameDelay::new(1001, 30000).unwrap().to_parts()
+        );
+        // レートがu16を超えても切り詰めない
+        assert_eq!(frame_delay(1001, 120000).unwrap().to_parts(), (342, 40999));
+        assert_eq!(frame_delay(1, 60).unwrap().to_parts(), (1, 60));
+    }
+
+    #[test]
+    fn invalid_frame_rates_are_rejected() {
+        assert!(frame_delay(1, 0).is_err());
+        assert!(frame_delay(1, -30).is_err());
+        assert!(frame_delay(-1, 30).is_err());
+    }
+
+    #[test]
+    fn negative_dimensions_are_rejected() {
+        assert_eq!(to_u32(1920, "幅").unwrap(), 1920);
+        assert!(to_u32(-1, "幅").is_err());
+    }
+
+    #[test]
+    fn color_format_maps_to_the_matching_color_type() {
+        let rgb = encoder_config(&Config {
+            color_format: ColorFormat::Rgb24,
+            ..Config::default()
+        });
+        assert_eq!(rgb.color_type, ColorType::Rgb8);
+
+        let rgba = encoder_config(&Config {
+            color_format: ColorFormat::Rgba32,
+            ..Config::default()
+        });
+        assert_eq!(rgba.color_type, ColorType::Rgba8);
+    }
+
+    #[test]
+    fn repeat_and_compression_level_are_passed_through() {
+        let encoder_config = encoder_config(&Config {
+            repeat: 5,
+            compression_level: 3,
+            ..Config::default()
+        });
+        assert_eq!(encoder_config.num_plays, 5);
+        assert_eq!(encoder_config.compression_level, 3);
+    }
+}

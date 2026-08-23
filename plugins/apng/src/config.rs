@@ -72,8 +72,12 @@ mod tests {
 
     #[test]
     fn missing_section_falls_back_to_default() {
-        let config = Config::load_from(None);
         let default = Config::default();
+        assert_eq!(default.repeat, 0);
+        assert!(default.color_format == ColorFormat::Rgb24);
+        assert_eq!(default.compression_level, 6);
+
+        let config = Config::load_from(None);
         assert_eq!(config.repeat, default.repeat);
         assert!(config.color_format == default.color_format);
         assert_eq!(config.compression_level, default.compression_level);
@@ -111,9 +115,9 @@ mod tests {
     #[test]
     fn unknown_keys_are_ignored() {
         let config = load(&[("compression_type", "2"), ("filter_type", "4")]);
-        assert_eq!(
-            config.compression_level,
-            Config::default().compression_level
-        );
+        let default = Config::default();
+        assert_eq!(config.repeat, default.repeat);
+        assert!(config.color_format == default.color_format);
+        assert_eq!(config.compression_level, default.compression_level);
     }
 }
