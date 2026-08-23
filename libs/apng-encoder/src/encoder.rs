@@ -94,6 +94,56 @@ impl Default for Config {
     }
 }
 
+/// フィルタ戦略を決めるまでに両候補を圧縮するフレーム数
+const PROBE_FRAMES: u32 = 4;
+
+/// フィルタ戦略の決定
+///
+/// 先頭の [`PROBE_FRAMES`] フレームは候補すべてを圧縮して小さい方を採り、
+/// 圧縮後のバイト数を候補ごとに積む。プローブを終えた時点で合計の小さい候補へ
+/// 固定し、以降のフレームはその候補だけを圧縮する。
+struct FilterChoice {
+    /// 残りのプローブ回数
+    remaining: u32,
+    /// プローブで [`filter::Strategy::Adaptive`] が出した圧縮後バイト数の合計
+    adaptive_bytes: u64,
+    /// プローブで [`filter::Strategy::Unfiltered`] が出した圧縮後バイト数の合計
+    unfiltered_bytes: u64,
+    /// 固定した戦略
+    fixed: Option<filter::Strategy>,
+}
+
+impl FilterChoice {
+    fn new() -> Self {
+        FilterChoice {
+            remaining: PROBE_FRAMES,
+            adaptive_bytes: 0,
+            unfiltered_bytes: 0,
+            fixed: None,
+        }
+    }
+
+    /// 固定した戦略。プローブが残っていれば `None`
+    fn fixed(&self) -> Option<filter::Strategy> {
+        self.fixed
+    }
+
+    /// プローブ1回ぶんの圧縮後バイト数を記録し、残りが尽きたら戦略を固定する
+    fn record(&mut self, adaptive: usize, unfiltered: usize) {
+        self.adaptive_bytes += adaptive as u64;
+        self.unfiltered_bytes += unfiltered as u64;
+        self.remaining -= 1;
+
+        if self.remaining == 0 {
+            self.fixed = Some(if self.adaptive_bytes < self.unfiltered_bytes {
+                filter::Strategy::Adaptive
+            } else {
+                filter::Strategy::Unfiltered
+            });
+        }
+    }
+}
+
 /// APNGエンコーダ
 ///
 /// [`Encoder::add_frame`] でフレームを1つずつ書き出し、[`Encoder::finish`] で終端する。
@@ -139,6 +189,10 @@ pub struct Encoder<W: Write> {
     scratch: filter::Scratch,
     filtered: Vec<u8>,
     compressed: Vec<u8>,
+    /// フィルタ戦略の決定
+    filter_choice: FilterChoice,
+    /// プローブでもう一方の候補を圧縮しておく領域
+    probed: Vec<u8>,
 }
 
 /// フレームを1つ受け付けたあとに取る行動
@@ -211,6 +265,8 @@ impl<W: Write> Encoder<W> {
             scratch: filter::Scratch::new(),
             filtered: Vec::new(),
             compressed: Vec::new(),
+            filter_choice: FilterChoice::new(),
+            probed: Vec::new(),
         };
         if encoder.pending.is_none() {
             encoder.write_header()?;
@@ -391,12 +447,29 @@ impl<W: Write> Encoder<W> {
     }
 
     /// 連続した領域をフィルタして圧縮し、[`Self::compressed`] へ格納する
+    ///
+    /// フィルタ戦略が固まるまでは候補すべてを試し、それ以降は固めた戦略だけを使う。
     fn compress(&mut self, region: &[u8], region_stride: usize, bpp: usize) {
+        match self.filter_choice.fixed() {
+            Some(strategy) => self.compress_with(region, region_stride, bpp, strategy),
+            None => self.probe(region, region_stride, bpp),
+        }
+    }
+
+    /// `strategy` でフィルタして圧縮し、[`Self::compressed`] へ格納する
+    fn compress_with(
+        &mut self,
+        region: &[u8],
+        region_stride: usize,
+        bpp: usize,
+        strategy: filter::Strategy,
+    ) {
         self.filtered.clear();
         filter::filter_image(
             region,
             region_stride,
             bpp,
+            strategy,
             &mut self.scratch,
             &mut self.filtered,
         );
@@ -404,6 +477,21 @@ impl<W: Write> Encoder<W> {
         self.compressed.clear();
         self.compressor
             .compress_into(&self.filtered, &mut self.compressed);
+    }
+
+    /// 候補すべてで圧縮し、小さい方を [`Self::compressed`] に残して結果を記録する
+    ///
+    /// 同じ大きさなら [`filter::Strategy::Unfiltered`] を残す。
+    fn probe(&mut self, region: &[u8], region_stride: usize, bpp: usize) {
+        self.compress_with(region, region_stride, bpp, filter::Strategy::Adaptive);
+        std::mem::swap(&mut self.compressed, &mut self.probed);
+        self.compress_with(region, region_stride, bpp, filter::Strategy::Unfiltered);
+
+        let (adaptive, unfiltered) = (self.probed.len(), self.compressed.len());
+        if adaptive < unfiltered {
+            std::mem::swap(&mut self.compressed, &mut self.probed);
+        }
+        self.filter_choice.record(adaptive, unfiltered);
     }
 
     fn write_frame(&mut self, rect: Rect, delay: FrameDelay) -> Result<(), Error> {
@@ -462,5 +550,269 @@ impl<W: Write> Encoder<W> {
 
         chunk::write(&mut self.writer, *b"IEND", &[])?;
         Ok(self.writer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
+
+    const WIDTH: u32 = 64;
+    const HEIGHT: u32 = 48;
+
+    /// 決定的な擬似乱数列
+    fn noise(len: usize, seed: u32) -> Vec<u8> {
+        let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                (state >> 16) as u8
+            })
+            .collect()
+    }
+
+    /// 少数の色のブロックが並ぶフレーム
+    ///
+    /// 行の中で同じバイト列が繰り返すため、フィルタを掛けない方が小さくなる。
+    fn flat_frame(seed: u32) -> Vec<u8> {
+        const PALETTE: [[u8; 3]; 4] = [
+            [0x1E, 0x1E, 0x28],
+            [0xD0, 0xD0, 0xC8],
+            [0x40, 0x80, 0xC0],
+            [0xC0, 0x40, 0x60],
+        ];
+
+        let blocks = noise((WIDTH * HEIGHT) as usize, seed);
+        let mut frame = Vec::new();
+        for y in 0..HEIGHT as usize {
+            for x in 0..WIDTH as usize {
+                let block = x / 7 + y / 5 * 9;
+                let index = (blocks[block % blocks.len()] as usize + seed as usize) % PALETTE.len();
+                frame.extend_from_slice(&PALETTE[index]);
+            }
+        }
+        frame
+    }
+
+    /// なだらかな階調に微小なノイズを載せたフレーム
+    ///
+    /// 隣接画素の差が小さいため、行ごとの適応フィルタが効く。
+    fn detailed_frame(seed: u32) -> Vec<u8> {
+        let grain = noise((WIDTH * HEIGHT) as usize * 3, seed);
+        let mut frame = Vec::new();
+        for y in 0..HEIGHT as usize {
+            for x in 0..WIDTH as usize {
+                for channel in 0..3 {
+                    let base = (x * 3 + y * 5 + channel * 17 + seed as usize * 2) as u8;
+                    frame
+                        .push(base.wrapping_add(grain[(y * WIDTH as usize + x) * 3 + channel] & 7));
+                }
+            }
+        }
+        frame
+    }
+
+    /// RGB8のフレームに不透明なアルファを足す
+    fn with_alpha(frame: &[u8]) -> Vec<u8> {
+        frame
+            .chunks_exact(3)
+            .flat_map(|p| [p[0], p[1], p[2], 0xFF])
+            .collect()
+    }
+
+    /// 書き出された1フレーム
+    struct Written {
+        /// fcTLが示す矩形の幅
+        width: u32,
+        /// zlibを解いたフィルタ後のバイト列
+        filtered: Vec<u8>,
+    }
+
+    impl Written {
+        /// 各行の先頭にあるフィルタ種別バイト
+        fn filter_types(&self, bpp: usize) -> Vec<u8> {
+            self.filtered
+                .chunks_exact(self.width as usize * bpp + 1)
+                .map(|row| row[0])
+                .collect()
+        }
+    }
+
+    /// チャンクを順に辿り、フレームごとの矩形の幅とフィルタ後のバイト列を取り出す
+    fn written_frames(bytes: &[u8]) -> Vec<Written> {
+        let mut frames = Vec::new();
+        let mut width = 0;
+        let mut offset = chunk::SIGNATURE.len();
+
+        while offset + 12 <= bytes.len() {
+            let len = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            let kind = &bytes[offset + 4..offset + 8];
+            let data = &bytes[offset + 8..offset + 8 + len];
+
+            match kind {
+                b"fcTL" => width = u32::from_be_bytes(data[4..8].try_into().unwrap()),
+                b"IDAT" | b"fdAT" => {
+                    let stream = if kind == b"fdAT" { &data[4..] } else { data };
+                    let mut filtered = Vec::new();
+                    ZlibDecoder::new(stream).read_to_end(&mut filtered).unwrap();
+                    frames.push(Written { width, filtered });
+                }
+                _ => {}
+            }
+            offset += 12 + len;
+        }
+
+        frames
+    }
+
+    fn encode(input: &[Vec<u8>], config: Config) -> Vec<u8> {
+        let mut encoder =
+            Encoder::new(Vec::new(), WIDTH, HEIGHT, input.len() as u32, config).unwrap();
+        for frame in input {
+            encoder
+                .add_frame(frame, FrameDelay::new(1, 30).unwrap())
+                .unwrap();
+        }
+        encoder.finish().unwrap()
+    }
+
+    fn rgb_config() -> Config {
+        Config {
+            color_type: ColorType::Rgb8,
+            ..Config::default()
+        }
+    }
+
+    /// フレームごとのフィルタ種別バイト
+    fn filter_types(bytes: &[u8], bpp: usize) -> Vec<Vec<u8>> {
+        written_frames(bytes)
+            .iter()
+            .map(|frame| frame.filter_types(bpp))
+            .collect()
+    }
+
+    /// フィルタを掛けない方が小さい素材は、プローブ中のフレームも含めてNoneだけになる
+    #[test]
+    fn a_flat_source_settles_on_the_unfiltered_strategy() {
+        let input: Vec<Vec<u8>> = (0..PROBE_FRAMES + 4).map(flat_frame).collect();
+        let bytes = encode(&input, rgb_config());
+
+        let types = filter_types(&bytes, 3);
+        assert_eq!(types.len(), input.len());
+        for (index, frame) in types.iter().enumerate() {
+            assert!(frame.iter().all(|&f| f == 0), "フレーム {index}: {frame:?}");
+        }
+    }
+
+    /// 適応フィルタが効く素材は、プローブ中のフレームからNone以外を選ぶ
+    #[test]
+    fn a_detailed_source_settles_on_the_adaptive_strategy() {
+        let input: Vec<Vec<u8>> = (0..PROBE_FRAMES + 4).map(detailed_frame).collect();
+        let bytes = encode(&input, rgb_config());
+
+        let types = filter_types(&bytes, 3);
+        assert_eq!(types.len(), input.len());
+        for (index, frame) in types.iter().enumerate() {
+            assert!(frame.iter().any(|&f| f != 0), "フレーム {index}: {frame:?}");
+        }
+    }
+
+    /// 固めた戦略は、プローブ後に素材が変わっても変わらない
+    #[test]
+    fn the_strategy_stays_fixed_after_the_probe() {
+        let mut input: Vec<Vec<u8>> = (0..PROBE_FRAMES).map(detailed_frame).collect();
+        input.extend((0..4).map(flat_frame));
+        let bytes = encode(&input, rgb_config());
+
+        for (index, frame) in filter_types(&bytes, 3)
+            .iter()
+            .enumerate()
+            .skip(PROBE_FRAMES as usize)
+        {
+            assert!(frame.iter().any(|&f| f != 0), "フレーム {index}: {frame:?}");
+        }
+
+        let mut input: Vec<Vec<u8>> = (0..PROBE_FRAMES).map(flat_frame).collect();
+        input.extend((0..4).map(detailed_frame));
+        let bytes = encode(&input, rgb_config());
+
+        for (index, frame) in filter_types(&bytes, 3)
+            .iter()
+            .enumerate()
+            .skip(PROBE_FRAMES as usize)
+        {
+            assert!(frame.iter().all(|&f| f == 0), "フレーム {index}: {frame:?}");
+        }
+    }
+
+    /// プローブが終わらないまま入力が尽きても、フレームはすべて書き出される
+    #[test]
+    fn an_input_shorter_than_the_probe_is_written_in_full() {
+        let input: Vec<Vec<u8>> = (0..PROBE_FRAMES - 1).map(flat_frame).collect();
+        let bytes = encode(&input, rgb_config());
+
+        let types = filter_types(&bytes, 3);
+        assert_eq!(types.len(), input.len());
+        for (index, frame) in types.iter().enumerate() {
+            assert!(frame.iter().all(|&f| f == 0), "フレーム {index}: {frame:?}");
+        }
+    }
+
+    /// 色種別を落とす経路でも、溜めたフレームがプローブを通って戦略が決まる
+    #[test]
+    fn spooled_frames_go_through_the_probe() {
+        let config = Config {
+            color_type: ColorType::Rgba8,
+            reduce_color: true,
+            ..Config::default()
+        };
+
+        let input: Vec<Vec<u8>> = (0..PROBE_FRAMES + 4)
+            .map(|seed| with_alpha(&flat_frame(seed)))
+            .collect();
+        let bytes = encode(&input, config);
+        for (index, frame) in filter_types(&bytes, 3).iter().enumerate() {
+            assert!(frame.iter().all(|&f| f == 0), "フレーム {index}: {frame:?}");
+        }
+
+        let input: Vec<Vec<u8>> = (0..PROBE_FRAMES + 4)
+            .map(|seed| with_alpha(&detailed_frame(seed)))
+            .collect();
+        let bytes = encode(&input, config);
+        for (index, frame) in filter_types(&bytes, 3).iter().enumerate() {
+            assert!(frame.iter().any(|&f| f != 0), "フレーム {index}: {frame:?}");
+        }
+    }
+
+    /// プローブは候補ごとの圧縮後バイト数を積み、合計の小さい方へ固める
+    #[test]
+    fn the_probe_fixes_the_candidate_with_the_smaller_total() {
+        let mut choice = FilterChoice::new();
+        for _ in 0..PROBE_FRAMES - 1 {
+            choice.record(100, 120);
+            assert_eq!(choice.fixed(), None);
+        }
+        choice.record(100, 1);
+        assert_eq!(choice.fixed(), Some(filter::Strategy::Unfiltered));
+
+        let mut choice = FilterChoice::new();
+        for _ in 0..PROBE_FRAMES {
+            choice.record(100, 120);
+        }
+        assert_eq!(choice.fixed(), Some(filter::Strategy::Adaptive));
+    }
+
+    /// 合計が同じならフィルタを掛けない方へ固める
+    #[test]
+    fn a_tie_settles_on_the_unfiltered_strategy() {
+        let mut choice = FilterChoice::new();
+        for _ in 0..PROBE_FRAMES {
+            choice.record(64, 64);
+        }
+        assert_eq!(choice.fixed(), Some(filter::Strategy::Unfiltered));
     }
 }

@@ -11,15 +11,24 @@ const AVERAGE: u8 = 3;
 /// Paeth予測値を使う
 const PAETH: u8 = 4;
 
+/// 画像全体のフィルタの決め方
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Strategy {
+    /// 行ごとに5種すべてを適用し、フィルタ後のバイトを符号付きとみなした
+    /// 絶対値の総和が最小のものを選ぶ
+    Adaptive,
+    /// 全行を予測値なし (フィルタ種別None) で通す
+    Unfiltered,
+}
+
 /// 画像全体を行ごとにフィルタし、zlibへ渡すバイト列を `out` へ追記する
 ///
 /// `data` は `stride` バイトの行が隙間なく並んでいること。`bpp` は3か4であること。
-/// 行ごとに5種すべてを適用し、フィルタ後のバイトを符号付きとみなした絶対値の
-/// 総和が最小のものを選ぶ。
 pub(crate) fn filter_image(
     data: &[u8],
     stride: usize,
     bpp: usize,
+    strategy: Strategy,
     scratch: &mut Scratch,
     out: &mut Vec<u8>,
 ) {
@@ -27,12 +36,25 @@ pub(crate) fn filter_image(
         return;
     }
 
-    scratch.resize(stride);
     out.reserve(data.len() + data.len() / stride);
-    match bpp {
-        3 => filter_image_bpp::<3>(data, stride, scratch, out),
-        4 => filter_image_bpp::<4>(data, stride, scratch, out),
-        other => panic!("1画素あたり3バイトか4バイトのみ扱える: {other}"),
+    match strategy {
+        Strategy::Adaptive => {
+            scratch.resize(stride);
+            match bpp {
+                3 => filter_image_bpp::<3>(data, stride, scratch, out),
+                4 => filter_image_bpp::<4>(data, stride, scratch, out),
+                other => panic!("1画素あたり3バイトか4バイトのみ扱える: {other}"),
+            }
+        }
+        Strategy::Unfiltered => unfiltered_image(data, stride, out),
+    }
+}
+
+/// 全行にフィルタ種別Noneを付け、行の内容をそのまま書き出す
+fn unfiltered_image(data: &[u8], stride: usize, out: &mut Vec<u8>) {
+    for row in data.chunks_exact(stride) {
+        out.push(NONE);
+        out.extend_from_slice(row);
     }
 }
 
@@ -736,7 +758,14 @@ mod tests {
         let data = [&[0u8; STRIDE][..], &ramp[..], &ramp[..]].concat();
 
         let mut filtered = Vec::new();
-        filter_image(&data, STRIDE, BPP, &mut Scratch::new(), &mut filtered);
+        filter_image(
+            &data,
+            STRIDE,
+            BPP,
+            Strategy::Adaptive,
+            &mut Scratch::new(),
+            &mut filtered,
+        );
 
         assert_eq!(filters_of(&filtered, STRIDE), [NONE, SUB, UP]);
         assert_eq!(
@@ -749,7 +778,14 @@ mod tests {
     #[test]
     fn rows_shorter_than_one_pixel_are_passed_through() {
         let mut filtered = Vec::new();
-        filter_image(&[1, 2, 3], 3, 4, &mut Scratch::new(), &mut filtered);
+        filter_image(
+            &[1, 2, 3],
+            3,
+            4,
+            Strategy::Adaptive,
+            &mut Scratch::new(),
+            &mut filtered,
+        );
 
         assert_eq!(filtered, [NONE, 1, 2, 3]);
     }
@@ -761,6 +797,7 @@ mod tests {
             &[9, 9, 9, 9, 9, 9],
             6,
             3,
+            Strategy::Adaptive,
             &mut Scratch::new(),
             &mut filtered,
         );
@@ -768,10 +805,86 @@ mod tests {
         assert_eq!(filtered, [SUB, 9, 9, 9, 0, 0, 0]);
     }
 
+    /// Unfilteredは、適応なら別の種別が選ばれる行にもNoneを付ける
+    #[test]
+    fn unfiltered_keeps_every_row_as_it_is() {
+        const BPP: usize = 3;
+        const STRIDE: usize = 4 * BPP;
+        let ramp = [10, 10, 10, 20, 20, 20, 30, 30, 30, 40, 40, 40];
+        let data = [&ramp[..], &ramp[..]].concat();
+
+        let mut filtered = Vec::new();
+        filter_image(
+            &data,
+            STRIDE,
+            BPP,
+            Strategy::Unfiltered,
+            &mut Scratch::new(),
+            &mut filtered,
+        );
+
+        assert_eq!(filters_of(&filtered, STRIDE), [NONE, NONE]);
+        assert_eq!(
+            filtered,
+            [&[NONE][..], &ramp[..], &[NONE][..], &ramp[..]].concat()
+        );
+        assert_eq!(unfilter(&filtered, STRIDE, BPP), data);
+    }
+
+    /// Unfilteredはどの行長・画素サイズでも逆適用で元に戻る
+    #[test]
+    fn unfiltered_images_are_reversible() {
+        for bpp in [3, 4] {
+            for width in [1usize, 2, 7, 11, 32] {
+                let (stride, height) = (width * bpp, 5);
+                let data = noise(stride * height, width as u32);
+
+                let mut filtered = Vec::new();
+                filter_image(
+                    &data,
+                    stride,
+                    bpp,
+                    Strategy::Unfiltered,
+                    &mut Scratch::new(),
+                    &mut filtered,
+                );
+
+                assert_eq!(filtered.len(), (stride + 1) * height);
+                assert_eq!(
+                    unfilter(&filtered, stride, bpp),
+                    data,
+                    "bpp={bpp} w={width}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_unfiltered_image_produces_no_output() {
+        let mut filtered = vec![0xAA];
+        filter_image(
+            &[],
+            0,
+            4,
+            Strategy::Unfiltered,
+            &mut Scratch::new(),
+            &mut filtered,
+        );
+
+        assert_eq!(filtered, [0xAA]);
+    }
+
     #[test]
     fn an_empty_image_produces_no_output() {
         let mut filtered = vec![0xAA];
-        filter_image(&[], 0, 4, &mut Scratch::new(), &mut filtered);
+        filter_image(
+            &[],
+            0,
+            4,
+            Strategy::Adaptive,
+            &mut Scratch::new(),
+            &mut filtered,
+        );
 
         assert_eq!(filtered, [0xAA]);
     }
