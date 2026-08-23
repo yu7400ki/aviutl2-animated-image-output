@@ -1462,6 +1462,72 @@ fn exceeding_the_spool_limit_gives_up_the_palette() {
     assert!(peak <= limit);
 }
 
+/// [`palette_frame`] と同じ色をRGB8で敷き詰めたフレームを作る
+fn palette_frame_rgb(colors: usize, offset: usize) -> Vec<u8> {
+    palette_frame(colors, offset)
+        .chunks_exact(4)
+        .flat_map(|pixel| pixel[..3].to_vec())
+        .collect()
+}
+
+/// 全画面が交互に入れ替わる、色数が上限に収まるRGB8のフレーム列
+///
+/// どのフレームも直前と全画素が違うため、溜める量はフレームごとに1画面ぶん増える。
+/// 1つ飛ばしのフレームは内容が戻るので、溜めなければ捨てる判断が立つ。
+fn alternating_palette_frames(count: usize) -> Vec<Vec<u8>> {
+    (0..count)
+        .map(|index| palette_frame_rgb(4, index % 2 * 8))
+        .collect()
+}
+
+/// 色数が上限に収まるRGB8の入力でも、溜める上限に達したらパレットを諦める
+///
+/// 溜めた区間はdispose_opを決められないまま書き出されるので、溜めなければ
+/// 立っていた捨てる判断がその区間から消える。
+#[test]
+fn an_rgb_input_that_fills_the_spool_gives_up_the_palette() {
+    const SPOOLED: usize = 2;
+
+    let input = alternating_palette_frames(5);
+    let frame_len = REDUCE_PIXELS * 3;
+    // フレームごとの管理領域を多めに見ても SPOOLED 枚で尽きる上限
+    let limit = SPOOLED * (frame_len + 128);
+    let (bytes, peak) = encode_with(
+        REDUCE_WIDTH,
+        REDUCE_HEIGHT,
+        reduce_config(ColorType::Rgb8, limit),
+        &input,
+    );
+
+    assert_eq!(output_color_type(&bytes), png::ColorType::Rgb);
+    assert!(peak <= limit, "{peak} バイト抱えた (上限 {limit})");
+    assert_composites_to(&bytes, REDUCE_WIDTH, ColorType::Rgb8, &input);
+
+    // 溜めた区間は捨てる判断を経ずに書き出される
+    let (_, decoded) = decode(&bytes);
+    assert!(
+        dispose_ops(&decoded)[..SPOOLED]
+            .iter()
+            .all(|op| matches!(op, png::DisposeOp::None)),
+        "{:?}",
+        dispose_ops(&decoded)
+    );
+    // 溜めずに書き出せば、同じ入力で捨てる判断が立つ
+    let plain = encode(REDUCE_WIDTH, REDUCE_HEIGHT, ColorType::Rgb8, &input);
+    assert!(dispose_ops(&decode(&plain).1).contains(&png::DisposeOp::Previous));
+}
+
+/// 上限に届かなければ、同じ入力がパレットで出る
+#[test]
+fn the_same_rgb_input_becomes_a_palette_when_the_spool_holds() {
+    let input = alternating_palette_frames(5);
+    let bytes = encode_reduced(ColorType::Rgb8, &input);
+
+    assert_eq!(output_color_type(&bytes), png::ColorType::Indexed);
+    assert_eq!(plte(&bytes).len() / 3, 8);
+    assert_composites_to(&bytes, REDUCE_WIDTH, ColorType::Rgb8, &input);
+}
+
 /// パレットで出る素材は、部分矩形とdispose_opをまたいでも可逆であること
 #[test]
 fn a_palette_survives_partial_rects() {
