@@ -7,8 +7,10 @@ pub(crate) const MAX_COLORS: usize = 256;
 const TABLE_BITS: u32 = 10;
 /// 開放アドレス法の表の大きさ
 ///
-/// [`MAX_COLORS`] より十分に大きく取るため、表には必ず空きが残り、探索は必ず止まる。
+/// [`MAX_COLORS`] より大きく取る。表に必ず空きが残ることが、色を探す走査が
+/// 一周して戻ってこないことの根拠になる。
 const TABLE_LEN: usize = 1 << TABLE_BITS;
+const _: () = assert!(TABLE_LEN > MAX_COLORS);
 /// 表の添字を取り出すマスク
 const TABLE_MASK: usize = TABLE_LEN - 1;
 /// 値を表全体へ散らす乗数 (2^32を黄金比で割った奇数)
@@ -209,20 +211,21 @@ impl Palette {
 
     fn map<const BPP: usize>(&self, pixels: &[u8], out: &mut Vec<u8>) {
         for pixel in pixels.chunks_exact(BPP) {
-            out.push(self.index_of(pack::<BPP>(pixel)));
+            out.push(self.index_of(pack::<BPP>(pixel)).expect("パレットに無い色"));
         }
     }
 
-    /// 色の添字
-    ///
-    /// `color` がこのパレットに含まれていること。
-    fn index_of(&self, color: u32) -> u8 {
+    /// 色の添字。このパレットに無ければ `None`
+    fn index_of(&self, color: u32) -> Option<u8> {
         let mut slot = slot_of(color);
         loop {
             let value = self.table.values[slot];
-            debug_assert_ne!(value, 0, "パレットに無い色");
+            // 表に必ず残る空きに当たれば、その色はどこにも入っていない
+            if value == 0 {
+                return None;
+            }
             if self.table.keys[slot] == color {
-                return (value - 1) as u8;
+                return Some((value - 1) as u8);
             }
             slot = (slot + 1) & TABLE_MASK;
         }
@@ -333,6 +336,25 @@ mod tests {
             assert_eq!(&plte[at * 3..at * 3 + 3], &pixel[..3]);
             let alpha = trns.get(at).copied().unwrap_or(u8::MAX);
             assert_eq!(alpha, pixel[3]);
+        }
+    }
+
+    /// パレットに無い色を引いても、走査は表の空きで止まる
+    ///
+    /// 止まらなければ戻り値ではなく無限ループになるため、上限いっぱいまで
+    /// 埋めた表でも一周しないことを踏む。
+    #[test]
+    fn a_color_outside_the_palette_is_reported_as_missing() {
+        let palette = palette_of(&[1, 2, 3, 4, 5, 6], 3);
+        assert_eq!(palette.index_of(pack::<3>(&[1, 2, 3])), Some(0));
+        assert_eq!(palette.index_of(pack::<3>(&[4, 5, 6])), Some(1));
+        for color in 0..8192u32 {
+            assert_eq!(palette.index_of(color), None, "{color:#010X}");
+        }
+
+        let full = palette_of(&distinct_rgb(MAX_COLORS), 3);
+        for color in 0..8192u32 {
+            assert_eq!(full.index_of(color), None, "{color:#010X}");
         }
     }
 
