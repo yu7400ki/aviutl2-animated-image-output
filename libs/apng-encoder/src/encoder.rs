@@ -5,6 +5,7 @@ use crate::delay::FrameDelay;
 use crate::diff::{self, Rect};
 use crate::error::Error;
 use crate::filter;
+use crate::palette::Palette;
 use crate::region;
 use crate::spool::Spool;
 use crate::zlib::Compressor;
@@ -35,12 +36,46 @@ impl ColorType {
             ColorType::Rgba8 => 4,
         }
     }
+}
+
+/// 出力の画素表現 (ビット深度8固定)
+///
+/// 入力に取れる色種別のほか、パレットを引く添字を持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Output {
+    /// 8bit/chのRGB
+    Rgb8,
+    /// 8bit/chのRGBA
+    Rgba8,
+    /// PLTEを引く1バイトの添字
+    Indexed8,
+}
+
+impl Output {
+    /// 1画素あたりのバイト数
+    fn bytes_per_pixel(self) -> usize {
+        match self {
+            Output::Rgb8 => 3,
+            Output::Rgba8 => 4,
+            Output::Indexed8 => 1,
+        }
+    }
 
     /// IHDRのcolour type
     fn code(self) -> u8 {
         match self {
-            ColorType::Rgb8 => 2,
-            ColorType::Rgba8 => 6,
+            Output::Rgb8 => 2,
+            Output::Rgba8 => 6,
+            Output::Indexed8 => 3,
+        }
+    }
+}
+
+impl From<ColorType> for Output {
+    fn from(color_type: ColorType) -> Self {
+        match color_type {
+            ColorType::Rgb8 => Output::Rgb8,
+            ColorType::Rgba8 => Output::Rgba8,
         }
     }
 }
@@ -73,8 +108,10 @@ pub struct Config {
     pub num_plays: u32,
     /// 出力の色種別を入力より小さいものへ落とすか
     ///
-    /// PNGの色種別はファイル全体で1つなので、全フレームを見るまで落とせるか決まらない。
-    /// 有効にすると、決まるまでのフレームをエンコーダ内部に溜める。
+    /// 全フレームの色の和集合がパレットに収まるならパレット参照へ、そうでなく
+    /// 全画素が不透明ならRGBへ落とす。PNGの色種別はファイル全体で1つなので、
+    /// 全フレームを見るまで落とせるか決まらない。有効にすると、決まるまでの
+    /// フレームをエンコーダ内部に溜める。
     pub reduce_color: bool,
     /// 溜めたフレームが抱えるメモリの上限バイト数 ([`DEFAULT_MAX_SPOOL_BYTES`] が目安)
     ///
@@ -153,6 +190,23 @@ impl FilterChoice {
     }
 }
 
+/// 溜めたフレームから出力の画素表現を決める
+///
+/// 色の和集合がパレットに収まっている間は候補が残るため、最後のフレームを見るまで
+/// 決まらない。収まらないと分かった後は、アルファを落とせるかどうかだけが残る。
+/// まだ決まらないときは `None` を返す。
+fn decide_output(spool: &Spool, input: ColorType, is_last: bool) -> Option<Output> {
+    if !spool.colors_exceeded() {
+        return is_last.then_some(Output::Indexed8);
+    }
+
+    match input {
+        ColorType::Rgb8 => Some(Output::Rgb8),
+        ColorType::Rgba8 if spool.transparent() => Some(Output::Rgba8),
+        ColorType::Rgba8 => is_last.then_some(Output::Rgb8),
+    }
+}
+
 /// 書き出しを待っているフレーム
 ///
 /// フレームのdispose_opは次のフレームの圧縮後サイズを見るまで決まらないため、
@@ -193,11 +247,15 @@ pub struct Encoder<W: Write> {
     stride: usize,
     /// 入力の1フレームのバイト数
     frame_len: usize,
-    /// 出力の色種別
+    /// 入力の色種別
+    input: ColorType,
+    /// 出力の画素表現
     ///
     /// [`Self::spool`] が `Some` の間は暫定で入力の色種別が入り、
     /// [`Self::commit`] で確定してヘッダに載る。
-    output_color_type: ColorType,
+    output: Output,
+    /// 出力がパレット参照のときの、添字と色の対応
+    palette: Option<Palette>,
     /// 出力の色種別が決まるまでフレームを溜める領域
     spool: Option<Spool>,
     /// 溜めたバイト数の最大値
@@ -261,9 +319,6 @@ impl<W: Write> Encoder<W> {
             .checked_mul(height as usize)
             .ok_or(Error::ImageTooLarge { width, height })?;
 
-        // 落とせる余地があるのはアルファを持つ入力だけなので、それ以外は溜めない
-        let deferred = config.reduce_color && config.color_type == ColorType::Rgba8;
-
         let mut encoder = Encoder {
             writer,
             width,
@@ -277,8 +332,12 @@ impl<W: Write> Encoder<W> {
             bytes_per_pixel,
             stride,
             frame_len,
-            output_color_type: config.color_type,
-            spool: deferred.then(|| Spool::new(config.max_spool_bytes)),
+            input: config.color_type,
+            output: Output::from(config.color_type),
+            palette: None,
+            spool: config
+                .reduce_color
+                .then(|| Spool::new(config.max_spool_bytes)),
             peak_spool_bytes: 0,
             compressor: Compressor::new(config.compression_level),
             pending: None,
@@ -310,13 +369,22 @@ impl<W: Write> Encoder<W> {
         ihdr[0..4].copy_from_slice(&self.width.to_be_bytes());
         ihdr[4..8].copy_from_slice(&self.height.to_be_bytes());
         ihdr[8] = 8;
-        ihdr[9] = self.output_color_type.code();
+        ihdr[9] = self.output.code();
         chunk::write(&mut self.writer, *b"IHDR", &ihdr)?;
 
         let mut actl = [0u8; 8];
         actl[0..4].copy_from_slice(&self.num_frames.to_be_bytes());
         actl[4..8].copy_from_slice(&self.num_plays.to_be_bytes());
         chunk::write(&mut self.writer, *b"acTL", &actl)?;
+
+        // PLTEとtRNSは画素データより前に置く
+        if let Some(palette) = &self.palette {
+            chunk::write(&mut self.writer, *b"PLTE", &palette.plte())?;
+            let trns = palette.trns();
+            if !trns.is_empty() {
+                chunk::write(&mut self.writer, *b"tRNS", &trns)?;
+            }
+        }
 
         Ok(())
     }
@@ -490,12 +558,11 @@ impl<W: Write> Encoder<W> {
         rect: Rect,
         delay: FrameDelay,
     ) -> Result<(), Error> {
-        let input_color_type = self.output_color_type;
         let region_len = rect.width as usize * rect.height as usize * self.bytes_per_pixel;
 
         // 抱えきれない大きさが来たら、入力の色種別で確定して溜めたぶんを流す
         if !spool.can_hold(region_len) {
-            self.commit(spool, input_color_type)?;
+            self.commit(spool, Output::from(self.input))?;
             return self.emit_frame(data, rect, delay);
         }
 
@@ -503,19 +570,19 @@ impl<W: Write> Encoder<W> {
         self.peak_spool_bytes = self.peak_spool_bytes.max(spool.len());
 
         let is_last = self.frames_accepted + 1 == self.num_frames;
-        if spool.transparent() {
-            self.commit(spool, input_color_type)
-        } else if is_last {
-            self.commit(spool, ColorType::Rgb8)
-        } else {
-            self.spool = Some(spool);
-            Ok(())
+        match decide_output(&spool, self.input, is_last) {
+            Some(output) => self.commit(spool, output),
+            None => {
+                self.spool = Some(spool);
+                Ok(())
+            }
         }
     }
 
-    /// 出力の色種別を確定し、ヘッダに続けて溜めたフレームを書き出す
-    fn commit(&mut self, spool: Spool, output: ColorType) -> Result<(), Error> {
-        self.output_color_type = output;
+    /// 出力の画素表現を確定し、ヘッダに続けて溜めたフレームを書き出す
+    fn commit(&mut self, mut spool: Spool, output: Output) -> Result<(), Error> {
+        self.palette = (output == Output::Indexed8).then(|| spool.take_palette());
+        self.output = output;
         self.write_header()?;
 
         let in_bpp = self.bytes_per_pixel;
@@ -527,7 +594,7 @@ impl<W: Write> Encoder<W> {
             } else {
                 let mut converted = std::mem::take(&mut self.region);
                 converted.clear();
-                region::append_pixels(&frame.data, in_bpp, out_bpp, &mut converted);
+                self.append_output(&frame.data, &mut converted);
                 let probe = self.compress(&converted, region_stride, out_bpp);
                 self.region = converted;
                 probe
@@ -549,10 +616,28 @@ impl<W: Write> Encoder<W> {
         self.write_frame(rect, delay, DISPOSE_OP_NONE)
     }
 
+    /// 入力の画素列を出力の表現へ直しながら `out` へ追記する
+    fn append_output(&self, pixels: &[u8], out: &mut Vec<u8>) {
+        match &self.palette {
+            Some(palette) => palette.append_indices(pixels, self.bytes_per_pixel, out),
+            None => region::append_pixels(
+                pixels,
+                self.bytes_per_pixel,
+                self.output.bytes_per_pixel(),
+                out,
+            ),
+        }
+    }
+
     /// フレームから `rect` を切り出してフィルタして圧縮し、[`Self::compressed`] へ格納する
+    ///
+    /// この経路を通るのは出力が決まった後のフレームだけで、その表現は入力と同じか
+    /// アルファを落としたものになる。
     fn compress_rect(&mut self, data: &[u8], rect: Rect) -> Option<Probe> {
+        debug_assert!(self.palette.is_none());
+
         let in_bpp = self.bytes_per_pixel;
-        let out_bpp = self.output_color_type.bytes_per_pixel();
+        let out_bpp = self.output.bytes_per_pixel();
         let region_stride = rect.width as usize * out_bpp;
 
         if in_bpp == out_bpp && rect.width as usize * in_bpp == self.stride {
@@ -819,6 +904,18 @@ mod tests {
         }
     }
 
+    /// IHDRが示す出力の1画素あたりのバイト数
+    fn output_bytes_per_pixel(bytes: &[u8]) -> usize {
+        // シグネチャ・長さ・型に続くIHDRの9バイト目がcolour type
+        let code = bytes[chunk::SIGNATURE.len() + 8 + 9];
+        match code {
+            2 => 3,
+            3 => 1,
+            6 => 4,
+            other => panic!("扱わないcolour type: {other}"),
+        }
+    }
+
     /// フレームごとのフィルタ種別バイト
     fn filter_types(bytes: &[u8], bpp: usize) -> Vec<Vec<u8>> {
         written_frames(bytes)
@@ -930,7 +1027,8 @@ mod tests {
             .map(|seed| with_alpha(&flat_frame(seed)))
             .collect();
         let bytes = encode(&input, config);
-        for (index, frame) in filter_types(&bytes, 3).iter().enumerate() {
+        let bpp = output_bytes_per_pixel(&bytes);
+        for (index, frame) in filter_types(&bytes, bpp).iter().enumerate() {
             assert!(frame.iter().all(|&f| f == 0), "フレーム {index}: {frame:?}");
         }
 
@@ -938,7 +1036,8 @@ mod tests {
             .map(|seed| with_alpha(&detailed_frame(seed)))
             .collect();
         let bytes = encode(&input, config);
-        for (index, frame) in filter_types(&bytes, 3).iter().enumerate() {
+        let bpp = output_bytes_per_pixel(&bytes);
+        for (index, frame) in filter_types(&bytes, bpp).iter().enumerate() {
             assert!(frame.iter().any(|&f| f != 0), "フレーム {index}: {frame:?}");
         }
     }

@@ -7,6 +7,7 @@ mod diff;
 mod encoder;
 mod error;
 mod filter;
+mod palette;
 mod region;
 mod spool;
 mod zlib;

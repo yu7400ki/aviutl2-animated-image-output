@@ -51,22 +51,92 @@ struct DecodedFrame {
     control: png::FrameControl,
 }
 
+/// PLTEとtRNSから組み立てた、添字を画素へ戻す表
+///
+/// tRNSを持つパレットはRGBA8へ、持たないパレットはRGB8へ展開する。
+struct Expansion {
+    /// 添字順に並べた画素
+    entries: Vec<u8>,
+    /// 展開後の1画素あたりのバイト数
+    bytes_per_pixel: usize,
+}
+
+impl Expansion {
+    /// 出力がパレット参照でなければ `None`
+    fn of(info: &png::Info) -> Option<Self> {
+        if info.color_type != png::ColorType::Indexed {
+            return None;
+        }
+
+        let plte = info.palette.as_deref().expect("PLTEが必要");
+        let trns = info.trns.as_deref().unwrap_or(&[]);
+        assert_eq!(plte.len() % 3, 0, "PLTEは3バイトずつ");
+        assert!(trns.len() <= plte.len() / 3, "tRNSはPLTEより多くならない");
+
+        let bytes_per_pixel = if trns.is_empty() { 3 } else { 4 };
+        let mut entries = Vec::with_capacity(plte.len() / 3 * bytes_per_pixel);
+        for (index, color) in plte.chunks_exact(3).enumerate() {
+            entries.extend_from_slice(color);
+            if bytes_per_pixel == 4 {
+                // tRNSに無いエントリは不透明とみなす
+                entries.push(trns.get(index).copied().unwrap_or(0xFF));
+            }
+        }
+
+        Some(Expansion {
+            entries,
+            bytes_per_pixel,
+        })
+    }
+
+    /// 添字の並びを画素へ展開する
+    fn apply(&self, indices: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(indices.len() * self.bytes_per_pixel);
+        for &index in indices {
+            let at = index as usize * self.bytes_per_pixel;
+            out.extend_from_slice(&self.entries[at..at + self.bytes_per_pixel]);
+        }
+        out
+    }
+}
+
 /// APNGを読み出し、acTLの再生回数と全フレームを返す
+///
+/// パレット参照の出力はPLTEとtRNSを引いて画素へ展開する。
 fn decode(bytes: &[u8]) -> (u32, Vec<DecodedFrame>) {
     let mut reader = png::Decoder::new(Cursor::new(bytes)).read_info().unwrap();
     let animation = *reader.info().animation_control().expect("acTLが必要");
+    let expansion = Expansion::of(reader.info());
 
     let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
     let mut decoded = Vec::new();
     for _ in 0..animation.num_frames {
         let info = reader.next_frame(&mut buf).unwrap();
+        let raw = &buf[..info.buffer_size()];
         decoded.push(DecodedFrame {
-            data: buf[..info.buffer_size()].to_vec(),
+            data: match &expansion {
+                Some(expansion) => expansion.apply(raw),
+                None => raw.to_vec(),
+            },
             control: *reader.info().frame_control().expect("fcTLが必要"),
         });
     }
 
     (animation.num_plays, decoded)
+}
+
+/// チャンクの型を出現順に並べる
+fn chunk_types(bytes: &[u8]) -> Vec<[u8; 4]> {
+    let mut types = Vec::new();
+    let mut offset = 8;
+
+    while offset + 12 <= bytes.len() {
+        let len = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        types.push(bytes[offset + 4..offset + 8].try_into().unwrap());
+        offset += 12 + len;
+    }
+
+    types
 }
 
 /// フレームを描いた後、次のフレームを描く前にキャンバスへ施す後始末
@@ -774,27 +844,62 @@ fn a_tie_keeps_the_pending_frame() {
 }
 
 /// 色種別を落とす検証に使うキャンバスの大きさ
-const REDUCE_WIDTH: u32 = 8;
-const REDUCE_HEIGHT: u32 = 6;
-/// 1フレームぶんの入力バイト数 (RGBA8)
-const REDUCE_FRAME_LEN: usize = REDUCE_WIDTH as usize * REDUCE_HEIGHT as usize * 4;
-
-/// 全画素が不透明なRGBA8のフレーム列を作る
 ///
-/// `alpha_from` 以降のフレームは、先頭画素だけ不透明でなくなる。
-fn reducible_frames(count: u32, alpha_from: Option<u32>) -> Vec<Vec<u8>> {
+/// 1フレームでパレットに収まる色数を超えられるだけの画素を取る。
+const REDUCE_WIDTH: u32 = 24;
+const REDUCE_HEIGHT: u32 = 16;
+/// 1フレームの画素数
+const REDUCE_PIXELS: usize = REDUCE_WIDTH as usize * REDUCE_HEIGHT as usize;
+/// 1フレームぶんの入力バイト数 (RGBA8)
+const REDUCE_FRAME_LEN: usize = REDUCE_PIXELS * 4;
+
+/// パレットに収まる色数の上限
+const MAX_PALETTE_COLORS: usize = 256;
+
+/// 画素ごとに違う色を置いたフレーム列を作る
+///
+/// 1フレームだけでパレットに収まる色数を超え、フレームごとに色をずらすため
+/// すべてのフレームが全画面の差分になる。アルファは全画素255。
+fn distinct_frames(color_type: ColorType, count: u32) -> Vec<Vec<u8>> {
+    let bpp = color_type.bytes_per_pixel();
     (0..count)
         .map(|index| {
-            let mut frame = frame_data(REDUCE_FRAME_LEN, index + 1);
-            for pixel in frame.chunks_exact_mut(4) {
-                pixel[3] = 0xFF;
-            }
-            if alpha_from.is_some_and(|from| index >= from) {
-                frame[3] = 0x80;
+            let mut frame = Vec::with_capacity(REDUCE_PIXELS * bpp);
+            for pixel in 0..REDUCE_PIXELS {
+                let color = pixel + index as usize * REDUCE_PIXELS;
+                frame.extend_from_slice(&[color as u8, (color >> 8) as u8, (color >> 16) as u8]);
+                if bpp == 4 {
+                    frame.push(0xFF);
+                }
             }
             frame
         })
         .collect()
+}
+
+/// `colors` 種類の色を敷き詰めた不透明なRGBA8のフレームを作る
+///
+/// `offset` をずらすと、色の集合が重ならないフレームになる。
+fn palette_frame(colors: usize, offset: usize) -> Vec<u8> {
+    (0..REDUCE_PIXELS)
+        .flat_map(|pixel| {
+            let color = offset + pixel % colors;
+            [color as u8, (color >> 8) as u8, (color >> 16) as u8, 0xFF]
+        })
+        .collect()
+}
+
+/// 全画素が不透明でパレットに収まらない色数を持つRGBA8のフレーム列を作る
+///
+/// `alpha_from` 以降のフレームは、先頭画素だけ不透明でなくなる。
+fn reducible_frames(count: u32, alpha_from: Option<u32>) -> Vec<Vec<u8>> {
+    let mut frames = distinct_frames(ColorType::Rgba8, count);
+    for (index, frame) in frames.iter_mut().enumerate() {
+        if alpha_from.is_some_and(|from| index as u32 >= from) {
+            frame[3] = 0x80;
+        }
+    }
+    frames
 }
 
 /// 色種別を落とす設定
@@ -826,6 +931,38 @@ fn output_color_type(bytes: &[u8]) -> png::ColorType {
         .color_type
 }
 
+/// 合成に使う画素表現
+///
+/// パレット参照の出力は [`Expansion`] が展開した後の表現になる。
+fn composite_color_type(bytes: &[u8]) -> ColorType {
+    let reader = png::Decoder::new(Cursor::new(bytes)).read_info().unwrap();
+    let info = reader.info();
+    match info.color_type {
+        png::ColorType::Rgb => ColorType::Rgb8,
+        png::ColorType::Rgba => ColorType::Rgba8,
+        png::ColorType::Indexed if info.trns.is_none() => ColorType::Rgb8,
+        png::ColorType::Indexed => ColorType::Rgba8,
+        other => panic!("扱わない色種別: {other:?}"),
+    }
+}
+
+/// PLTEに並ぶ色
+fn plte(bytes: &[u8]) -> Vec<u8> {
+    let reader = png::Decoder::new(Cursor::new(bytes)).read_info().unwrap();
+    reader
+        .info()
+        .palette
+        .as_deref()
+        .expect("PLTEが必要")
+        .to_vec()
+}
+
+/// tRNSに並ぶアルファ
+fn trns(bytes: &[u8]) -> Vec<u8> {
+    let reader = png::Decoder::new(Cursor::new(bytes)).read_info().unwrap();
+    reader.info().trns.as_deref().unwrap_or(&[]).to_vec()
+}
+
 /// RGBA8のフレームからアルファを落とす
 fn without_alpha(frame: &[u8]) -> Vec<u8> {
     frame
@@ -836,16 +973,11 @@ fn without_alpha(frame: &[u8]) -> Vec<u8> {
 
 /// 出力を合成し、RGBA8の入力と一致することを確かめる
 ///
-/// 出力がRGBのときは、入力からアルファを落としたものと比べる。
+/// アルファの落ちた出力は、入力からアルファを落としたものと比べる。
 fn assert_reduced_roundtrip(bytes: &[u8], input: &[Vec<u8>], expected: png::ColorType) {
     assert_eq!(output_color_type(bytes), expected);
 
-    let color_type = match expected {
-        png::ColorType::Rgb => ColorType::Rgb8,
-        png::ColorType::Rgba => ColorType::Rgba8,
-        other => panic!("扱わない色種別: {other:?}"),
-    };
-
+    let color_type = composite_color_type(bytes);
     let (_, decoded) = decode(bytes);
     assert_eq!(decoded.len(), input.len());
 
@@ -902,10 +1034,12 @@ fn deciding_early_produces_the_same_bytes_as_not_reducing() {
     assert_eq!(reduced, plain);
 }
 
-/// 落とす余地の無いRGB8の入力は、保留せずそのまま書き出す
+/// 色数が上限を超えるRGB8の入力は、先頭フレームで確定して溜めるのをやめる
+///
+/// 抱えるのは先頭フレームの1つだけで、書き出したバイト列は溜めない場合と変わらない。
 #[test]
-fn rgb_input_is_never_spooled() {
-    let input = frames(REDUCE_WIDTH, REDUCE_HEIGHT, ColorType::Rgb8, 4);
+fn rgb_input_over_the_color_limit_is_decided_on_the_first_frame() {
+    let input = distinct_frames(ColorType::Rgb8, 4);
     let plain = encode(REDUCE_WIDTH, REDUCE_HEIGHT, ColorType::Rgb8, &input);
     let (reduced, peak) = encode_with(
         REDUCE_WIDTH,
@@ -915,7 +1049,11 @@ fn rgb_input_is_never_spooled() {
     );
 
     assert_eq!(reduced, plain);
-    assert_eq!(peak, 0);
+    let frame_len = REDUCE_PIXELS * 3;
+    assert!(
+        (frame_len..frame_len * 2).contains(&peak),
+        "{frame_len} バイトの画素に対して抱えたのは {peak} バイト"
+    );
 }
 
 /// 全画素が不透明なら最後のフレームまで溜めてからRGBへ落とす
@@ -994,7 +1132,8 @@ fn spooled_frames_keep_their_rects_and_order() {
         &input,
     );
 
-    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Rgb);
+    // 4色しか無いためパレットで出る
+    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
 
     let (_, decoded) = decode(&bytes);
     let expected: Vec<(u32, u32, u32, u32)> = std::iter::once((0, 0, REDUCE_WIDTH, REDUCE_HEIGHT))
@@ -1032,7 +1171,8 @@ fn alpha_anywhere_inside_a_partial_rect_is_found() {
     const ORIGIN: (u32, u32) = (4, 2);
 
     for hole in [(0u32, 0u32), (1, 1), (BLOCK - 1, BLOCK - 1)] {
-        let base = vec![0xFFu8; REDUCE_FRAME_LEN];
+        // 色数の上限を超えさせて、アルファの有無だけで色種別が決まるようにする
+        let base = distinct_frames(ColorType::Rgba8, 1).remove(0);
         let mut changed = base.clone();
         for y in 0..BLOCK {
             for x in 0..BLOCK {
@@ -1068,9 +1208,10 @@ fn alpha_anywhere_inside_a_partial_rect_is_found() {
 
 /// 1フレームだけ現れる領域を持つRGBA8のフレーム列
 ///
+/// 色数は上限を超えるため、色種別はアルファの有無だけで決まる。
 /// `transparent` が真なら、先頭フレームから不透明でない画素を含む。
 fn transient_frames(transparent: bool) -> Vec<Vec<u8>> {
-    let mut base = vec![0xFFu8; REDUCE_FRAME_LEN];
+    let mut base = distinct_frames(ColorType::Rgba8, 1).remove(0);
     if transparent {
         base[3] = 0x80;
     }
@@ -1113,7 +1254,7 @@ fn disposal_after_the_spool_matches_not_reducing() {
 fn the_frame_after_a_commit_has_nothing_to_dispose() {
     const BLOCK: (u32, u32, u32, u32) = (2, 1, 3, 2);
 
-    let base = vec![0xFFu8; REDUCE_FRAME_LEN];
+    let base = distinct_frames(ColorType::Rgba8, 1).remove(0);
     let mut marked = base.clone();
     for y in 0..BLOCK.3 as usize {
         for x in 0..BLOCK.2 as usize {
@@ -1164,6 +1305,189 @@ fn spooled_frames_are_never_disposed() {
             .all(|op| matches!(op, png::DisposeOp::None))
     );
     assert_reduced_roundtrip(&bytes, &input, png::ColorType::Rgb);
+}
+
+/// 透過する色と不透明な色を混ぜたRGBA8のフレームを作る
+///
+/// 色は8種で、そのうち3種のアルファが255未満になる。
+fn mixed_alpha_frame() -> Vec<u8> {
+    (0..REDUCE_PIXELS)
+        .flat_map(|pixel| {
+            let color = (pixel % 8) as u8;
+            let alpha = if color < 3 { color * 0x40 } else { 0xFF };
+            [color, 0x40, 0x80, alpha]
+        })
+        .collect()
+}
+
+/// 色種別を落とす既定の設定で符号化する
+fn encode_reduced(color_type: ColorType, input: &[Vec<u8>]) -> Vec<u8> {
+    encode_with(
+        REDUCE_WIDTH,
+        REDUCE_HEIGHT,
+        reduce_config(color_type, DEFAULT_MAX_SPOOL_BYTES),
+        input,
+    )
+    .0
+}
+
+/// 色数が上限に収まる入力は、1色でも上限ちょうどでもパレットで出る
+#[test]
+fn an_input_within_the_color_limit_is_written_as_indexed_color() {
+    for colors in [1, 2, MAX_PALETTE_COLORS - 1, MAX_PALETTE_COLORS] {
+        let input = vec![palette_frame(colors, 0), palette_frame(colors, 0)];
+        let bytes = encode_reduced(ColorType::Rgba8, &input);
+
+        assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
+        assert_eq!(plte(&bytes).len() / 3, colors, "{colors} 色");
+    }
+}
+
+/// 色数が上限を1つ超えると、パレットをやめて入力の色種別へ落とす
+#[test]
+fn one_color_over_the_limit_gives_up_the_palette() {
+    let within = vec![palette_frame(MAX_PALETTE_COLORS, 0)];
+    let bytes = encode_reduced(ColorType::Rgba8, &within);
+    assert_reduced_roundtrip(&bytes, &within, png::ColorType::Indexed);
+
+    let beyond = vec![palette_frame(MAX_PALETTE_COLORS + 1, 0)];
+    let bytes = encode_reduced(ColorType::Rgba8, &beyond);
+    // 全画素が不透明なので、落とせるのはアルファまで
+    assert_reduced_roundtrip(&bytes, &beyond, png::ColorType::Rgb);
+}
+
+/// 収まるかどうかは全フレームの色の和集合で決める
+///
+/// フレームごとに数えると、どのフレームも上限に収まるためパレットで出てしまう。
+#[test]
+fn the_color_limit_is_measured_over_the_union_of_every_frame() {
+    const PER_FRAME: usize = 200;
+
+    let single = vec![palette_frame(PER_FRAME, 0)];
+    let bytes = encode_reduced(ColorType::Rgba8, &single);
+    assert_reduced_roundtrip(&bytes, &single, png::ColorType::Indexed);
+
+    let union = vec![
+        palette_frame(PER_FRAME, 0),
+        palette_frame(PER_FRAME, PER_FRAME),
+    ];
+    let bytes = encode_reduced(ColorType::Rgba8, &union);
+    assert_reduced_roundtrip(&bytes, &union, png::ColorType::Rgb);
+}
+
+/// アルファを持つ色はtRNSに載り、画素は元のまま戻る
+#[test]
+fn a_palette_keeps_the_alpha_of_every_color() {
+    let input = vec![mixed_alpha_frame()];
+    let bytes = encode_reduced(ColorType::Rgba8, &input);
+
+    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
+    assert_eq!(plte(&bytes).len() / 3, 8);
+}
+
+/// tRNSは透過する色のぶんだけで、末尾の不透明なエントリは省く
+///
+/// 仕様がエントリ数の不足を255として扱うため、後ろへ寄せた不透明な色は書かない。
+#[test]
+fn the_trailing_opaque_entries_are_omitted_from_the_trns() {
+    let input = vec![mixed_alpha_frame()];
+    let bytes = encode_reduced(ColorType::Rgba8, &input);
+
+    assert_eq!(trns(&bytes), [0x00, 0x40, 0x80]);
+}
+
+/// すべて不透明なパレットにはtRNSを書かない
+#[test]
+fn an_opaque_palette_is_written_without_a_trns() {
+    let input = vec![palette_frame(4, 0)];
+    let bytes = encode_reduced(ColorType::Rgba8, &input);
+
+    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
+    assert!(chunk_types(&bytes).iter().all(|kind| kind != b"tRNS"));
+}
+
+/// PLTEとtRNSは画素データより前に置く
+#[test]
+fn the_palette_chunks_come_before_the_pixel_data() {
+    let input = vec![mixed_alpha_frame()];
+    let bytes = encode_reduced(ColorType::Rgba8, &input);
+
+    let types = chunk_types(&bytes);
+    let at = |kind: &[u8; 4]| {
+        types
+            .iter()
+            .position(|t| t == kind)
+            .expect("チャンクが必要")
+    };
+
+    assert_eq!(at(b"IHDR"), 0);
+    assert!(at(b"PLTE") < at(b"tRNS"));
+    assert!(at(b"tRNS") < at(b"fcTL"));
+    assert!(at(b"acTL") < at(b"IDAT"));
+    assert!(at(b"fcTL") < at(b"IDAT"));
+}
+
+/// RGB8の入力もパレットへ落とす
+#[test]
+fn rgb_input_within_the_color_limit_is_written_as_indexed_color() {
+    let frame: Vec<u8> = palette_frame(16, 0)
+        .chunks_exact(4)
+        .flat_map(|pixel| pixel[..3].to_vec())
+        .collect();
+    let input = vec![frame.clone(), frame];
+    let bytes = encode_reduced(ColorType::Rgb8, &input);
+
+    assert_eq!(output_color_type(&bytes), png::ColorType::Indexed);
+    assert_eq!(plte(&bytes).len() / 3, 16);
+    assert!(chunk_types(&bytes).iter().all(|kind| kind != b"tRNS"));
+    assert_composites_to(&bytes, REDUCE_WIDTH, ColorType::Rgb8, &input);
+}
+
+/// 上限を超えるフレームが来たら、色数が収まっていてもパレットを諦める
+#[test]
+fn exceeding_the_spool_limit_gives_up_the_palette() {
+    let input = vec![palette_frame(4, 0), palette_frame(4, 8)];
+    let plain = encode(REDUCE_WIDTH, REDUCE_HEIGHT, ColorType::Rgba8, &input);
+    // 2フレーム目を溜められない上限
+    let limit = REDUCE_FRAME_LEN + REDUCE_FRAME_LEN / 2;
+    let (bytes, peak) = encode_with(
+        REDUCE_WIDTH,
+        REDUCE_HEIGHT,
+        reduce_config(ColorType::Rgba8, limit),
+        &input,
+    );
+
+    assert_eq!(bytes, plain);
+    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Rgba);
+    assert!(peak <= limit);
+}
+
+/// パレットで出る素材は、部分矩形とdispose_opをまたいでも可逆であること
+#[test]
+fn a_palette_survives_partial_rects() {
+    let input = transient_palette_frames();
+    let bytes = encode_reduced(ColorType::Rgba8, &input);
+
+    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
+    assert_eq!(
+        rects(&decode(&bytes).1)[1],
+        (2, 1, 3, 2),
+        "変わった領域だけを書く"
+    );
+}
+
+/// 1フレームだけ現れる領域を持つ、色数が上限に収まるRGBA8のフレーム列
+fn transient_palette_frames() -> Vec<Vec<u8>> {
+    let base = mixed_alpha_frame();
+    let mut marked = base.clone();
+    for y in 1..3usize {
+        for x in 2..5usize {
+            let start = (y * REDUCE_WIDTH as usize + x) * 4;
+            marked[start..start + 4].copy_from_slice(&[0xF0, 0xF1, 0xF2, 0x20]);
+        }
+    }
+
+    vec![base.clone(), marked.clone(), base.clone(), marked, base]
 }
 
 /// フィルタ戦略の検証に使うキャンバスの大きさ
@@ -1263,18 +1587,19 @@ fn both_filter_strategies_are_reversible_while_reducing_color() {
                 ..config(ColorType::Rgba8)
             };
 
+            // 全画素が不透明なので、パレットに収まるかによらずアルファは落ちる
             let (bytes, _) = encode_with(FILTER_WIDTH, FILTER_HEIGHT, config, &opaque);
-            assert_eq!(output_color_type(&bytes), png::ColorType::Rgb);
+            assert_eq!(composite_color_type(&bytes), ColorType::Rgb8);
             let expected: Vec<Vec<u8>> = opaque.iter().map(|f| without_alpha(f)).collect();
             assert_composites_to(&bytes, FILTER_WIDTH, ColorType::Rgb8, &expected);
 
-            // 透過を含む入力は、溜めずにそのまま書き出す経路へ移る
+            // 透過を含む入力はアルファを保つ
             let mut transparent = opaque.clone();
             for frame in &mut transparent {
                 frame[3] = 0x80;
             }
             let (bytes, _) = encode_with(FILTER_WIDTH, FILTER_HEIGHT, config, &transparent);
-            assert_eq!(output_color_type(&bytes), png::ColorType::Rgba);
+            assert_eq!(composite_color_type(&bytes), ColorType::Rgba8);
             assert_composites_to(&bytes, FILTER_WIDTH, ColorType::Rgba8, &transparent);
         }
     }

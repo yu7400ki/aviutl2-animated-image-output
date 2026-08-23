@@ -3,6 +3,7 @@
 use crate::alpha;
 use crate::delay::FrameDelay;
 use crate::diff::Rect;
+use crate::palette::{Colors, Palette};
 use crate::region;
 
 /// 溜めたフレーム1つ
@@ -16,7 +17,7 @@ pub(crate) struct Spooled {
 /// フレーム1つを溜めるのに、画素データとは別にかかるバイト数
 const FRAME_OVERHEAD: usize = size_of::<Spooled>();
 
-/// クロップ済みのRGBA8領域を、出力の色種別が決まるまで溜める
+/// クロップ済みの領域を、出力の色種別が決まるまで溜める
 pub(crate) struct Spool {
     frames: Vec<Spooled>,
     /// 抱えているメモリの概算バイト数
@@ -25,6 +26,8 @@ pub(crate) struct Spool {
     limit: usize,
     /// 不透明でない画素を見つけたか
     transparent: bool,
+    /// 溜めた領域に現れた色の和集合
+    colors: Colors,
 }
 
 impl Spool {
@@ -34,6 +37,7 @@ impl Spool {
             len: 0,
             limit,
             transparent: false,
+            colors: Colors::new(),
         }
     }
 
@@ -59,12 +63,27 @@ impl Spool {
         self.transparent
     }
 
+    /// 色の和集合がパレットに収まる数を超えたか
+    ///
+    /// 一度真になったら戻らないため、以降の走査は要らない。
+    pub(crate) fn colors_exceeded(&self) -> bool {
+        self.colors.exceeded()
+    }
+
+    /// 数えた色を並べてパレットにする
+    ///
+    /// # Panics
+    /// 色の和集合が収まる数を超えているとき。
+    pub(crate) fn take_palette(&mut self) -> Palette {
+        std::mem::replace(&mut self.colors, Colors::new()).into_palette()
+    }
+
     /// 溜めたフレームを、投入した順に返す
     pub(crate) fn frames(&self) -> &[Spooled] {
         &self.frames
     }
 
-    /// `data` から `rect` を切り出して溜め、その領域のアルファを調べる
+    /// `data` から `rect` を切り出して溜め、その領域のアルファと色を調べる
     ///
     /// 矩形の外は直前のフレームから変わっていないため、走査は矩形の中だけで足りる。
     pub(crate) fn push(
@@ -78,9 +97,10 @@ impl Spool {
         let mut region = Vec::new();
         region::crop(data, rect, stride, bpp, bpp, &mut region);
 
-        if !self.transparent {
+        if bpp == 4 && !self.transparent {
             self.transparent = alpha::has_transparency(&region);
         }
+        self.colors.observe(&region, bpp);
 
         self.len += region.len() + FRAME_OVERHEAD;
         self.frames.push(Spooled {
