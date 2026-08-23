@@ -92,15 +92,18 @@ fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
         info.rest_time_disp(frame, info.num_frames());
     }
 
-    if let Some(reduction) = encoder.color_reduction() {
-        logger::info(&color_reduction_message(reduction));
-    }
+    // 色種別は最後のフレームまでに決まるが、書き出しの成否は終端まで分からない
+    let reduction = encoder.color_reduction();
 
     encoder
         .finish()
         .map_err(|e| format!("エンコーダー終了エラー: {}", e))?
         .into_inner()
         .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
+
+    if let Some(reduction) = reduction {
+        logger::info(&color_reduction_message(reduction));
+    }
     Ok(())
 }
 
