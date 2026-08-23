@@ -226,10 +226,9 @@ mod avx2 {
         prev: &[u8],
         choice: &mut RowChoice,
     ) {
-        choice.begin(abs_sum(cur));
-
         // SAFETY: 呼び出し元がavx2の存在を確認している
         unsafe {
+            choice.begin(abs_sum(cur));
             let score = apply::<BPP, SUB>(cur, prev, &mut choice.candidate);
             choice.offer(SUB, score);
             let score = apply::<BPP, UP>(cur, prev, &mut choice.candidate);
@@ -245,8 +244,11 @@ mod avx2 {
     ///
     /// `_mm256_abs_epi8` は0x80を0x80のまま返すため、[`signed_abs`] と一致する。
     /// `_mm256_sad_epu8` は8バイトごとの総和を64bitレーンへ入れるので桁溢れしない。
+    ///
+    /// # Safety
+    /// AVX2が利用可能であること。
     #[target_feature(enable = "avx2")]
-    pub(super) fn abs_sum(bytes: &[u8]) -> u64 {
+    pub(super) unsafe fn abs_sum(bytes: &[u8]) -> u64 {
         let zero = _mm256_setzero_si256();
         let mut acc = zero;
 
@@ -257,7 +259,9 @@ mod avx2 {
             acc = _mm256_add_epi64(acc, _mm256_sad_epu8(_mm256_abs_epi8(v), zero));
         }
 
-        horizontal_sum(acc) + scalar::abs_sum(chunks.remainder())
+        // SAFETY: 呼び出し元がavx2の存在を確認している
+        let sum = unsafe { horizontal_sum(acc) };
+        sum + scalar::abs_sum(chunks.remainder())
     }
 
     /// [`scalar::apply`] のAVX2版
@@ -327,7 +331,8 @@ mod avx2 {
             i += LANES;
         }
 
-        sum += horizontal_sum(acc);
+        // SAFETY: 呼び出し元がavx2の存在を確認している
+        sum += unsafe { horizontal_sum(acc) };
         sum + scalar::apply_range::<BPP, FILTER>(cur, prev, out, i..cur.len())
     }
 
@@ -336,8 +341,11 @@ mod avx2 {
     /// `p = a + b - c` より `p - a = b - c`、`p - b = a - c`、`p - c = a + b - 2c`
     /// で、いずれも16bitに収まる。比較は仕様の `pa <= pb` と `pa <= pc`、`pb <= pc`
     /// の否定なので、同点では先の候補が残る。
+    ///
+    /// # Safety
+    /// AVX2が利用可能であること。
     #[target_feature(enable = "avx2")]
-    fn paeth_epi16(a: __m256i, b: __m256i, c: __m256i) -> __m256i {
+    unsafe fn paeth_epi16(a: __m256i, b: __m256i, c: __m256i) -> __m256i {
         let pa = _mm256_abs_epi16(_mm256_sub_epi16(b, c));
         let pb = _mm256_abs_epi16(_mm256_sub_epi16(a, c));
         let pc = _mm256_abs_epi16(_mm256_sub_epi16(
@@ -351,8 +359,11 @@ mod avx2 {
     }
 
     /// 64bitレーン4本の総和
+    ///
+    /// # Safety
+    /// AVX2が利用可能であること。
     #[target_feature(enable = "avx2")]
-    fn horizontal_sum(acc: __m256i) -> u64 {
+    unsafe fn horizontal_sum(acc: __m256i) -> u64 {
         let lanes = _mm_add_epi64(
             _mm256_castsi256_si128(acc),
             _mm256_extracti128_si256(acc, 1),
@@ -453,13 +464,14 @@ mod tests {
     fn filter_avx2(data: &[u8], stride: usize, bpp: usize) -> Vec<u8> {
         let mut out = Vec::new();
         if !data.is_empty() {
-            // SAFETY: 呼び出し元がavx2の存在を確認している
             match bpp {
-                3 => filter_rows(data, stride, &mut out, |cur, prev, choice| unsafe {
-                    avx2::select_row::<3>(cur, prev, choice)
+                3 => filter_rows(data, stride, &mut out, |cur, prev, choice| {
+                    // SAFETY: 呼び出し元がavx2の存在を確認している
+                    unsafe { avx2::select_row::<3>(cur, prev, choice) }
                 }),
-                _ => filter_rows(data, stride, &mut out, |cur, prev, choice| unsafe {
-                    avx2::select_row::<4>(cur, prev, choice)
+                _ => filter_rows(data, stride, &mut out, |cur, prev, choice| {
+                    // SAFETY: 呼び出し元がavx2の存在を確認している
+                    unsafe { avx2::select_row::<4>(cur, prev, choice) }
                 }),
             }
         }
