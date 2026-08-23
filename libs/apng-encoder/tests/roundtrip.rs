@@ -1,6 +1,8 @@
 //! 出力したAPNGを`png`クレートでデコードし、入力フレームと一致することを確認する
 
-use apng_encoder::{ColorType, Config, DEFAULT_MAX_SPOOL_BYTES, Encoder, Error, FrameDelay};
+use apng_encoder::{
+    ColorReduction, ColorType, Config, DEFAULT_MAX_SPOOL_BYTES, Encoder, Error, FrameDelay,
+};
 use std::io::{self, Cursor, Write};
 
 /// 決定的な擬似乱数でフレームの内容を作る
@@ -1764,4 +1766,100 @@ fn an_opaque_input_that_grows_without_alpha_keeps_its_alpha() {
         );
         assert_composites_to(&bytes, FILTER_WIDTH, ColorType::Rgba8, &input);
     }
+}
+
+/// 符号化して、色種別を落とした結果を取り出す
+fn reduction_of(config: Config, input: &[Vec<u8>]) -> Option<ColorReduction> {
+    let delay = FrameDelay::new(1001, 30000).unwrap();
+    let mut encoder = Encoder::new(
+        Vec::new(),
+        REDUCE_WIDTH,
+        REDUCE_HEIGHT,
+        input.len() as u32,
+        config,
+    )
+    .unwrap();
+    for data in input {
+        encoder.add_frame(data, delay).unwrap();
+    }
+    // 色種別は遅くとも最後のフレームで決まるため、終端の前に読める
+    let reduction = encoder.color_reduction();
+    encoder.finish().unwrap();
+    reduction
+}
+
+/// パレットで出したときは載せた色数まで分かる
+#[test]
+fn a_palette_is_reported_with_its_color_count() {
+    for colors in [1, 200, MAX_PALETTE_COLORS] {
+        let input = vec![palette_frame(colors, 0), palette_frame(colors, 0)];
+        assert_eq!(
+            reduction_of(
+                reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+                &input
+            ),
+            Some(ColorReduction::Palette {
+                colors: colors as u16
+            }),
+            "{colors} 色"
+        );
+    }
+}
+
+/// アルファを落としたことが分かる
+#[test]
+fn a_dropped_alpha_is_reported() {
+    let input = reducible_frames(4, None);
+    assert_eq!(
+        reduction_of(
+            reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+            &input
+        ),
+        Some(ColorReduction::AlphaDropped)
+    );
+}
+
+/// 入力の色種別のままだったことが分かる
+#[test]
+fn a_kept_color_type_is_reported() {
+    let transparent = reducible_frames(4, Some(0));
+    assert_eq!(
+        reduction_of(
+            reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+            &transparent
+        ),
+        Some(ColorReduction::Kept)
+    );
+
+    let rgb = distinct_frames(ColorType::Rgb8, 4);
+    assert_eq!(
+        reduction_of(
+            reduce_config(ColorType::Rgb8, DEFAULT_MAX_SPOOL_BYTES),
+            &rgb
+        ),
+        Some(ColorReduction::Kept)
+    );
+}
+
+/// 上限に達して解析をやめたことは、収まらなかった場合と区別して分かる
+#[test]
+fn an_abandoned_analysis_is_reported() {
+    let input = reducible_frames(4, None);
+    // 2フレーム目を溜められない上限
+    let limit = REDUCE_FRAME_LEN + REDUCE_FRAME_LEN / 2;
+    assert_eq!(
+        reduction_of(reduce_config(ColorType::Rgba8, limit), &input),
+        Some(ColorReduction::Abandoned)
+    );
+    assert_eq!(
+        reduction_of(reduce_config(ColorType::Rgba8, 0), &input),
+        Some(ColorReduction::Abandoned)
+    );
+}
+
+/// 落とす設定でなければ結果も無い
+#[test]
+fn nothing_is_reported_without_the_setting() {
+    let input = reducible_frames(4, None);
+    assert_eq!(reduction_of(config(ColorType::Rgba8), &input), None);
 }

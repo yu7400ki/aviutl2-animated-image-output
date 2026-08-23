@@ -204,11 +204,30 @@ impl FilterChoice {
 }
 
 /// 溜めたフレームから決まる出力の画素表現
+#[derive(Clone, Copy)]
 enum Decision {
     /// 溜めたフレームの内容だけで1つに定まった
     Fixed(Output),
     /// アルファを落とせるが、落とすと得かは圧縮するまで分からない
     Compare,
+    /// 溜めきれなくなったため、入力の色種別のままにする
+    Abandoned,
+}
+
+/// [`Config::reduce_color`] が出力の色種別に及ぼした結果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorReduction {
+    /// パレット参照へ落とした
+    Palette {
+        /// パレットに載せた色数
+        colors: u16,
+    },
+    /// アルファを落とした
+    AlphaDropped,
+    /// 色がパレットに収まらず、入力の色種別のままにした
+    Kept,
+    /// 溜めたフレームが上限に達し、解析を打ち切って入力の色種別のままにした
+    Abandoned,
 }
 
 /// 溜めたフレームから出力の画素表現を決める
@@ -294,6 +313,8 @@ pub struct Encoder<W: Write> {
     palette: Option<Palette>,
     /// 出力の色種別が決まるまでフレームを溜める領域
     spool: Option<Spool>,
+    /// 出力の色種別を落とした結果。決まるまでは `None`
+    reduction: Option<ColorReduction>,
     /// 溜めたバイト数の最大値
     peak_spool_bytes: usize,
     compressor: Compressor,
@@ -374,6 +395,7 @@ impl<W: Write> Encoder<W> {
             spool: config
                 .reduce_color
                 .then(|| Spool::new(config.max_spool_bytes)),
+            reduction: None,
             peak_spool_bytes: 0,
             compressor: Compressor::new(config.compression_level),
             pending: None,
@@ -396,6 +418,15 @@ impl<W: Write> Encoder<W> {
     /// 溜めたフレームのバイト数の最大値
     pub fn peak_spool_bytes(&self) -> usize {
         self.peak_spool_bytes
+    }
+
+    /// 出力の色種別を落とした結果
+    ///
+    /// [`Config::reduce_color`] が有効で、出力の色種別が決まった後に `Some` を返す。
+    /// 色種別は遅くとも最後のフレームで決まるため、全フレームを投入した後は必ず
+    /// `Some` になる。
+    pub fn color_reduction(&self) -> Option<ColorReduction> {
+        self.reduction
     }
 
     fn write_header(&mut self) -> Result<(), Error> {
@@ -598,7 +629,7 @@ impl<W: Write> Encoder<W> {
 
         // 抱えきれない大きさが来たら、入力の色種別で確定して溜めたぶんを流す
         if !spool.can_hold(region_len) {
-            self.commit(spool, Decision::Fixed(Output::from(self.input)))?;
+            self.commit(spool, Decision::Abandoned)?;
             return self.emit_frame(data, rect, delay);
         }
 
@@ -621,9 +652,18 @@ impl<W: Write> Encoder<W> {
         let output = match decision {
             Decision::Fixed(output) => output,
             Decision::Compare => self.choose_output(&frames),
+            Decision::Abandoned => Output::from(self.input),
         };
 
         self.palette = (output == Output::Indexed8).then(|| colors.into_palette());
+        self.reduction = Some(match (decision, output) {
+            (Decision::Abandoned, _) => ColorReduction::Abandoned,
+            (_, Output::Indexed8) => ColorReduction::Palette {
+                colors: self.palette.as_ref().map_or(0, Palette::len),
+            },
+            (_, Output::Rgb8) if self.input == ColorType::Rgba8 => ColorReduction::AlphaDropped,
+            _ => ColorReduction::Kept,
+        });
         self.output = output;
         self.write_header()?;
 

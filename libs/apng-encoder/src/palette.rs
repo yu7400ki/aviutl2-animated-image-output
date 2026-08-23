@@ -167,6 +167,11 @@ pub(crate) struct Palette {
 }
 
 impl Palette {
+    /// 載せた色数
+    pub(crate) fn len(&self) -> u16 {
+        self.colors.len() as u16
+    }
+
     /// PLTEチャンクのデータ部
     ///
     /// 添字順に3バイトのR,G,Bを並べたもの。
