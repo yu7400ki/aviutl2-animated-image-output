@@ -27,6 +27,14 @@ fn slot_of(color: u32) -> usize {
     (color.wrapping_mul(HASH_MULTIPLIER) >> (u32::BITS - TABLE_BITS)) as usize
 }
 
+/// 色の明るさの目安
+///
+/// 緑を重く青を軽く見る整数の重み付けで、絶対値ではなく色どうしの前後だけを使う。
+fn luminance(color: u32) -> u32 {
+    let (r, g, b) = (color & 0xFF, (color >> 8) & 0xFF, (color >> 16) & 0xFF);
+    r * 2 + g * 5 + b
+}
+
 /// 見つけた色1つ
 #[derive(Debug, Clone, Copy)]
 struct Entry {
@@ -34,8 +42,6 @@ struct Entry {
     color: u32,
     /// 表の上でこの色が占める位置
     slot: usize,
-    /// この色だった画素の数
-    count: u64,
 }
 
 /// 色から添字を引く表
@@ -100,33 +106,27 @@ impl Colors {
 
     fn scan<const BPP: usize>(&mut self, pixels: &[u8]) {
         for pixel in pixels.chunks_exact(BPP) {
-            if !self.count(pack::<BPP>(pixel)) {
+            if !self.insert(pack::<BPP>(pixel)) {
                 self.exceeded = true;
                 return;
             }
         }
     }
 
-    /// 色を1つ数える。上限を超えて入らなければ偽を返す
-    fn count(&mut self, color: u32) -> bool {
+    /// 色を1つ覚える。上限を超えて入らなければ偽を返す
+    fn insert(&mut self, color: u32) -> bool {
         let mut slot = slot_of(color);
         loop {
-            let value = self.table.values[slot];
-            if value == 0 {
+            if self.table.values[slot] == 0 {
                 if self.entries.len() == MAX_COLORS {
                     return false;
                 }
                 self.table.keys[slot] = color;
                 self.table.values[slot] = self.entries.len() as u16 + 1;
-                self.entries.push(Entry {
-                    color,
-                    slot,
-                    count: 1,
-                });
+                self.entries.push(Entry { color, slot });
                 return true;
             }
             if self.table.keys[slot] == color {
-                self.entries[value as usize - 1].count += 1;
                 return true;
             }
             slot = (slot + 1) & TABLE_MASK;
@@ -135,21 +135,15 @@ impl Colors {
 
     /// 数えた色を並べてパレットにする
     ///
-    /// 透過する色を前へ、その中では画素の多い色を前へ置く。前者はtRNSの末尾を
-    /// 省ける長さを伸ばし、後者は符号長の短い添字を若い値へ寄せる。並びが同じ色は
-    /// 見つけた順に残る。
+    /// 明るさの順に置く。隣り合う画素の色が近いほど添字も数として近くなるため、
+    /// 行ごとの適応フィルタが添字の面でも効く。明るさが同じ色は見つけた順に残る。
     ///
     /// # Panics
     /// 色数が上限を超えているとき。
     pub(crate) fn into_palette(mut self) -> Palette {
         assert!(!self.exceeded, "色数が上限を超えている");
 
-        self.entries.sort_by_key(|entry| {
-            (
-                entry.color >> 24 == u32::from(u8::MAX),
-                std::cmp::Reverse(entry.count),
-            )
-        });
+        self.entries.sort_by_key(|entry| luminance(entry.color));
 
         let mut table = self.table;
         for (index, entry) in self.entries.iter().enumerate() {
@@ -364,42 +358,49 @@ mod tests {
         assert_eq!(out, [0xAA, 0]);
     }
 
-    /// 透過する色が前に並び、tRNSの末尾の255が省かれる
+    /// 暗い色ほど前に並ぶ
     #[test]
-    fn transparent_colors_come_first_and_shorten_the_trns() {
+    fn darker_colors_come_first() {
+        let palette = palette_of(&[0x30, 0, 0, 0x10, 0, 0, 0x20, 0, 0], 3);
+        assert_eq!(palette.plte(), [0x10, 0, 0, 0x20, 0, 0, 0x30, 0, 0]);
+    }
+
+    /// 明るさが同じ色は見つけた順に並ぶ
+    #[test]
+    fn colors_of_the_same_luminance_keep_their_order() {
+        // 重み付けは (2, 5, 1) なので、この3色の明るさは等しい
+        let palette = palette_of(&[5, 0, 0, 0, 2, 0, 0, 0, 10], 3);
+        assert_eq!(palette.plte(), [5, 0, 0, 0, 2, 0, 0, 0, 10]);
+    }
+
+    /// アルファは並べ替えた後の添字と対応する
+    #[test]
+    fn the_trns_follows_the_palette_order() {
         let pixels = rgba(&[
+            [0x30, 0x30, 0x30, 0x80],
             [0x10, 0x10, 0x10, 0xFF],
             [0x20, 0x20, 0x20, 0x00],
-            [0x30, 0x30, 0x30, 0x80],
         ]);
         let palette = palette_of(&pixels, 4);
 
         assert_eq!(
             palette.plte(),
-            [0x20, 0x20, 0x20, 0x30, 0x30, 0x30, 0x10, 0x10, 0x10]
+            [0x10, 0x10, 0x10, 0x20, 0x20, 0x20, 0x30, 0x30, 0x30]
         );
-        assert_eq!(palette.trns(), [0x00, 0x80]);
+        assert_eq!(palette.trns(), [0xFF, 0x00, 0x80]);
     }
 
-    /// 画素の多い色ほど前に並ぶ
+    /// tRNSの末尾に並ぶ255は省かれる
     #[test]
-    fn frequent_colors_come_first() {
-        let mut pixels = rgba(&[[0x10, 0x10, 0x10, 0xFF]]);
-        pixels.extend(rgba(&[[0x20, 0x20, 0x20, 0xFF]; 3]));
-        pixels.extend(rgba(&[[0x30, 0x30, 0x30, 0xFF]; 2]));
-
+    fn the_trailing_opaque_entries_are_dropped_from_the_trns() {
+        let pixels = rgba(&[
+            [0x10, 0x10, 0x10, 0x00],
+            [0x40, 0x40, 0x40, 0xFF],
+            [0x80, 0x80, 0x80, 0xFF],
+        ]);
         let palette = palette_of(&pixels, 4);
-        assert_eq!(
-            palette.plte(),
-            [0x20, 0x20, 0x20, 0x30, 0x30, 0x30, 0x10, 0x10, 0x10]
-        );
-    }
 
-    /// 画素の数が同じ色は見つけた順に並ぶ
-    #[test]
-    fn colors_seen_the_same_number_of_times_keep_their_order() {
-        let palette = palette_of(&[0x30, 0, 0, 0x10, 0, 0, 0x20, 0, 0], 3);
-        assert_eq!(palette.plte(), [0x30, 0, 0, 0x10, 0, 0, 0x20, 0, 0]);
+        assert_eq!(palette.trns(), [0x00]);
     }
 
     /// すべて不透明ならtRNSは空になる
