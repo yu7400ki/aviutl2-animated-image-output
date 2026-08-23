@@ -1,4 +1,5 @@
-use crate::config::{COMPRESSION_LEVEL_RANGE, ColorFormat, Config};
+use crate::config::{ColorFormat, Config};
+use apng_encoder::COMPRESSION_LEVELS;
 use win32_dialog::{
     Dialog, MessageBox,
     layout::{FlexLayout, JustifyContent, SizeValue, labeled},
@@ -23,8 +24,8 @@ pub fn show_config_dialog(
     let compression_input = Number::new()
         .value(default_config.compression_level as i32)
         .range(
-            *COMPRESSION_LEVEL_RANGE.start() as i32,
-            *COMPRESSION_LEVEL_RANGE.end() as i32,
+            *COMPRESSION_LEVELS.start() as i32,
+            *COMPRESSION_LEVELS.end() as i32,
         );
 
     let dialog = Dialog::new("APNG出力設定");
@@ -47,13 +48,9 @@ pub fn show_config_dialog(
             }
             if !compression_input
                 .get_value::<u32>()
-                .is_ok_and(|level| COMPRESSION_LEVEL_RANGE.contains(&level))
+                .is_ok_and(|level| COMPRESSION_LEVELS.contains(&level))
             {
-                MessageBox::error(
-                    owner,
-                    "圧縮レベルの値が無効です。1-9の値を入力してください。",
-                    "エラー",
-                );
+                MessageBox::error(owner, &compression_error_message(), "エラー");
                 return;
             }
             handle.accept();
@@ -71,7 +68,7 @@ pub fn show_config_dialog(
         .with_gap(10.0)
         .with_layout(labeled("ループ回数 (0=無限ループ)", repeat_input.clone()))
         .with_layout(labeled("カラーフォーマット", color_combobox.clone()))
-        .with_layout(labeled("圧縮レベル (1-9)", compression_input.clone()))
+        .with_layout(labeled(&compression_label(), compression_input.clone()))
         .with_layout(
             FlexLayout::row()
                 .with_gap(10.0)
@@ -99,4 +96,20 @@ pub fn show_config_dialog(
         },
         compression_level: compression_input.get_value().map_err(|_| ())?,
     }))
+}
+
+fn compression_label() -> String {
+    format!(
+        "圧縮レベル ({}-{})",
+        COMPRESSION_LEVELS.start(),
+        COMPRESSION_LEVELS.end()
+    )
+}
+
+fn compression_error_message() -> String {
+    format!(
+        "圧縮レベルの値が無効です。{}-{}の値を入力してください。",
+        COMPRESSION_LEVELS.start(),
+        COMPRESSION_LEVELS.end()
+    )
 }

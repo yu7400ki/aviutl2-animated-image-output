@@ -1,9 +1,7 @@
+use apng_encoder::COMPRESSION_LEVELS;
 pub use aviutl2::ColorFormat;
 use aviutl2::IniConfig;
 use aviutl2::ini::{Ini, Properties};
-
-/// 圧縮レベルの有効範囲
-pub const COMPRESSION_LEVEL_RANGE: std::ops::RangeInclusive<u32> = 1..=9;
 
 #[derive(Clone)]
 pub struct Config {
@@ -41,7 +39,7 @@ impl IniConfig for Config {
         let compression_level = section
             .and_then(|s| s.get("compression_level"))
             .and_then(|s| s.parse::<u32>().ok())
-            .filter(|level| COMPRESSION_LEVEL_RANGE.contains(level))
+            .filter(|level| COMPRESSION_LEVELS.contains(level))
             .unwrap_or(default.compression_level);
 
         Self {

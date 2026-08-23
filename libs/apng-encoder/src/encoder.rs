@@ -7,6 +7,7 @@ use crate::error::Error;
 use crate::filter;
 use crate::zlib::Compressor;
 use std::io::Write;
+use std::ops::RangeInclusive;
 
 /// 前のフレームを消さずに次のフレームを描画する
 const DISPOSE_OP_NONE: u8 = 0;
@@ -40,12 +41,15 @@ impl ColorType {
     }
 }
 
+/// [`Config::compression_level`] に指定できる範囲
+pub const COMPRESSION_LEVELS: RangeInclusive<u32> = 1..=9;
+
 /// エンコード設定
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
     /// 入力フレームの色種別
     pub color_type: ColorType,
-    /// deflateの圧縮レベル (1..=9)
+    /// deflateの圧縮レベル ([`COMPRESSION_LEVELS`] の範囲)
     pub compression_level: u32,
     /// アニメーションの再生回数 (0で無限ループ)
     pub num_plays: u32,
@@ -102,7 +106,7 @@ impl<W: Write> Encoder<W> {
         if num_frames == 0 {
             return Err(Error::InvalidFrameCount);
         }
-        if !(1..=9).contains(&config.compression_level) {
+        if !COMPRESSION_LEVELS.contains(&config.compression_level) {
             return Err(Error::InvalidCompressionLevel(config.compression_level));
         }
 

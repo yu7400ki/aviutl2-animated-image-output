@@ -9,5 +9,5 @@ mod filter;
 mod zlib;
 
 pub use delay::FrameDelay;
-pub use encoder::{ColorType, Config, Encoder};
+pub use encoder::{COMPRESSION_LEVELS, ColorType, Config, Encoder};
 pub use error::Error;
