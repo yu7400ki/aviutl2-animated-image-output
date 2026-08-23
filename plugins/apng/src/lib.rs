@@ -1,7 +1,9 @@
 mod config;
 mod dialog;
 
-use apng_encoder::{ColorType, Config as EncoderConfig, Encoder, FrameDelay};
+use apng_encoder::{
+    ColorType, Config as EncoderConfig, DEFAULT_MAX_SPOOL_BYTES, Encoder, FrameDelay,
+};
 use aviutl2::{
     FileFilter, IniConfig, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
     register_logger, register_output_plugin,
@@ -26,6 +28,8 @@ fn encoder_config(config: &Config) -> EncoderConfig {
         },
         compression_level: config.compression_level,
         num_plays: config.repeat,
+        reduce_color: false,
+        max_spool_bytes: DEFAULT_MAX_SPOOL_BYTES,
     }
 }
 
