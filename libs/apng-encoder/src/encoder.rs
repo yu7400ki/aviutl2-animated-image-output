@@ -206,6 +206,63 @@ impl FilterChoice {
     }
 }
 
+/// blend_op=OVERの候補を試すのをやめるまでの連敗数
+///
+/// 候補が立つかどうかは矩形の中身で決まるため、素材によっては何十フレームも
+/// 立ち続けて負け続ける。数フレームで見切ると勝ち負けの揺れを拾ってしまうので、
+/// 傾きがはっきりするまでの回数を取る。
+const BLEND_LOSS_STREAK: u32 = 6;
+
+/// 連敗した後、blend_op=OVERの候補を立てないフレーム数
+///
+/// 素材の性質は途中で変わるため、休みを置いてまた試す。長く休むほど圧縮の回数は
+/// 減るが、変わり目を見つけるのが遅れる。
+const BLEND_REST_FRAMES: u32 = 8;
+
+/// blend_op=OVERの候補を立てるかどうかの間合い
+///
+/// 候補は圧縮するまで採否が決まらず、負けた側の圧縮はそのまま無駄になる。
+/// [`BLEND_LOSS_STREAK`] 回続けて負けたら [`BLEND_REST_FRAMES`] フレーム
+/// 立てるのをやめ、休みが明けたらまた試す。一度でも採れば連敗は解ける。
+struct BlendPacing {
+    /// 採られないまま続いた回数
+    losses: u32,
+    /// 残りの休みフレーム数
+    resting: u32,
+}
+
+impl BlendPacing {
+    fn new() -> Self {
+        BlendPacing {
+            losses: 0,
+            resting: 0,
+        }
+    }
+
+    /// 候補を立てるか。休んでいる間は1フレームぶん消費して偽を返す
+    fn should_try(&mut self) -> bool {
+        if self.resting == 0 {
+            return true;
+        }
+        self.resting -= 1;
+        false
+    }
+
+    /// 立てた候補が採られたかどうかを記録する
+    fn record(&mut self, taken: bool) {
+        if taken {
+            self.losses = 0;
+            return;
+        }
+
+        self.losses += 1;
+        if self.losses == BLEND_LOSS_STREAK {
+            self.losses = 0;
+            self.resting = BLEND_REST_FRAMES;
+        }
+    }
+}
+
 /// 溜めたフレームから決まる出力の画素表現
 #[derive(Clone, Copy)]
 enum Decision {
@@ -338,6 +395,8 @@ pub struct Encoder<W: Write> {
     over: Vec<u8>,
     /// blend_opの候補を比べるために、もう一方の候補を圧縮しておく領域
     blend_probed: Vec<u8>,
+    /// blend_op=OVERの候補を立てるかどうかの間合い
+    blend_pacing: BlendPacing,
 }
 
 impl<W: Write> Encoder<W> {
@@ -408,6 +467,7 @@ impl<W: Write> Encoder<W> {
             dispose_probed: Vec::new(),
             over: Vec::new(),
             blend_probed: Vec::new(),
+            blend_pacing: BlendPacing::new(),
         };
         if encoder.spool.is_none() {
             encoder.write_header()?;
@@ -618,7 +678,8 @@ impl<W: Write> Encoder<W> {
     /// [`Self::compressed`] へ、そのプローブを戻り値へ残す。同じ大きさならSOURCEを採る。
     ///
     /// アルファを持たない出力には重ねる先が無いため、候補が立つのは出力がRGBA8のとき
-    /// だけになる。先頭フレームはキャンバスがまだ空で、重ねる先が無い。
+    /// だけになる。先頭フレームはキャンバスがまだ空で、重ねる先が無い。負けが続く間は
+    /// [`BlendPacing`] が候補を立てるのを休ませる。
     fn choose_blend(
         &mut self,
         data: &[u8],
@@ -627,6 +688,9 @@ impl<W: Write> Encoder<W> {
         source: Option<Probe>,
     ) -> (u8, Option<Probe>) {
         if self.output != Output::Rgba8 || self.frames_accepted == 0 {
+            return (BLEND_OP_SOURCE, source);
+        }
+        if !self.blend_pacing.should_try() {
             return (BLEND_OP_SOURCE, source);
         }
 
@@ -644,7 +708,9 @@ impl<W: Write> Encoder<W> {
             std::mem::swap(&mut self.compressed, &mut self.blend_probed);
             let over_probe = self.compress(&over, rect.width as usize * out_bpp, out_bpp);
 
-            if self.compressed.len() < source_len {
+            let taken = self.compressed.len() < source_len;
+            self.blend_pacing.record(taken);
+            if taken {
                 (BLEND_OP_OVER, over_probe)
             } else {
                 std::mem::swap(&mut self.compressed, &mut self.blend_probed);
@@ -1461,6 +1527,37 @@ mod tests {
             choice.record(probe(100, 120));
         }
         assert_eq!(choice.fixed, Some(filter::Strategy::Adaptive));
+    }
+
+    /// 連敗が続くと候補を立てるのを休み、休みが明けたらまた試す
+    #[test]
+    fn the_pacing_rests_after_a_streak_of_losses() {
+        let mut pacing = BlendPacing::new();
+        for _ in 0..BLEND_LOSS_STREAK {
+            assert!(pacing.should_try());
+            pacing.record(false);
+        }
+
+        for frame in 0..BLEND_REST_FRAMES {
+            assert!(!pacing.should_try(), "休み {frame} フレーム目");
+        }
+        assert!(pacing.should_try());
+    }
+
+    /// 候補が採られると連敗は解ける
+    #[test]
+    fn a_taken_candidate_clears_the_losses() {
+        let mut pacing = BlendPacing::new();
+        for _ in 0..BLEND_LOSS_STREAK - 1 {
+            pacing.record(false);
+        }
+        pacing.record(true);
+
+        for _ in 0..BLEND_LOSS_STREAK - 1 {
+            assert!(pacing.should_try());
+            pacing.record(false);
+        }
+        assert!(pacing.should_try());
     }
 
     /// 合計が同じならフィルタを掛けない方へ固める
