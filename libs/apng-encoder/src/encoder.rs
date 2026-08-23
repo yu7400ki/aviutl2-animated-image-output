@@ -1236,6 +1236,25 @@ mod tests {
         }
     }
 
+    /// フレームごとの、圧縮した本体のバイト数
+    fn body_lengths(bytes: &[u8]) -> Vec<usize> {
+        let mut lengths = Vec::new();
+        let mut offset = chunk::SIGNATURE.len();
+
+        while offset + 12 <= bytes.len() {
+            let len = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            match &bytes[offset + 4..offset + 8] {
+                b"IDAT" => lengths.push(len),
+                // fdATは先頭4バイトが連番
+                b"fdAT" => lengths.push(len - 4),
+                _ => {}
+            }
+            offset += 12 + len;
+        }
+
+        lengths
+    }
+
     /// フレームごとのフィルタ種別バイト
     fn filter_types(bytes: &[u8], bpp: usize) -> Vec<Vec<u8>> {
         written_frames(bytes)
@@ -1527,6 +1546,48 @@ mod tests {
             choice.record(probe(100, 120));
         }
         assert_eq!(choice.fixed, Some(filter::Strategy::Adaptive));
+    }
+
+    /// プローブに記録するのは、書き出す候補を圧縮したときのバイト数
+    ///
+    /// 2フレーム目は矩形の中身が一様になり、潰した候補は周期的な穴が空くぶん大きい。
+    /// 採らなかった候補を記録すると、以降の戦略が書き出していない大きさで決まる。
+    #[test]
+    fn the_probe_records_the_candidate_that_is_written() {
+        const PIXELS: usize = (WIDTH * HEIGHT) as usize;
+        /// まだらに置き換える画素の間隔
+        const STEP: usize = 7;
+
+        let uniform = |value: u8| with_alpha(&vec![value; PIXELS * 3]);
+        let mut speckled = uniform(0x30);
+        for pixel in (0..PIXELS).step_by(STEP) {
+            speckled[pixel * 4..pixel * 4 + 4].copy_from_slice(&[0xC0, 0xB0, 0xA0, 0xFF]);
+        }
+        let input = vec![speckled, uniform(0x30), uniform(0x50), uniform(0x70)];
+        assert_eq!(input.len(), PROBE_FRAMES as usize);
+
+        let mut encoder =
+            Encoder::new(Vec::new(), WIDTH, HEIGHT, input.len() as u32, rgba_config()).unwrap();
+        let mut recorded = Vec::new();
+        let mut totals = (0u64, 0u64);
+        for frame in &input {
+            encoder
+                .add_frame(frame, FrameDelay::new(1, 30).unwrap())
+                .unwrap();
+            let choice = &encoder.filter_choice;
+            recorded.push((
+                (choice.adaptive_bytes - totals.0) as usize,
+                (choice.unfiltered_bytes - totals.1) as usize,
+            ));
+            totals = (choice.adaptive_bytes, choice.unfiltered_bytes);
+        }
+        let bytes = encoder.finish().unwrap();
+
+        let bodies = body_lengths(&bytes);
+        assert_eq!(bodies.len(), input.len());
+        for (index, ((adaptive, unfiltered), body)) in recorded.iter().zip(&bodies).enumerate() {
+            assert_eq!(adaptive.min(unfiltered), body, "フレーム {index}");
+        }
     }
 
     /// 連敗が続くと候補を立てるのを休み、休みが明けたらまた試す

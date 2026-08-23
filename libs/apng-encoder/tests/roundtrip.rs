@@ -1042,6 +1042,21 @@ fn a_rect_without_an_unchanged_pixel_stays_on_source() {
     );
 }
 
+/// 潰しても切り出した内容が変わらない矩形はSOURCEで書く
+///
+/// 変化していない画素が元から完全な透明なら、潰す前と後で1バイトも変わらず、
+/// 圧縮後の大きさも並ぶ。
+#[test]
+fn a_tie_keeps_the_source_blend() {
+    let clear = vec![0u8; BLEND_PIXELS * 4];
+    let changed = with_opaque_corners(&clear);
+
+    assert_blend(
+        &[clear, changed],
+        &[png::BlendOp::Source, png::BlendOp::Source],
+    );
+}
+
 /// 潰した画素が並びを乱す矩形は、そのまま書いた方が小さくSOURCEで書く
 ///
 /// 変化していない画素が散らばっていると、潰した跡が周期的な穴になる。
@@ -1125,6 +1140,47 @@ fn frames_spooled_for_the_color_type_are_written_with_source() {
         ]
     );
     assert_composites_to(&bytes, BLEND_WIDTH, ColorType::Rgba8, &input);
+}
+
+/// 捨てたフレームにしか無い内容は、復元されたキャンバスとの差分として残る
+///
+/// 重ねる先を捨てたフレームにすると、そこと一致する画素が潰れて矩形から消える。
+#[test]
+fn an_over_rect_after_a_disposal_keeps_what_the_restored_canvas_lacks() {
+    const MARK: [u8; 4] = [0xFF, 0x00, 0x00, 0xFF];
+    const SPOT: [u8; 4] = [0x00, 0xFF, 0x00, 0xFF];
+    /// 1フレームだけ現れる帯の上端
+    const BAND: u32 = 9;
+
+    let base = blend_frame(3);
+    let mut restored = base.clone();
+    set_rgba(&mut restored, 3, 2, MARK);
+    set_rgba(&mut restored, 9, 6, SPOT);
+    let mut transient = restored.clone();
+    let overlay = blend_frame(4);
+    for y in BAND..BLEND_HEIGHT {
+        for x in 0..BLEND_WIDTH {
+            let at = (y as usize * BLEND_WIDTH as usize + x as usize) * 4;
+            let color = [overlay[at], overlay[at + 1], overlay[at + 2], 0xFF];
+            set_rgba(&mut transient, x, y, color);
+        }
+    }
+
+    let input = vec![base, transient, restored];
+    let bytes = encode(BLEND_WIDTH, BLEND_HEIGHT, ColorType::Rgba8, &input);
+    let (_, decoded) = decode(&bytes);
+
+    assert_eq!(decoded[1].control.dispose_op, png::DisposeOp::Previous);
+    assert_eq!(blend_ops(&decoded)[2], png::BlendOp::Over);
+    // 矩形は2画素の外接矩形で、その両端だけが復元されたキャンバスと違う
+    let control = decoded[2].control;
+    assert_eq!((control.x_offset, control.y_offset), (3, 2));
+    assert_eq!((control.width, control.height), (7, 5));
+    let region = &decoded[2].data;
+    assert_eq!(region.len(), 7 * 5 * 4);
+    assert_eq!(&region[..4], &MARK);
+    assert_eq!(&region[region.len() - 4..], &SPOT);
+    assert!(region[4..region.len() - 4].iter().all(|&byte| byte == 0));
 }
 
 /// アルファを持たない出力にはOVERを使わない
