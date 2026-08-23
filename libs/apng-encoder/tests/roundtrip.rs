@@ -1142,6 +1142,30 @@ fn spooled_frames_keep_their_rects_and_order() {
     assert_eq!(rects(&decoded), expected);
 }
 
+/// 溜めたフレームは、RGBへ落ちる経路でも矩形と順序を保つ
+#[test]
+fn spooled_frames_keep_their_rects_and_order_when_reduced_to_rgb() {
+    // 色数が上限を超えるので、最後のフレームまで溜めてからRGBへ落ちる
+    let mut input = distinct_frames(ColorType::Rgba8, 1);
+    let positions = [(1u32, 1u32), (6, 4), (3, 2)];
+    for (index, &(x, y)) in positions.iter().enumerate() {
+        let mut frame = input.last().unwrap().clone();
+        let start = (y as usize * REDUCE_WIDTH as usize + x as usize) * 4;
+        frame[start..start + 3].fill(0x10 + index as u8);
+        input.push(frame);
+    }
+
+    let bytes = encode_reduced(ColorType::Rgba8, &input);
+
+    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Rgb);
+
+    let (_, decoded) = decode(&bytes);
+    let expected: Vec<(u32, u32, u32, u32)> = std::iter::once((0, 0, REDUCE_WIDTH, REDUCE_HEIGHT))
+        .chain(positions.iter().map(|&(x, y)| (x, y, 1, 1)))
+        .collect();
+    assert_eq!(rects(&decoded), expected);
+}
+
 /// 1フレームだけの入力も、そのフレームを見てから色種別が決まる
 #[test]
 fn a_single_frame_input_is_decided_on_that_frame() {
