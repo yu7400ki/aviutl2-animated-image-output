@@ -3,7 +3,7 @@
 use crate::alpha;
 use crate::delay::FrameDelay;
 use crate::diff::Rect;
-use crate::palette::{Colors, Palette};
+use crate::palette::Colors;
 use crate::region;
 
 /// 溜めたフレーム1つ
@@ -70,17 +70,9 @@ impl Spool {
         self.colors.exceeded()
     }
 
-    /// 数えた色を並べてパレットにする
-    ///
-    /// # Panics
-    /// 色の和集合が収まる数を超えているとき。
-    pub(crate) fn take_palette(&mut self) -> Palette {
-        std::mem::replace(&mut self.colors, Colors::new()).into_palette()
-    }
-
-    /// 溜めたフレームを、投入した順に返す
-    pub(crate) fn frames(&self) -> &[Spooled] {
-        &self.frames
+    /// 溜めたフレームを投入した順に、色の和集合と合わせて取り出す
+    pub(crate) fn into_parts(self) -> (Vec<Spooled>, Colors) {
+        (self.frames, self.colors)
     }
 
     /// `data` から `rect` を切り出して溜め、その領域のアルファと色を調べる
@@ -146,7 +138,7 @@ mod tests {
             spool.push(&data, whole(), delay(), STRIDE, 4);
         }
 
-        let heads: Vec<u8> = spool.frames().iter().map(|f| f.data[0]).collect();
+        let heads: Vec<u8> = spool.into_parts().0.iter().map(|f| f.data[0]).collect();
         assert_eq!(heads, [0x10, 0x20, 0x30]);
     }
 
@@ -163,7 +155,7 @@ mod tests {
         spool.push(&frame(0xFF), rect, delay(), STRIDE, 4);
 
         assert_eq!(spool.len(), 2 * 2 * 4 + FRAME_OVERHEAD);
-        assert_eq!(spool.frames()[0].rect, rect);
+        assert_eq!(spool.into_parts().0[0].rect, rect);
     }
 
     #[test]

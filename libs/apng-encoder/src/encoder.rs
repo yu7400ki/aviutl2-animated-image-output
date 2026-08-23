@@ -584,14 +584,15 @@ impl<W: Write> Encoder<W> {
     }
 
     /// 出力の画素表現を確定し、ヘッダに続けて溜めたフレームを書き出す
-    fn commit(&mut self, mut spool: Spool, output: Output) -> Result<(), Error> {
-        self.palette = (output == Output::Indexed8).then(|| spool.take_palette());
+    fn commit(&mut self, spool: Spool, output: Output) -> Result<(), Error> {
+        let (frames, colors) = spool.into_parts();
+        self.palette = (output == Output::Indexed8).then(|| colors.into_palette());
         self.output = output;
         self.write_header()?;
 
         let in_bpp = self.bytes_per_pixel;
         let out_bpp = output.bytes_per_pixel();
-        for frame in spool.frames() {
+        for frame in &frames {
             let region_stride = frame.rect.width as usize * out_bpp;
             let probe = if in_bpp == out_bpp {
                 self.compress(&frame.data, region_stride, out_bpp)

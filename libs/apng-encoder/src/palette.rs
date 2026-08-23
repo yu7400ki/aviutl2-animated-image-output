@@ -1,7 +1,7 @@
 //! 色の和集合の集計とパレットの組み立て
 
 /// パレットに収められる色数の上限
-pub(crate) const MAX_COLORS: usize = 256;
+const MAX_COLORS: usize = 256;
 
 /// 表の添字に使うビット数
 const TABLE_BITS: u32 = 10;
@@ -254,12 +254,12 @@ mod tests {
         colors.into_palette()
     }
 
+    /// 1画素だけの入力は1エントリのパレットになる
     #[test]
-    fn an_empty_input_yields_an_empty_palette() {
-        let palette = palette_of(&[], 4);
-        assert_eq!(palette.plte().len() / 3, 0);
-        assert!(palette.plte().is_empty());
-        assert!(palette.trns().is_empty());
+    fn a_single_pixel_yields_a_one_entry_palette() {
+        let palette = palette_of(&[1, 2, 3, 0x80], 4);
+        assert_eq!(palette.plte(), [1, 2, 3]);
+        assert_eq!(palette.trns(), [0x80]);
     }
 
     /// 同じ色の繰り返しは1つにまとまる
