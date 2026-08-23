@@ -47,6 +47,14 @@ impl ColorType {
 pub const COMPRESSION_LEVELS: RangeInclusive<u32> = 1..=9;
 
 /// [`Config::max_spool_bytes`] の目安となる値
+///
+/// PNGの色種別はファイル全体で1つなので、出力の色種別は全フレームを見るまで
+/// 決まらない。フレームを1回しか取得しない前提では、決まるまでのフレームを
+/// エンコーダが抱えることになり、その量は素材の大きさとフレーム数に比例する。
+///
+/// この512MiBは、1920x1080のRGBA8 (1フレーム約8.29MB) が全画面差分で続く場合の
+/// 64フレーム、30fpsで約2.1秒に相当する。これを超える長さのHD素材では
+/// [`Config::reduce_color`] は色種別を落とさず、入力の色種別のまま書き出す。
 pub const DEFAULT_MAX_SPOOL_BYTES: usize = 512 << 20;
 
 /// エンコード設定
