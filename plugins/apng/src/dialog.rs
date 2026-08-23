@@ -1,8 +1,8 @@
-use crate::config::{ColorFormat, CompressionType, Config, FilterType};
+use crate::config::{COMPRESSION_LEVEL_RANGE, ColorFormat, Config};
 use win32_dialog::{
     Dialog, MessageBox,
     layout::{FlexLayout, JustifyContent, SizeValue, labeled},
-    widget::{Button, CheckBox, ComboBox, Number},
+    widget::{Button, ComboBox, Number},
 };
 use windows::Win32::Foundation::HWND;
 
@@ -20,44 +20,12 @@ pub fn show_config_dialog(
         ColorFormat::Rgba32 => 1,
     });
 
-    let compression_options = vec![
-        CompressionType::Default.into(),
-        CompressionType::Fast.into(),
-        CompressionType::Best.into(),
-    ];
-    let compression_combobox =
-        ComboBox::new(compression_options).selected(match default_config.compression_type {
-            CompressionType::Default => 0,
-            CompressionType::Fast => 1,
-            CompressionType::Best => 2,
-        });
-
-    let filter_options = vec![
-        FilterType::None.into(),
-        FilterType::Sub.into(),
-        FilterType::Up.into(),
-        FilterType::Average.into(),
-        FilterType::Paeth.into(),
-    ];
-    let filter_combobox =
-        ComboBox::new(filter_options).selected(match default_config.filter_type {
-            FilterType::None => 0,
-            FilterType::Sub => 1,
-            FilterType::Up => 2,
-            FilterType::Average => 3,
-            FilterType::Paeth => 4,
-        });
-
-    // アダプティブフィルターが有効な間はフィルター選択を無効化する
-    if default_config.adaptive_filter {
-        filter_combobox.set_enabled(false);
-    }
-    let adaptive_filter_checkbox = CheckBox::new("アダプティブフィルター")
-        .checked(default_config.adaptive_filter)
-        .on_change({
-            let filter_combobox = filter_combobox.clone();
-            move |checked| filter_combobox.set_enabled(!checked)
-        });
+    let compression_input = Number::new()
+        .value(default_config.compression_level as i32)
+        .range(
+            *COMPRESSION_LEVEL_RANGE.start() as i32,
+            *COMPRESSION_LEVEL_RANGE.end() as i32,
+        );
 
     let dialog = Dialog::new("APNG出力設定");
     let handle = dialog.handle();
@@ -66,11 +34,24 @@ pub fn show_config_dialog(
     let ok_button = Button::primary("OK").on_click({
         let handle = handle.clone();
         let repeat_input = repeat_input.clone();
+        let compression_input = compression_input.clone();
         move || {
+            let owner = handle.hwnd();
             if repeat_input.get_value::<u32>().is_err() {
                 MessageBox::error(
-                    handle.hwnd(),
-                    "無効な数値です。正しい数値を入力してください。",
+                    owner,
+                    "ループ回数の値が無効です。正しい数値を入力してください。",
+                    "エラー",
+                );
+                return;
+            }
+            if !compression_input
+                .get_value::<u32>()
+                .is_ok_and(|level| COMPRESSION_LEVEL_RANGE.contains(&level))
+            {
+                MessageBox::error(
+                    owner,
+                    "圧縮レベルの値が無効です。1-9の値を入力してください。",
                     "エラー",
                 );
                 return;
@@ -90,9 +71,7 @@ pub fn show_config_dialog(
         .with_gap(10.0)
         .with_layout(labeled("ループ回数 (0=無限ループ)", repeat_input.clone()))
         .with_layout(labeled("カラーフォーマット", color_combobox.clone()))
-        .with_layout(labeled("圧縮", compression_combobox.clone()))
-        .with_widget(adaptive_filter_checkbox.clone())
-        .with_layout(labeled("フィルター", filter_combobox.clone()))
+        .with_layout(labeled("圧縮レベル (1-9)", compression_input.clone()))
         .with_layout(
             FlexLayout::row()
                 .with_gap(10.0)
@@ -118,20 +97,6 @@ pub fn show_config_dialog(
             1 => ColorFormat::Rgba32,
             _ => Default::default(),
         },
-        compression_type: match compression_combobox.selected_index() {
-            0 => CompressionType::Default,
-            1 => CompressionType::Fast,
-            2 => CompressionType::Best,
-            _ => Default::default(),
-        },
-        filter_type: match filter_combobox.selected_index() {
-            0 => FilterType::None,
-            1 => FilterType::Sub,
-            2 => FilterType::Up,
-            3 => FilterType::Average,
-            4 => FilterType::Paeth,
-            _ => Default::default(),
-        },
-        adaptive_filter: adaptive_filter_checkbox.is_checked(),
+        compression_level: compression_input.get_value().map_err(|_| ())?,
     }))
 }

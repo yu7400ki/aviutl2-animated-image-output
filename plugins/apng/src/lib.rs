@@ -1,13 +1,14 @@
 mod config;
 mod dialog;
 
+use apng_encoder::{ColorType, Config as EncoderConfig, Encoder, FrameDelay};
 use aviutl2::{
     FileFilter, IniConfig, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
     register_logger, register_output_plugin,
 };
 use config::{ColorFormat, Config};
 use dialog::show_config_dialog;
-use png::{BitDepth, ColorType, Encoder};
+use std::io::BufWriter;
 use win32_dialog::MessageBox;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
 
@@ -16,58 +17,50 @@ fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
 
     let output_file =
         std::fs::File::create(&output_path).map_err(|e| format!("ファイル作成エラー: {}", e))?;
-    let mut encoder = Encoder::new(output_file, info.width() as u32, info.height() as u32);
 
-    let color_type = if config.color_format == ColorFormat::Rgba32 {
-        ColorType::Rgba
-    } else {
-        ColorType::Rgb
+    let color_type = match config.color_format {
+        ColorFormat::Rgb24 => ColorType::Rgb8,
+        ColorFormat::Rgba32 => ColorType::Rgba8,
     };
 
-    encoder.set_color(color_type);
-    encoder.set_depth(BitDepth::Eight);
-    encoder.set_compression(config.compression_type.into());
-
-    if config.adaptive_filter {
-        encoder.set_adaptive_filter(png::AdaptiveFilterType::Adaptive);
-    } else {
-        encoder.set_filter(config.filter_type.into());
-        encoder.set_adaptive_filter(png::AdaptiveFilterType::NonAdaptive);
-    }
-
-    // APNG設定
-    encoder
-        .set_animated(info.num_frames() as u32, config.repeat)
-        .map_err(|e| format!("APNG設定エラー: {}", e))?;
-
-    encoder
-        .set_frame_delay(info.scale() as u16, info.rate() as u16)
+    // 1フレームの表示時間は scale / rate 秒
+    let delay = FrameDelay::new(info.scale() as u32, info.rate() as u32)
         .map_err(|e| format!("フレームレート設定エラー: {}", e))?;
 
-    let mut writer = encoder
-        .write_header()
-        .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
+    let mut encoder = Encoder::new(
+        BufWriter::new(output_file),
+        info.width() as u32,
+        info.height() as u32,
+        info.num_frames() as u32,
+        EncoderConfig {
+            color_type,
+            compression_level: config.compression_level,
+            num_plays: config.repeat,
+        },
+    )
+    .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
 
     for frame in 0..info.num_frames() {
         if info.is_abort() {
             return Err("処理が中断されました".into());
         }
-        // カラーフォーマットに応じてフレームデータを取得
-        let frame_data = info.get_video_frame(frame, config.color_format);
 
-        if let Some(data) = frame_data {
-            // フレームデータを書き込み
-            writer
-                .write_image_data(&data)
-                .map_err(|e| format!("フレーム書き込みエラー: {}", e))?;
-        }
+        let frame_data = info
+            .get_video_frame(frame, config.color_format)
+            .ok_or_else(|| format!("フレーム取得エラー: フレーム {}", frame))?;
+
+        encoder
+            .add_frame(&frame_data, delay)
+            .map_err(|e| format!("フレーム書き込みエラー: {}", e))?;
 
         info.rest_time_disp(frame, info.num_frames());
     }
 
-    writer
+    encoder
         .finish()
-        .map_err(|e| format!("エンコーダー終了エラー: {}", e))?;
+        .map_err(|e| format!("エンコーダー終了エラー: {}", e))?
+        .into_inner()
+        .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
     Ok(())
 }
 
