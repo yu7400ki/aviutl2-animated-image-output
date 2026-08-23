@@ -94,14 +94,17 @@ impl Default for Config {
     }
 }
 
-/// フィルタ戦略を決めるまでに両候補を圧縮するフレーム数
+/// フィルタ戦略を決めるまでに両方の戦略で圧縮するフレーム数
+///
+/// 先頭フレームはキャンバス全体を書くため、差分矩形を書く以降のフレームとは
+/// 中身の性質が違う。差分矩形のフレームも何枚か見てから決めるだけの回数を取る。
 const PROBE_FRAMES: u32 = 4;
 
 /// フィルタ戦略の決定
 ///
-/// 先頭の [`PROBE_FRAMES`] フレームは候補すべてを圧縮して小さい方を採り、
-/// 圧縮後のバイト数を候補ごとに積む。プローブを終えた時点で合計の小さい候補へ
-/// 固定し、以降のフレームはその候補だけを圧縮する。
+/// 先頭の [`PROBE_FRAMES`] フレームは両方の戦略で圧縮して小さい方を採り、
+/// 圧縮後のバイト数を戦略ごとに積む。プローブを終えた時点で合計の小さい戦略へ
+/// 固定し、以降のフレームはその戦略だけを実行する。
 struct FilterChoice {
     /// 残りのプローブ回数
     remaining: u32,
@@ -445,7 +448,7 @@ impl<W: Write> Encoder<W> {
 
     /// 連続した領域をフィルタして圧縮し、[`Self::compressed`] へ格納する
     ///
-    /// フィルタ戦略が固まるまでは候補すべてを試し、それ以降は固めた戦略だけを使う。
+    /// フィルタ戦略が固まるまでは両方を試し、それ以降は固めた戦略だけを使う。
     fn compress(&mut self, region: &[u8], region_stride: usize, bpp: usize) {
         match self.filter_choice.fixed {
             Some(strategy) => self.compress_with(region, region_stride, bpp, strategy),
@@ -476,7 +479,7 @@ impl<W: Write> Encoder<W> {
             .compress_into(&self.filtered, &mut self.compressed);
     }
 
-    /// 候補すべてで圧縮し、小さい方を [`Self::compressed`] に残して結果を記録する
+    /// 両方の戦略で圧縮し、小さい方を [`Self::compressed`] に残して結果を記録する
     ///
     /// 同じ大きさなら [`filter::Strategy::Unfiltered`] を残す。
     fn probe(&mut self, region: &[u8], region_stride: usize, bpp: usize) {
