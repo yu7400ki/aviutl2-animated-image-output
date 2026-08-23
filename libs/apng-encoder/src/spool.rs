@@ -76,7 +76,7 @@ impl Spool {
     }
 
     /// 溜めたフレームを投入した順に、色の和集合と合わせて取り出す
-    pub(crate) fn into_parts(self) -> (Vec<Spooled>, Colors) {
+    fn into_parts(self) -> (Vec<Spooled>, Colors) {
         (self.frames, self.colors)
     }
 
