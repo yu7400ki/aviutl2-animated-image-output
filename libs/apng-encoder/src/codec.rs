@@ -248,6 +248,34 @@ impl Codec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::noise;
+
+    /// 両方の戦略が同じ大きさなら、フィルタを掛けない側の本体を残す
+    ///
+    /// 擬似乱数の領域はどちらの戦略でも縮まず、圧縮後の大きさが並ぶ。大きさが
+    /// 同じでも中身は違うため、どちらを残したかがそのまま書き出すバイト列になる。
+    #[test]
+    fn a_tie_keeps_the_unfiltered_body() {
+        const WIDTH: usize = 8;
+        const HEIGHT: usize = 8;
+        const BPP: usize = 4;
+        const STRIDE: usize = WIDTH * BPP;
+
+        let region = noise(WIDTH * HEIGHT * BPP, 0);
+        let mut codec = Codec::new(6);
+        let adaptive = codec.compress_with(&region, STRIDE, BPP, filter::Strategy::Adaptive);
+        let unfiltered = codec.compress_with(&region, STRIDE, BPP, filter::Strategy::Unfiltered);
+        assert_eq!(
+            adaptive.len(),
+            unfiltered.len(),
+            "同じ大きさに並ぶ素材であること"
+        );
+        assert_ne!(adaptive, unfiltered, "戦略ごとに中身が違うこと");
+
+        let (body, probed) = codec.probe(&region, STRIDE, BPP);
+        assert_eq!(probed.adaptive, probed.unfiltered);
+        assert_eq!(body, unfiltered);
+    }
 
     fn probe(adaptive: usize, unfiltered: usize) -> Probe {
         Probe {
