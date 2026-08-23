@@ -1042,24 +1042,51 @@ fn a_rect_without_an_unchanged_pixel_stays_on_source() {
     );
 }
 
+/// 潰した画素が並びを乱す矩形は、そのまま書いた方が小さくSOURCEで書く
+///
+/// 変化していない画素が散らばっていると、潰した跡が周期的な穴になる。
+#[test]
+fn an_over_candidate_that_compresses_larger_is_not_taken() {
+    const STEP: usize = 7;
+
+    let uniform = [0x30u8, 0x40, 0x50, 0xFF].repeat(BLEND_PIXELS);
+    let mut speckled = uniform.clone();
+    for pixel in (0..BLEND_PIXELS).step_by(STEP) {
+        speckled[pixel * 4..pixel * 4 + 4].copy_from_slice(&[0xC0, 0xB0, 0xA0, 0xFF]);
+    }
+
+    assert_blend(
+        &[speckled, uniform],
+        &[png::BlendOp::Source, png::BlendOp::Source],
+    );
+}
+
 /// 捨てたフレームの次は、復元されたキャンバスとの差分をOVERで書く
 ///
-/// 重ねる先を取り違えると、潰した画素が別の内容の上に載って復元されない。
+/// 重ねる先を取り違えると、捨てたフレームと同じ内容の画素が潰れてしまい、
+/// 復元されたキャンバスの側が残って元の値に戻らない。
 #[test]
 fn an_over_rect_after_a_disposal_is_layered_on_the_restored_canvas() {
-    const BLOCK: u32 = 6;
+    const MARK: [u8; 4] = [0xFF, 0x00, 0x00, 0xFF];
+    const SPOT: [u8; 4] = [0x00, 0xFF, 0x00, 0xFF];
+    /// 1フレームだけ現れる帯の上端
+    const BAND: u32 = 9;
 
     let base = blend_frame(1);
-    let mut transient = base.clone();
+    // 離れた2画素だけを書き換えたフレーム。矩形はその外接矩形に広がる
+    let mut restored = base.clone();
+    set_rgba(&mut restored, 2, 2, MARK);
+    set_rgba(&mut restored, 7, 7, SPOT);
+    // 同じ2画素に加えて、より広い帯を書き換えたフレーム
+    let mut transient = restored.clone();
     let overlay = blend_frame(2);
-    for y in 0..BLOCK {
-        for x in 0..BLOCK {
+    for y in BAND..BLEND_HEIGHT {
+        for x in 0..BLEND_WIDTH {
             let at = (y as usize * BLEND_WIDTH as usize + x as usize) * 4;
             let color = [overlay[at], overlay[at + 1], overlay[at + 2], 0xFF];
             set_rgba(&mut transient, x, y, color);
         }
     }
-    let restored = with_opaque_corners(&base);
 
     let input = vec![base, transient, restored];
     let bytes = encode(BLEND_WIDTH, BLEND_HEIGHT, ColorType::Rgba8, &input);
