@@ -723,20 +723,54 @@ fn a_restored_rect_that_compresses_larger_is_not_taken() {
     assert_composites_to(&bytes, CROP_WIDTH, ColorType::Rgb8, &input);
 }
 
-/// 静止画に対応するfcTLのPREVIOUSはBACKGROUNDとして扱われるため、選ばない
+/// 先頭フレームのdispose_opにPREVIOUSを選ばない
+///
+/// 先頭のfcTLのPREVIOUSはBACKGROUNDとして扱われ、キャンバスは復元されない。
+/// 2フレーム目を全面で異なる擬似乱数にすると、捨てた場合の候補が1画素に縮んで
+/// 圧縮後の大きさで必ず勝つ。
 #[test]
 fn the_first_frame_is_never_disposed_to_previous() {
-    // 2フレーム目を透明な黒にすると、捨てて再生開始時のキャンバスへ戻すのが最小になる
-    let opaque = solid(ColorType::Rgba8, 0x40);
-    let cleared = vec![0u8; opaque.len()];
-    let input = vec![opaque, cleared.clone(), cleared];
+    let color_type = ColorType::Rgb8;
+    let len = CROP_WIDTH as usize * CROP_HEIGHT as usize * color_type.bytes_per_pixel();
+    // 一様な背景と必ず異なるよう、全バイトを奇数にする
+    let noisy: Vec<u8> = frame_data(len, 1).iter().map(|b| b | 1).collect();
+    let input = vec![solid(color_type, 0x40), noisy.clone(), noisy];
 
-    let bytes = encode(CROP_WIDTH, CROP_HEIGHT, ColorType::Rgba8, &input);
+    let bytes = encode(CROP_WIDTH, CROP_HEIGHT, color_type, &input);
     let (_, decoded) = decode(&bytes);
 
     assert_eq!(dispose_ops(&decoded)[0], png::DisposeOp::None);
     assert_eq!(rects(&decoded)[1], WHOLE);
-    assert_composites_to(&bytes, CROP_WIDTH, ColorType::Rgba8, &input);
+    assert_composites_to(&bytes, CROP_WIDTH, color_type, &input);
+}
+
+/// 圧縮後の大きさが同じなら、保留中のフレームを捨てない
+#[test]
+fn a_tie_keeps_the_pending_frame() {
+    const ROWS: u32 = 5;
+
+    let color_type = ColorType::Rgb8;
+    let last = solid(color_type, 0x40);
+    let middle = solid(color_type, 0x80);
+    let mut first = last.clone();
+    for y in 0..ROWS {
+        for x in 0..CROP_WIDTH {
+            set_pixel(&mut first, color_type, x, y, 0x80);
+        }
+    }
+
+    let input = vec![first, middle, last];
+    let bytes = encode(CROP_WIDTH, CROP_HEIGHT, color_type, &input);
+    let (_, decoded) = decode(&bytes);
+
+    assert!(
+        dispose_ops(&decoded)
+            .iter()
+            .all(|op| matches!(op, png::DisposeOp::None))
+    );
+    // 捨てれば矩形は上から ROWS 行に縮むが、一様なので圧縮後は全面と同じ大きさになる
+    assert_eq!(rects(&decoded)[2], WHOLE);
+    assert_composites_to(&bytes, CROP_WIDTH, color_type, &input);
 }
 
 /// 色種別を落とす検証に使うキャンバスの大きさ
@@ -1069,6 +1103,47 @@ fn disposal_after_the_spool_matches_not_reducing() {
     let (_, decoded) = decode(&reduced);
     assert!(dispose_ops(&decoded).contains(&png::DisposeOp::Previous));
     assert_reduced_roundtrip(&reduced, &input, png::ColorType::Rgba);
+}
+
+/// 溜めるのをやめた直後のフレームには、捨てられる保留フレームが無い
+///
+/// そこで捨てる判断をすると、書き出し済みのフレームは戻らないのに、次のフレームは
+/// 戻ったキャンバスとの差分で書かれてしまう。
+#[test]
+fn the_frame_after_a_commit_has_nothing_to_dispose() {
+    const BLOCK: (u32, u32, u32, u32) = (2, 1, 3, 2);
+
+    let base = vec![0xFFu8; REDUCE_FRAME_LEN];
+    let mut marked = base.clone();
+    for y in 0..BLOCK.3 as usize {
+        for x in 0..BLOCK.2 as usize {
+            let start = ((BLOCK.1 as usize + y) * REDUCE_WIDTH as usize + BLOCK.0 as usize + x) * 4;
+            marked[start..start + 3].fill(0x10);
+        }
+    }
+    // 2フレーム目で透過が見つかり、そこで色種別が確定して溜めたぶんが流れる
+    let alpha = (BLOCK.1 as usize * REDUCE_WIDTH as usize + BLOCK.0 as usize) * 4 + 3;
+    marked[alpha] = 0x80;
+
+    let input = vec![base.clone(), marked, base];
+    let (bytes, _) = encode_with(
+        REDUCE_WIDTH,
+        REDUCE_HEIGHT,
+        reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+        &input,
+    );
+
+    let (_, decoded) = decode(&bytes);
+    assert!(
+        dispose_ops(&decoded)
+            .iter()
+            .all(|op| matches!(op, png::DisposeOp::None))
+    );
+    assert_eq!(
+        rects(&decoded),
+        [(0, 0, REDUCE_WIDTH, REDUCE_HEIGHT), BLOCK, BLOCK]
+    );
+    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Rgba);
 }
 
 /// 溜めている間は出力の色種別が決まらず候補を比べられないため、捨てない

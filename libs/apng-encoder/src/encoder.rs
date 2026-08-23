@@ -881,6 +881,29 @@ mod tests {
         }
     }
 
+    /// dispose_opの候補を2つ圧縮しても、プローブは1フレームにつき1回しか進まない
+    ///
+    /// 3フレーム目は先頭フレームと同じ内容なので捨てる候補が立ち、両方が圧縮される。
+    /// 二重に数えるとプローブが1フレーム早く尽き、4フレーム目が固めた戦略で書かれる。
+    #[test]
+    fn dispose_candidates_do_not_consume_extra_probes() {
+        let input = vec![
+            detailed_frame(0),
+            detailed_frame(1),
+            detailed_frame(0),
+            flat_frame(0),
+            flat_frame(1),
+        ];
+        let bytes = encode(&input, rgb_config());
+
+        let types = filter_types(&bytes, 3);
+        assert_eq!(types.len(), input.len());
+        // プローブの最後の1回に入るため、フィルタを掛けない方が小さいこのフレームはNoneだけになる
+        assert!(types[3].iter().all(|&f| f == 0), "{:?}", types[3]);
+        // 固めた戦略は適応フィルタなので、同じ素材でもNone以外を選ぶ
+        assert!(types[4].iter().any(|&f| f != 0), "{:?}", types[4]);
+    }
+
     /// プローブが終わらないまま入力が尽きても、フレームはすべて書き出される
     #[test]
     fn an_input_shorter_than_the_probe_is_written_in_full() {
