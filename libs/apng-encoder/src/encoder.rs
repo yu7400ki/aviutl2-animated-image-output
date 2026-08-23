@@ -216,6 +216,8 @@ enum Decision {
 }
 
 /// [`Config::reduce_color`] が出力の色種別に及ぼした結果
+///
+/// 出力の色種別を決めた時点の判断で、それより後のフレームの内容では変わらない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorReduction {
     /// パレット参照へ落とした
@@ -225,9 +227,9 @@ pub enum ColorReduction {
     },
     /// アルファを落とした
     AlphaDropped,
-    /// 透過する画素があり、アルファを落とせなかった
+    /// 決めた時点で透過する画素が見つかり、アルファを落とせなかった
     AlphaRequired,
-    /// アルファを落とすと大きくなるため、落とさなかった
+    /// 決めた時点で、アルファを落とすと大きくなるため落とさなかった
     AlphaKept,
     /// 落とせる要素が無く、入力の色種別のままにした
     Kept,
