@@ -1,10 +1,14 @@
 //! 走査線のフィルタ (フィルタ方式0)
 
-/// フィルタ種別バイト
+/// 予測値を引かない
 const NONE: u8 = 0;
+/// 左隣を予測値にする
 const SUB: u8 = 1;
+/// 真上を予測値にする
 const UP: u8 = 2;
+/// 左隣と真上の平均を予測値にする
 const AVERAGE: u8 = 3;
+/// Paeth予測値を使う
 const PAETH: u8 = 4;
 
 /// 画像全体を行ごとにフィルタし、zlibへ渡すバイト列を `out` へ追記する
@@ -213,7 +217,9 @@ mod avx2 {
     /// [`scalar::select_row`] のAVX2版
     ///
     /// # Safety
-    /// AVX2が利用可能であること。
+    /// - AVX2が利用可能であること
+    /// - `cur` と `prev` の長さが等しいこと
+    /// - `choice` の候補バッファの長さが `cur` と等しいこと
     #[target_feature(enable = "avx2")]
     pub(super) unsafe fn select_row<const BPP: usize>(
         cur: &[u8],
