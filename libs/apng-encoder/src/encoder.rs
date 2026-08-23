@@ -220,6 +220,8 @@ enum Stage {
         output: Output,
         /// 書き出しを待っているフレーム
         pending: Option<Pending>,
+        /// blend_op=OVERの候補を立てるかどうかの間合い
+        blend_pacing: BlendPacing,
     },
 }
 
@@ -229,6 +231,7 @@ impl Stage {
         Stage::Streaming {
             output,
             pending: None,
+            blend_pacing: BlendPacing::new(),
         }
     }
 }
@@ -253,8 +256,6 @@ pub struct Encoder<W: Write> {
     delta: Delta,
     /// 進んでいる段階
     stage: Stage,
-    /// blend_op=OVERの候補を立てるかどうかの間合い
-    blend_pacing: BlendPacing,
     num_frames: u32,
     num_plays: u32,
     /// [`Self::add_frame`] が受け付けたフレーム数
@@ -306,7 +307,6 @@ impl<W: Write> Encoder<W> {
             codec: Codec::new(config.compression_level),
             delta: Delta::new(),
             stage,
-            blend_pacing: BlendPacing::new(),
             num_frames,
             num_plays: config.num_plays,
             frames_accepted: 0,
@@ -347,7 +347,6 @@ impl<W: Write> Encoder<W> {
             codec,
             delta,
             stage,
-            blend_pacing,
             num_frames,
             num_plays,
             frames_accepted,
@@ -363,7 +362,6 @@ impl<W: Write> Encoder<W> {
                 layout,
                 codec,
                 delta,
-                blend_pacing,
                 reduction,
                 peak_spool_bytes,
                 num_frames: *num_frames,
@@ -421,8 +419,12 @@ impl<W: Write> Encoder<W> {
                 spool,
                 alpha_choice,
             } => parts.spool_frame(spool, alpha_choice, data, delay)?,
-            Stage::Streaming { output, pending } => {
-                parts.stream_frame(*output, pending, data, delay)?;
+            Stage::Streaming {
+                output,
+                pending,
+                blend_pacing,
+            } => {
+                parts.stream_frame(*output, pending, blend_pacing, data, delay)?;
                 None
             }
         };
@@ -468,7 +470,6 @@ struct Parts<'a, W: Write> {
     layout: &'a Layout,
     codec: &'a mut Codec,
     delta: &'a mut Delta,
-    blend_pacing: &'a mut BlendPacing,
     reduction: &'a mut Option<ColorReduction>,
     peak_spool_bytes: &'a mut usize,
     num_frames: u32,
@@ -697,11 +698,13 @@ impl<W: Write> Parts<'_, W> {
         &mut self,
         output: Output,
         pending: &mut Option<Pending>,
+        blend_pacing: &mut BlendPacing,
         data: &[u8],
         delay: FrameDelay,
     ) -> Result<(), Error> {
         let (dispose, rect, candidate) = self.choose_dispose(data, output, pending.is_some());
-        let (blend, candidate) = self.choose_blend(data, dispose, rect, candidate, output);
+        let (blend, candidate) =
+            self.choose_blend(data, dispose, rect, candidate, output, blend_pacing);
         let body = candidate.into_body(self.codec);
 
         self.flush_pending(pending, dispose)?;
@@ -766,11 +769,12 @@ impl<W: Write> Parts<'_, W> {
         rect: Rect,
         source: Candidate,
         output: Output,
+        pacing: &mut BlendPacing,
     ) -> (u8, Candidate) {
         if output != Output::Rgba8 || self.frames_accepted == 0 {
             return (BLEND_OP_SOURCE, source);
         }
-        if !self.blend_pacing.should_try() {
+        if !pacing.should_try() {
             return (BLEND_OP_SOURCE, source);
         }
 
@@ -794,7 +798,7 @@ impl<W: Write> Parts<'_, W> {
         self.codec.give(over);
 
         let taken = over_candidate.len() < source.len();
-        self.blend_pacing.record(taken);
+        pacing.record(taken);
         if taken {
             source.discard(self.codec);
             (BLEND_OP_OVER, over_candidate)
@@ -1395,6 +1399,14 @@ mod tests {
         assert!(pacing.should_try());
     }
 
+    /// 書き出しへ移ったエンコーダが持つ間合い
+    fn pacing_of<W: Write>(encoder: &Encoder<W>) -> &BlendPacing {
+        match &encoder.stage {
+            Stage::Streaming { blend_pacing, .. } => blend_pacing,
+            Stage::Deciding { .. } => panic!("書き出しへ移っている"),
+        }
+    }
+
     /// 書き出しの経路は、候補を立てる前に間合いを見る
     ///
     /// まだらな半透明の画素は不透明でないため候補が立たず、それを塗り潰すフレームだけが
@@ -1429,10 +1441,12 @@ mod tests {
         for frame in &input {
             encoder.add_frame(frame, delay).unwrap();
         }
-        assert_eq!(encoder.blend_pacing.resting, BLEND_REST_FRAMES);
+        let blend_pacing = pacing_of(&encoder);
+        assert_eq!(blend_pacing.resting, BLEND_REST_FRAMES);
 
         encoder.add_frame(&speckled, delay).unwrap();
-        assert_eq!(encoder.blend_pacing.resting, BLEND_REST_FRAMES - 1);
+        let blend_pacing = pacing_of(&encoder);
+        assert_eq!(blend_pacing.resting, BLEND_REST_FRAMES - 1);
     }
 
     /// 候補が採られると連敗は解ける
