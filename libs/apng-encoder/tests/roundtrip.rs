@@ -1575,9 +1575,17 @@ fn both_filter_strategies_are_reversible() {
 /// 色種別を落とす経路でも、どちらの戦略に決まっても可逆であること
 #[test]
 fn both_filter_strategies_are_reversible_while_reducing_color() {
-    let sources = [flat_frame as fn(ColorType, u32) -> Vec<u8>, detailed_frame];
+    // 4色しか使わない素材はパレットで、色数が上限を超える素材は入力の色種別で出る
+    let sources = [
+        (
+            flat_frame as fn(ColorType, u32) -> Vec<u8>,
+            png::ColorType::Indexed,
+            png::ColorType::Indexed,
+        ),
+        (detailed_frame, png::ColorType::Rgb, png::ColorType::Rgba),
+    ];
 
-    for source in sources {
+    for (source, opaque_output, transparent_output) in sources {
         for count in [1u32, 3, 5, 9] {
             let opaque: Vec<Vec<u8>> = (0..count)
                 .map(|seed| source(ColorType::Rgba8, seed))
@@ -1589,6 +1597,7 @@ fn both_filter_strategies_are_reversible_while_reducing_color() {
 
             // 全画素が不透明なので、パレットに収まるかによらずアルファは落ちる
             let (bytes, _) = encode_with(FILTER_WIDTH, FILTER_HEIGHT, config, &opaque);
+            assert_eq!(output_color_type(&bytes), opaque_output, "{count} フレーム");
             assert_eq!(composite_color_type(&bytes), ColorType::Rgb8);
             let expected: Vec<Vec<u8>> = opaque.iter().map(|f| without_alpha(f)).collect();
             assert_composites_to(&bytes, FILTER_WIDTH, ColorType::Rgb8, &expected);
@@ -1599,6 +1608,11 @@ fn both_filter_strategies_are_reversible_while_reducing_color() {
                 frame[3] = 0x80;
             }
             let (bytes, _) = encode_with(FILTER_WIDTH, FILTER_HEIGHT, config, &transparent);
+            assert_eq!(
+                output_color_type(&bytes),
+                transparent_output,
+                "{count} フレーム"
+            );
             assert_eq!(composite_color_type(&bytes), ColorType::Rgba8);
             assert_composites_to(&bytes, FILTER_WIDTH, ColorType::Rgba8, &transparent);
         }
