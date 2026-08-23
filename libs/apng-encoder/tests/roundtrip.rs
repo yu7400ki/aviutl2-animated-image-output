@@ -638,46 +638,62 @@ fn cumulative_changes_are_never_disposed() {
     }
 }
 
-/// 捨てた場合の矩形が広いときは、圧縮して比べる前に候補から外す
-///
-/// 広い方が一様で小さく圧縮できる場合でも、面積で先に落とす。
-#[test]
-fn a_wider_restored_rect_is_not_tried() {
-    const TOP: (u32, u32, u32, u32) = (0, 0, CROP_WIDTH, 3);
-    const PATCH: (u32, u32, u32, u32) = (2, 4, 4, 2);
+/// 一様で広い領域
+const WIDE: (u32, u32, u32, u32) = (0, 0, CROP_WIDTH, 3);
+/// 擬似乱数で埋めた狭い領域
+const NARROW: (u32, u32, u32, u32) = (2, 4, 4, 2);
 
+/// 圧縮後の大きさが面積と逆に並ぶ3フレームを作る
+///
+/// 最後のフレームは [`NARROW`] だけが擬似乱数で、残りは一様。1つ目は [`WIDE`] が、
+/// 2つ目は [`NARROW`] が最後のフレームと違う。最後のフレームから切り出すと、
+/// 広い [`WIDE`] の方が狭い [`NARROW`] より小さく圧縮される。
+fn rects_ordered_against_their_size() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let color_type = ColorType::Rgb8;
     let bpp = color_type.bytes_per_pixel();
-    let noise = frame_data(PATCH.2 as usize * PATCH.3 as usize * bpp, 1);
+    let noise = frame_data(NARROW.2 as usize * NARROW.3 as usize * bpp, 1);
 
-    // 上半分が一様、下半分に擬似乱数のパッチを持つフレーム
-    let mut third = solid(color_type, 0x40);
-    for y in 0..PATCH.3 {
-        for x in 0..PATCH.2 {
-            let src = ((y * PATCH.2 + x) as usize) * bpp;
-            let dst = (((PATCH.1 + y) * CROP_WIDTH + PATCH.0 + x) as usize) * bpp;
-            third[dst..dst + bpp].copy_from_slice(&noise[src..src + bpp]);
+    let mut last = solid(color_type, 0x40);
+    for y in 0..NARROW.3 {
+        for x in 0..NARROW.2 {
+            let src = ((y * NARROW.2 + x) as usize) * bpp;
+            let dst = (((NARROW.1 + y) * CROP_WIDTH + NARROW.0 + x) as usize) * bpp;
+            last[dst..dst + bpp].copy_from_slice(&noise[src..src + bpp]);
         }
     }
 
-    // パッチだけが違うフレーム
-    let mut second = third.clone();
-    for y in 0..PATCH.3 {
-        for x in 0..PATCH.2 {
-            set_pixel(&mut second, color_type, PATCH.0 + x, PATCH.1 + y, 0x40);
+    let mut wide_differs = last.clone();
+    for y in 0..WIDE.3 {
+        for x in 0..WIDE.2 {
+            set_pixel(&mut wide_differs, color_type, x, y, 0x80);
         }
     }
 
-    // 上半分だけが違うフレーム
-    let mut first = third.clone();
-    for y in 0..TOP.3 {
-        for x in 0..TOP.2 {
-            set_pixel(&mut first, color_type, x, y, 0x80);
+    let mut narrow_differs = last.clone();
+    for y in 0..NARROW.3 {
+        for x in 0..NARROW.2 {
+            set_pixel(
+                &mut narrow_differs,
+                color_type,
+                NARROW.0 + x,
+                NARROW.1 + y,
+                0x40,
+            );
         }
     }
 
-    let input = vec![first, second, third];
-    let bytes = encode(CROP_WIDTH, CROP_HEIGHT, color_type, &input);
+    (wide_differs, narrow_differs, last)
+}
+
+/// 捨てた場合の矩形が広いときは、圧縮して比べる前に候補から外す
+///
+/// 広い方が小さく圧縮できる場合でも、面積で先に落とす。
+#[test]
+fn a_wider_restored_rect_is_not_tried() {
+    let (wide_differs, narrow_differs, last) = rects_ordered_against_their_size();
+    let input = vec![wide_differs, narrow_differs, last];
+
+    let bytes = encode(CROP_WIDTH, CROP_HEIGHT, ColorType::Rgb8, &input);
     let (_, decoded) = decode(&bytes);
 
     assert!(
@@ -685,8 +701,26 @@ fn a_wider_restored_rect_is_not_tried() {
             .iter()
             .all(|op| matches!(op, png::DisposeOp::None))
     );
-    assert_eq!(rects(&decoded)[2], PATCH);
-    assert_composites_to(&bytes, CROP_WIDTH, color_type, &input);
+    assert_eq!(rects(&decoded)[2], NARROW);
+    assert_composites_to(&bytes, CROP_WIDTH, ColorType::Rgb8, &input);
+}
+
+/// 捨てた場合の矩形が狭くても、圧縮後に大きくなるなら捨てない
+#[test]
+fn a_restored_rect_that_compresses_larger_is_not_taken() {
+    let (wide_differs, narrow_differs, last) = rects_ordered_against_their_size();
+    let input = vec![narrow_differs, wide_differs, last];
+
+    let bytes = encode(CROP_WIDTH, CROP_HEIGHT, ColorType::Rgb8, &input);
+    let (_, decoded) = decode(&bytes);
+
+    assert!(
+        dispose_ops(&decoded)
+            .iter()
+            .all(|op| matches!(op, png::DisposeOp::None))
+    );
+    assert_eq!(rects(&decoded)[2], WIDE);
+    assert_composites_to(&bytes, CROP_WIDTH, ColorType::Rgb8, &input);
 }
 
 /// 静止画に対応するfcTLのPREVIOUSはBACKGROUNDとして扱われるため、選ばない
