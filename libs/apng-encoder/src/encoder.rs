@@ -646,6 +646,7 @@ impl<W: Write> Encoder<W> {
     /// 表現も両方の戦略を試した小さい方で比べられる。採る方の表現での圧縮は、
     /// 書き出しのときに改めて行う。
     fn choose_output(&mut self, frames: &[Spooled]) -> Output {
+        debug_assert_eq!(self.input, ColorType::Rgba8);
         debug_assert!(self.palette.is_none());
         debug_assert!(self.filter_choice.fixed.is_none());
 
