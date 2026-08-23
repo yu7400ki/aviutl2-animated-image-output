@@ -65,7 +65,7 @@ pub struct Encoder<W: Write> {
     sequence: u32,
     /// 書き出しに失敗し、チャンク列が中断しているか
     poisoned: bool,
-    bytes_per_pixel: usize,
+    color_type: ColorType,
     /// 1行のバイト数
     stride: usize,
     /// 1フレームのバイト数
@@ -122,7 +122,7 @@ impl<W: Write> Encoder<W> {
             frames_written: 0,
             sequence: 0,
             poisoned: false,
-            bytes_per_pixel,
+            color_type: config.color_type,
             stride,
             frame_len,
             compressor: Compressor::new(config.compression_level),
@@ -213,26 +213,24 @@ impl<W: Write> Encoder<W> {
             };
         }
 
-        diff::dirty_rect(&self.previous, data, self.stride, self.bytes_per_pixel)
-            .unwrap_or(UNCHANGED)
+        diff::dirty_rect(
+            &self.previous,
+            data,
+            self.stride,
+            self.color_type.bytes_per_pixel(),
+        )
+        .unwrap_or(UNCHANGED)
     }
 
     /// `rect` の領域をフィルタして圧縮し、[`Self::compressed`] へ格納する
     fn compress_region(&mut self, data: &[u8], rect: Rect) {
-        let region_stride = rect.width as usize * self.bytes_per_pixel;
-        let head = rect.y as usize * self.stride + rect.x as usize * self.bytes_per_pixel;
+        let bpp = self.color_type.bytes_per_pixel();
+        let region_stride = rect.width as usize * bpp;
+        let head = rect.y as usize * self.stride + rect.x as usize * bpp;
 
-        self.filtered.clear();
-        if region_stride == self.stride {
+        let region: &[u8] = if region_stride == self.stride {
             // 全幅の矩形は `data` 上で既に連続している
-            let len = region_stride * rect.height as usize;
-            filter::filter_image(
-                &data[head..head + len],
-                region_stride,
-                self.bytes_per_pixel,
-                &mut self.scratch,
-                &mut self.filtered,
-            );
+            &data[head..head + region_stride * rect.height as usize]
         } else {
             self.region.clear();
             self.region.reserve(region_stride * rect.height as usize);
@@ -241,14 +239,17 @@ impl<W: Write> Encoder<W> {
                 self.region
                     .extend_from_slice(&data[start..start + region_stride]);
             }
-            filter::filter_image(
-                &self.region,
-                region_stride,
-                self.bytes_per_pixel,
-                &mut self.scratch,
-                &mut self.filtered,
-            );
-        }
+            &self.region
+        };
+
+        self.filtered.clear();
+        filter::filter_image(
+            region,
+            region_stride,
+            bpp,
+            &mut self.scratch,
+            &mut self.filtered,
+        );
 
         self.compressed.clear();
         self.compressor
