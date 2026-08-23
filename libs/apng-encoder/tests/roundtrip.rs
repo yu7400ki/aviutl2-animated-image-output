@@ -1632,6 +1632,40 @@ fn detailed_frame(color_type: ColorType, seed: u32) -> Vec<u8> {
     frame
 }
 
+/// 少数の色を秩序ディザで敷き、微小なノイズを載せたフレーム
+///
+/// 同じ色が短い周期で並び直すため、アルファを落として1画素のバイト数を変えると
+/// かえって大きくなる。色数はパレットに収まらない。
+fn dithered_frame(color_type: ColorType, seed: u32) -> Vec<u8> {
+    /// 4x4の閾値行列
+    const BAYER: [[usize; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+    /// ディザで敷き分ける色数
+    const COLORS: usize = 24;
+
+    let bpp = color_type.bytes_per_pixel();
+    let grain = frame_data((FILTER_WIDTH * FILTER_HEIGHT) as usize, seed + 1);
+    let mut frame = Vec::new();
+    for y in 0..FILTER_HEIGHT as usize {
+        for x in 0..FILTER_WIDTH as usize {
+            let shade =
+                (x + seed as usize) * 255 / FILTER_WIDTH as usize + y * 97 / FILTER_HEIGHT as usize;
+            let threshold = BAYER[y % 4][(x + seed as usize) % 4] * 4;
+            let index = (shade + threshold) / (256 / COLORS) % COLORS;
+            let base = (index * 251 + seed as usize * 37) as u8;
+            let grit = grain[y * FILTER_WIDTH as usize + x] & 15;
+            frame.extend_from_slice(&[
+                base.wrapping_add(grit),
+                base.wrapping_mul(3),
+                base.wrapping_add(88).wrapping_add(grit),
+            ]);
+            if bpp == 4 {
+                frame.push(0xFF);
+            }
+        }
+    }
+    frame
+}
+
 /// 出力を合成し、フレームごとに `expected` と一致することを確かめる
 fn assert_composites_to(bytes: &[u8], width: u32, color_type: ColorType, expected: &[Vec<u8>]) {
     let (_, decoded) = decode(bytes);
@@ -1706,5 +1740,28 @@ fn both_filter_strategies_are_reversible_while_reducing_color() {
             assert_eq!(composite_color_type(&bytes), ColorType::Rgba8);
             assert_composites_to(&bytes, FILTER_WIDTH, ColorType::Rgba8, &transparent);
         }
+    }
+}
+
+/// アルファを落とすと大きくなる不透明な入力は、アルファを残したまま可逆であること
+#[test]
+fn an_opaque_input_that_grows_without_alpha_keeps_its_alpha() {
+    let config = Config {
+        reduce_color: true,
+        ..config(ColorType::Rgba8)
+    };
+
+    for count in [1u32, 3, 5, 9] {
+        let input: Vec<Vec<u8>> = (0..count)
+            .map(|seed| dithered_frame(ColorType::Rgba8, seed))
+            .collect();
+        let (bytes, _) = encode_with(FILTER_WIDTH, FILTER_HEIGHT, config, &input);
+
+        assert_eq!(
+            output_color_type(&bytes),
+            png::ColorType::Rgba,
+            "{count} フレーム"
+        );
+        assert_composites_to(&bytes, FILTER_WIDTH, ColorType::Rgba8, &input);
     }
 }

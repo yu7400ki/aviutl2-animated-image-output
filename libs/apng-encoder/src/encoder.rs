@@ -7,7 +7,7 @@ use crate::error::Error;
 use crate::filter;
 use crate::palette::Palette;
 use crate::region;
-use crate::spool::Spool;
+use crate::spool::{Spool, Spooled};
 use crate::zlib::Compressor;
 use std::io::Write;
 use std::ops::RangeInclusive;
@@ -108,8 +108,9 @@ pub struct Config {
     pub num_plays: u32,
     /// 出力の色種別を入力より小さいものへ落とすか
     ///
-    /// 全フレームの色の和集合がパレットに収まるならパレット参照へ、そうでなく
-    /// 全画素が不透明ならRGBへ落とす。PNGの色種別はファイル全体で1つなので、
+    /// 全フレームの色の和集合がパレットに収まるならパレット参照へ落とす。収まらず
+    /// 全画素が不透明なら、アルファを落とした表現と落とさない表現を先頭の何フレームか
+    /// 圧縮して比べ、小さい方を採る。PNGの色種別はファイル全体で1つなので、
     /// 全フレームを見るまで落とせるか決まらない。有効にすると、決まるまでの
     /// フレームをエンコーダ内部に溜める。
     pub reduce_color: bool,
@@ -142,6 +143,13 @@ impl Default for Config {
 /// 先頭フレームはキャンバス全体を書くため、差分矩形を書く以降のフレームとは
 /// 中身の性質が違う。差分矩形のフレームも何枚か見てから決めるだけの回数を取る。
 const PROBE_FRAMES: u32 = 4;
+
+/// 出力の色種別を決めるまでに両方の表現で圧縮するフレーム数
+///
+/// 先頭フレームと差分矩形のフレームで中身の性質が違うのは戦略を決めるときと
+/// 同じなので、[`PROBE_FRAMES`] と同じ回数を取る。比べるための圧縮は書き出しに
+/// 使い回せないため、増やした分だけ丸ごと余分になる。
+const COLOR_PROBE_FRAMES: u32 = PROBE_FRAMES;
 
 /// フィルタ戦略の決定
 ///
@@ -194,20 +202,32 @@ impl FilterChoice {
     }
 }
 
+/// 溜めたフレームから決まる出力の画素表現
+enum Decision {
+    /// 溜めたフレームの内容だけで1つに定まった
+    Fixed(Output),
+    /// アルファを落とせるが、落とすと得かは圧縮するまで分からない
+    Compare,
+}
+
 /// 溜めたフレームから出力の画素表現を決める
 ///
 /// 色の和集合がパレットに収まっている間は候補が残るため、最後のフレームを見るまで
 /// 決まらない。収まらないと分かった後は、アルファを落とせるかどうかだけが残る。
 /// まだ決まらないときは `None` を返す。
-fn decide_output(spool: &Spool, input: ColorType, is_last: bool) -> Option<Output> {
+///
+/// アルファが定数の列は圧縮がよく効くうえ、落とすと1画素のバイト数が変わって
+/// フィルタの当たり方も変わるため、落とすのが得かどうかは素材によって割れる。
+/// 落とせると分かった時点では決めず、圧縮して比べる余地を残す。
+fn decide_output(spool: &Spool, input: ColorType, is_last: bool) -> Option<Decision> {
     if !spool.colors_exceeded() {
-        return is_last.then_some(Output::Indexed8);
+        return is_last.then_some(Decision::Fixed(Output::Indexed8));
     }
 
     match input {
-        ColorType::Rgb8 => Some(Output::Rgb8),
-        ColorType::Rgba8 if spool.transparent() => Some(Output::Rgba8),
-        ColorType::Rgba8 => is_last.then_some(Output::Rgb8),
+        ColorType::Rgb8 => Some(Decision::Fixed(Output::Rgb8)),
+        ColorType::Rgba8 if spool.transparent() => Some(Decision::Fixed(Output::Rgba8)),
+        ColorType::Rgba8 => is_last.then_some(Decision::Compare),
     }
 }
 
@@ -566,7 +586,7 @@ impl<W: Write> Encoder<W> {
 
         // 抱えきれない大きさが来たら、入力の色種別で確定して溜めたぶんを流す
         if !spool.can_hold(region_len) {
-            self.commit(spool, Output::from(self.input))?;
+            self.commit(spool, Decision::Fixed(Output::from(self.input)))?;
             return self.emit_frame(data, rect, delay);
         }
 
@@ -575,7 +595,7 @@ impl<W: Write> Encoder<W> {
 
         let is_last = self.frames_accepted + 1 == self.num_frames;
         match decide_output(&spool, self.input, is_last) {
-            Some(output) => self.commit(spool, output),
+            Some(decision) => self.commit(spool, decision),
             None => {
                 self.spool = Some(spool);
                 Ok(())
@@ -584,32 +604,70 @@ impl<W: Write> Encoder<W> {
     }
 
     /// 出力の画素表現を確定し、ヘッダに続けて溜めたフレームを書き出す
-    fn commit(&mut self, spool: Spool, output: Output) -> Result<(), Error> {
+    fn commit(&mut self, spool: Spool, decision: Decision) -> Result<(), Error> {
         let (frames, colors) = spool.into_parts();
+        let output = match decision {
+            Decision::Fixed(output) => output,
+            Decision::Compare => self.choose_output(&frames),
+        };
+
         self.palette = (output == Output::Indexed8).then(|| colors.into_palette());
         self.output = output;
         self.write_header()?;
 
-        let in_bpp = self.bytes_per_pixel;
-        let out_bpp = output.bytes_per_pixel();
         for frame in &frames {
-            let region_stride = frame.rect.width as usize * out_bpp;
-            let probe = if in_bpp == out_bpp {
-                self.compress(&frame.data, region_stride, out_bpp)
-            } else {
-                let mut converted = std::mem::take(&mut self.region);
-                converted.clear();
-                self.append_output(&frame.data, &mut converted);
-                let probe = self.compress(&converted, region_stride, out_bpp);
-                self.region = converted;
-                probe
-            };
+            let probe = self.compress_spooled(frame, output);
             self.record(probe);
             // 溜めている間はdispose_opを決められないため、捨てずに残す
             self.write_frame(frame.rect, frame.delay, DISPOSE_OP_NONE)?;
         }
 
         Ok(())
+    }
+
+    /// アルファを落とした表現と落とさない表現を圧縮して比べ、小さい方を採る
+    ///
+    /// 見るのは先頭の [`COLOR_PROBE_FRAMES`] フレームまで。同じ大きさなら
+    /// 1画素のバイト数が小さいアルファを落とした方を採る。
+    ///
+    /// ここでの圧縮はどちらの表現を採るかを決めるためのもので、フィルタ戦略の
+    /// プローブには数えない。数えないままなので戦略はまだ固まっておらず、どちらの
+    /// 表現も両方の戦略を試した小さい方で比べられる。採る方の表現での圧縮は、
+    /// 書き出しのときに改めて行う。
+    fn choose_output(&mut self, frames: &[Spooled]) -> Output {
+        debug_assert!(self.palette.is_none());
+        debug_assert!(self.filter_choice.fixed.is_none());
+
+        let (mut dropped, mut kept) = (0u64, 0u64);
+        for frame in frames.iter().take(COLOR_PROBE_FRAMES as usize) {
+            self.compress_spooled(frame, Output::Rgb8);
+            dropped += self.compressed.len() as u64;
+            self.compress_spooled(frame, Output::Rgba8);
+            kept += self.compressed.len() as u64;
+        }
+
+        if dropped <= kept {
+            Output::Rgb8
+        } else {
+            Output::Rgba8
+        }
+    }
+
+    /// 溜めたフレームを `output` の表現へ直してフィルタして圧縮し、[`Self::compressed`] へ格納する
+    fn compress_spooled(&mut self, frame: &Spooled, output: Output) -> Option<Probe> {
+        let out_bpp = output.bytes_per_pixel();
+        let region_stride = frame.rect.width as usize * out_bpp;
+
+        if self.bytes_per_pixel == out_bpp {
+            return self.compress(&frame.data, region_stride, out_bpp);
+        }
+
+        let mut converted = std::mem::take(&mut self.region);
+        converted.clear();
+        self.append_output(&frame.data, output, &mut converted);
+        let probe = self.compress(&converted, region_stride, out_bpp);
+        self.region = converted;
+        probe
     }
 
     /// 溜めるのをやめたフレームを1つ書き出す
@@ -621,16 +679,13 @@ impl<W: Write> Encoder<W> {
         self.write_frame(rect, delay, DISPOSE_OP_NONE)
     }
 
-    /// 入力の画素列を出力の表現へ直しながら `out` へ追記する
-    fn append_output(&self, pixels: &[u8], out: &mut Vec<u8>) {
+    /// 入力の画素列を `output` の表現へ直しながら `out` へ追記する
+    fn append_output(&self, pixels: &[u8], output: Output, out: &mut Vec<u8>) {
         match &self.palette {
             Some(palette) => palette.append_indices(pixels, self.bytes_per_pixel, out),
-            None => region::append_pixels(
-                pixels,
-                self.bytes_per_pixel,
-                self.output.bytes_per_pixel(),
-                out,
-            ),
+            None => {
+                region::append_pixels(pixels, self.bytes_per_pixel, output.bytes_per_pixel(), out)
+            }
         }
     }
 
@@ -833,6 +888,36 @@ mod tests {
                     frame
                         .push(base.wrapping_add(grain[(y * WIDTH as usize + x) * 3 + channel] & 7));
                 }
+            }
+        }
+        frame
+    }
+
+    /// 少数の色を秩序ディザで敷き、微小なノイズを載せたフレーム
+    ///
+    /// 同じ色が短い周期で並び直すため、アルファを落として1画素のバイト数を
+    /// 変えるとかえって大きくなる。
+    fn dithered_frame(seed: u32) -> Vec<u8> {
+        /// 4x4の閾値行列
+        const BAYER: [[usize; 4]; 4] =
+            [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+        /// ディザで敷き分ける色数
+        const COLORS: usize = 24;
+
+        let grain = noise((WIDTH * HEIGHT) as usize, seed);
+        let mut frame = Vec::new();
+        for y in 0..HEIGHT as usize {
+            for x in 0..WIDTH as usize {
+                let shade = (x + seed as usize) * 255 / WIDTH as usize + y * 97 / HEIGHT as usize;
+                let threshold = BAYER[y % 4][(x + seed as usize) % 4] * 4;
+                let index = (shade + threshold) / (256 / COLORS) % COLORS;
+                let base = (index * 251 + seed as usize * 37) as u8;
+                let grit = grain[y * WIDTH as usize + x] & 15;
+                frame.extend_from_slice(&[
+                    base.wrapping_add(grit),
+                    base.wrapping_mul(3),
+                    base.wrapping_add(88).wrapping_add(grit),
+                ]);
             }
         }
         frame
@@ -1071,6 +1156,49 @@ mod tests {
         for (index, frame) in types.iter().enumerate().skip(PROBE_FRAMES as usize) {
             assert!(frame.iter().all(|&f| f == 0), "フレーム {index}: {frame:?}");
         }
+    }
+
+    /// 色種別を落とす設定
+    fn reduce_rgba_config() -> Config {
+        Config {
+            color_type: ColorType::Rgba8,
+            reduce_color: true,
+            ..Config::default()
+        }
+    }
+
+    /// 全画素が不透明でも、アルファを落として小さくなる素材だけが落とされる
+    #[test]
+    fn the_smaller_of_the_two_opaque_representations_is_written() {
+        let input: Vec<Vec<u8>> = (0..PROBE_FRAMES + 2)
+            .map(|seed| with_alpha(&detailed_frame(seed)))
+            .collect();
+        let bytes = encode(&input, reduce_rgba_config());
+        assert_eq!(output_bytes_per_pixel(&bytes), 3);
+
+        let input: Vec<Vec<u8>> = (0..PROBE_FRAMES + 2)
+            .map(|seed| with_alpha(&dithered_frame(seed)))
+            .collect();
+        let bytes = encode(&input, reduce_rgba_config());
+        assert_eq!(output_bytes_per_pixel(&bytes), 4);
+    }
+
+    /// 色種別の候補を2つ圧縮しても、プローブは1フレームにつき1回しか進まない
+    ///
+    /// 二重に数えるとプローブが尽きるのが早まり、書き出しの先頭から固めた戦略になる。
+    #[test]
+    fn color_candidates_do_not_consume_extra_probes() {
+        let mut frames: Vec<Vec<u8>> = (0..PROBE_FRAMES - 1).map(detailed_frame).collect();
+        frames.extend((0..2).map(flat_frame));
+        let input: Vec<Vec<u8>> = frames.iter().map(|frame| with_alpha(frame)).collect();
+
+        let bytes = encode(&input, reduce_rgba_config());
+        let types = filter_types(&bytes, output_bytes_per_pixel(&bytes));
+        assert_eq!(types.len(), input.len());
+        // プローブの最後の1回に入るため、フィルタを掛けない方が小さいこのフレームはNoneだけになる
+        assert!(types[3].iter().all(|&f| f == 0), "{:?}", types[3]);
+        // 固めた戦略は適応フィルタなので、同じ素材でもNone以外を選ぶ
+        assert!(types[4].iter().any(|&f| f != 0), "{:?}", types[4]);
     }
 
     fn probe(adaptive: usize, unfiltered: usize) -> Probe {
