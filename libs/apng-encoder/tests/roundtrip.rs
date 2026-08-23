@@ -1,6 +1,6 @@
 //! 出力したAPNGを`png`クレートでデコードし、入力フレームと一致することを確認する
 
-use apng_encoder::{ColorType, Config, Encoder, Error, FrameDelay};
+use apng_encoder::{ColorType, Config, DEFAULT_MAX_SPOOL_BYTES, Encoder, Error, FrameDelay};
 use std::io::{self, Cursor, Write};
 
 /// 決定的な擬似乱数でフレームの内容を作る
@@ -27,7 +27,7 @@ fn config(color_type: ColorType) -> Config {
         compression_level: 6,
         num_plays: 0,
         reduce_color: false,
-        max_spool_bytes: apng_encoder::DEFAULT_MAX_SPOOL_BYTES,
+        max_spool_bytes: DEFAULT_MAX_SPOOL_BYTES,
     }
 }
 
@@ -515,5 +515,250 @@ fn consecutive_partial_rects_carry_their_own_content() {
         }
 
         assert_crop(color_type, &input, &expected);
+    }
+}
+
+/// 色種別を落とす検証に使うキャンバスの大きさ
+const REDUCE_WIDTH: u32 = 8;
+const REDUCE_HEIGHT: u32 = 6;
+/// 1フレームぶんの入力バイト数 (RGBA8)
+const REDUCE_FRAME_LEN: usize = REDUCE_WIDTH as usize * REDUCE_HEIGHT as usize * 4;
+
+/// 全画素が不透明なRGBA8のフレーム列を作る
+///
+/// `alpha_from` 以降のフレームは、先頭画素だけ不透明でなくなる。
+fn reducible_frames(count: u32, alpha_from: Option<u32>) -> Vec<Vec<u8>> {
+    (0..count)
+        .map(|index| {
+            let mut frame = frame_data(REDUCE_FRAME_LEN, index + 1);
+            for pixel in frame.chunks_exact_mut(4) {
+                pixel[3] = 0xFF;
+            }
+            if alpha_from.is_some_and(|from| index >= from) {
+                frame[3] = 0x80;
+            }
+            frame
+        })
+        .collect()
+}
+
+/// 色種別を落とす設定
+fn reduce_config(color_type: ColorType, max_spool_bytes: usize) -> Config {
+    Config {
+        reduce_color: true,
+        max_spool_bytes,
+        ..config(color_type)
+    }
+}
+
+/// 符号化した結果と、溜めたバイト数の最大値を返す
+fn encode_with(width: u32, height: u32, config: Config, input: &[Vec<u8>]) -> (Vec<u8>, usize) {
+    let delay = FrameDelay::new(1001, 30000).unwrap();
+    let mut encoder = Encoder::new(Vec::new(), width, height, input.len() as u32, config).unwrap();
+    for data in input {
+        encoder.add_frame(data, delay).unwrap();
+    }
+    let peak = encoder.peak_spool_bytes();
+    (encoder.finish().unwrap(), peak)
+}
+
+/// IHDRが示す出力の色種別
+fn output_color_type(bytes: &[u8]) -> png::ColorType {
+    png::Decoder::new(Cursor::new(bytes))
+        .read_info()
+        .unwrap()
+        .info()
+        .color_type
+}
+
+/// RGBA8のフレームからアルファを落とす
+fn without_alpha(frame: &[u8]) -> Vec<u8> {
+    frame
+        .chunks_exact(4)
+        .flat_map(|p| p[..3].to_vec())
+        .collect()
+}
+
+/// 出力を合成し、RGBA8の入力と一致することを確かめる
+///
+/// 出力がRGBのときは、入力からアルファを落としたものと比べる。
+fn assert_reduced_roundtrip(bytes: &[u8], input: &[Vec<u8>], expected: png::ColorType) {
+    assert_eq!(output_color_type(bytes), expected);
+
+    let color_type = match expected {
+        png::ColorType::Rgb => ColorType::Rgb8,
+        png::ColorType::Rgba => ColorType::Rgba8,
+        other => panic!("扱わない色種別: {other:?}"),
+    };
+
+    let (_, decoded) = decode(bytes);
+    assert_eq!(decoded.len(), input.len());
+
+    let mut canvas = vec![0u8; REDUCE_FRAME_LEN / 4 * color_type.bytes_per_pixel()];
+    for (index, (frame, source)) in decoded.iter().zip(input).enumerate() {
+        composite(&mut canvas, frame, REDUCE_WIDTH, color_type);
+
+        let expected_frame = match color_type {
+            ColorType::Rgb8 => without_alpha(source),
+            ColorType::Rgba8 => source.clone(),
+        };
+        assert_eq!(canvas, expected_frame, "フレーム {index}");
+
+        let expected_sequence = if index == 0 { 0 } else { index as u32 * 2 - 1 };
+        assert_eq!(frame.control.sequence_number, expected_sequence);
+    }
+}
+
+/// アルファが最初に現れる位置で出力の色種別が決まり、どの位置でも可逆であること
+#[test]
+fn the_output_color_type_follows_where_alpha_first_appears() {
+    const COUNT: u32 = 5;
+
+    for alpha_from in [Some(0), Some(2), Some(COUNT - 1), None] {
+        let input = reducible_frames(COUNT, alpha_from);
+        let (bytes, _) = encode_with(
+            REDUCE_WIDTH,
+            REDUCE_HEIGHT,
+            reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+            &input,
+        );
+
+        let expected = match alpha_from {
+            Some(_) => png::ColorType::Rgba,
+            None => png::ColorType::Rgb,
+        };
+        assert_reduced_roundtrip(&bytes, &input, expected);
+    }
+}
+
+/// アルファを見つけた時点で確定するので、そこまでの出力は保留しない場合と一致する
+#[test]
+fn deciding_early_produces_the_same_bytes_as_not_reducing() {
+    let input = reducible_frames(4, Some(0));
+    let plain = encode(REDUCE_WIDTH, REDUCE_HEIGHT, ColorType::Rgba8, &input);
+    let (reduced, _) = encode_with(
+        REDUCE_WIDTH,
+        REDUCE_HEIGHT,
+        reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+        &input,
+    );
+
+    assert_eq!(reduced, plain);
+}
+
+/// 落とす余地の無いRGB8の入力は、保留せずそのまま書き出す
+#[test]
+fn rgb_input_is_never_spooled() {
+    let input = frames(REDUCE_WIDTH, REDUCE_HEIGHT, ColorType::Rgb8, 4);
+    let plain = encode(REDUCE_WIDTH, REDUCE_HEIGHT, ColorType::Rgb8, &input);
+    let (reduced, peak) = encode_with(
+        REDUCE_WIDTH,
+        REDUCE_HEIGHT,
+        reduce_config(ColorType::Rgb8, DEFAULT_MAX_SPOOL_BYTES),
+        &input,
+    );
+
+    assert_eq!(reduced, plain);
+    assert_eq!(peak, 0);
+}
+
+/// 全画素が不透明なら最後のフレームまで溜めてからRGBへ落とす
+#[test]
+fn a_fully_opaque_input_is_written_as_rgb() {
+    const COUNT: u32 = 4;
+    let input = reducible_frames(COUNT, None);
+    let (bytes, peak) = encode_with(
+        REDUCE_WIDTH,
+        REDUCE_HEIGHT,
+        reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+        &input,
+    );
+
+    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Rgb);
+    // 全フレームが全画面の差分になるため、溜めるのは入力そのものと同じ量
+    assert_eq!(peak, REDUCE_FRAME_LEN * COUNT as usize);
+    assert!(bytes.len() < encode(REDUCE_WIDTH, REDUCE_HEIGHT, ColorType::Rgba8, &input).len());
+}
+
+/// 上限を超えるフレームが来たら落とすのをやめ、入力の色種別のまま書き出す
+#[test]
+fn exceeding_the_spool_limit_falls_back_to_the_input_color_type() {
+    let input = reducible_frames(4, None);
+    let plain = encode(REDUCE_WIDTH, REDUCE_HEIGHT, ColorType::Rgba8, &input);
+    // 2フレーム目を溜められない上限
+    let limit = REDUCE_FRAME_LEN + REDUCE_FRAME_LEN / 2;
+    let (bytes, peak) = encode_with(
+        REDUCE_WIDTH,
+        REDUCE_HEIGHT,
+        reduce_config(ColorType::Rgba8, limit),
+        &input,
+    );
+
+    assert_eq!(bytes, plain);
+    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Rgba);
+    assert!(peak <= limit);
+}
+
+/// 先頭フレームすら溜められない上限でも、保留せずに書き出せる
+#[test]
+fn a_zero_spool_limit_writes_everything_as_it_arrives() {
+    let input = reducible_frames(3, None);
+    let plain = encode(REDUCE_WIDTH, REDUCE_HEIGHT, ColorType::Rgba8, &input);
+    let (bytes, peak) = encode_with(
+        REDUCE_WIDTH,
+        REDUCE_HEIGHT,
+        reduce_config(ColorType::Rgba8, 0),
+        &input,
+    );
+
+    assert_eq!(bytes, plain);
+    assert_eq!(peak, 0);
+}
+
+/// 溜めたフレームは矩形と遅延を保ったまま順に書き出される
+#[test]
+fn spooled_frames_keep_their_rects_and_order() {
+    let mut input = vec![vec![0xFFu8; REDUCE_FRAME_LEN]];
+    let positions = [(1u32, 1u32), (6, 4), (3, 2)];
+    for (index, &(x, y)) in positions.iter().enumerate() {
+        let mut frame = input.last().unwrap().clone();
+        let start = (y as usize * REDUCE_WIDTH as usize + x as usize) * 4;
+        frame[start..start + 3].fill(0x10 + index as u8);
+        input.push(frame);
+    }
+
+    let (bytes, _) = encode_with(
+        REDUCE_WIDTH,
+        REDUCE_HEIGHT,
+        reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+        &input,
+    );
+
+    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Rgb);
+
+    let (_, decoded) = decode(&bytes);
+    let expected: Vec<(u32, u32, u32, u32)> = std::iter::once((0, 0, REDUCE_WIDTH, REDUCE_HEIGHT))
+        .chain(positions.iter().map(|&(x, y)| (x, y, 1, 1)))
+        .collect();
+    assert_eq!(rects(&decoded), expected);
+}
+
+/// 1フレームだけの入力も、そのフレームを見てから色種別が決まる
+#[test]
+fn a_single_frame_input_is_decided_on_that_frame() {
+    for alpha_from in [Some(0), None] {
+        let input = reducible_frames(1, alpha_from);
+        let (bytes, _) = encode_with(
+            REDUCE_WIDTH,
+            REDUCE_HEIGHT,
+            reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+            &input,
+        );
+
+        let expected = match alpha_from {
+            Some(_) => png::ColorType::Rgba,
+            None => png::ColorType::Rgb,
+        };
+        assert_reduced_roundtrip(&bytes, &input, expected);
     }
 }
