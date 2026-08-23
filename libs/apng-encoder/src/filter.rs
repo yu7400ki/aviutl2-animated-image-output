@@ -23,7 +23,7 @@ pub(crate) enum Strategy {
 
 /// 画像全体を行ごとにフィルタし、zlibへ渡すバイト列を `out` へ追記する
 ///
-/// `data` は `stride` バイトの行が隙間なく並んでいること。`bpp` は3か4であること。
+/// `data` は `stride` バイトの行が隙間なく並んでいること。`bpp` は1か3か4であること。
 pub(crate) fn filter_image(
     data: &[u8],
     stride: usize,
@@ -41,9 +41,10 @@ pub(crate) fn filter_image(
         Strategy::Adaptive => {
             scratch.resize(stride);
             match bpp {
+                1 => filter_image_bpp::<1>(data, stride, scratch, out),
                 3 => filter_image_bpp::<3>(data, stride, scratch, out),
                 4 => filter_image_bpp::<4>(data, stride, scratch, out),
-                other => panic!("1画素あたり3バイトか4バイトのみ扱える: {other}"),
+                other => panic!("1画素あたり1バイトか3バイトか4バイトのみ扱える: {other}"),
             }
         }
         Strategy::Unfiltered => unfiltered_image(data, stride, out),
@@ -503,6 +504,13 @@ mod tests {
         scratch.resize(stride);
         if !data.is_empty() {
             match bpp {
+                1 => filter_rows(
+                    data,
+                    stride,
+                    &mut scratch,
+                    &mut out,
+                    scalar::select_row::<1>,
+                ),
                 3 => filter_rows(
                     data,
                     stride,
@@ -529,6 +537,10 @@ mod tests {
         scratch.resize(stride);
         if !data.is_empty() {
             match bpp {
+                1 => filter_rows(data, stride, &mut scratch, &mut out, |cur, prev, choice| {
+                    // SAFETY: 呼び出し元がavx2の存在を確認している
+                    unsafe { avx2::select_row::<1>(cur, prev, choice) }
+                }),
                 3 => filter_rows(data, stride, &mut scratch, &mut out, |cur, prev, choice| {
                     // SAFETY: 呼び出し元がavx2の存在を確認している
                     unsafe { avx2::select_row::<3>(cur, prev, choice) }
@@ -544,7 +556,7 @@ mod tests {
 
     /// 端数と境界を含む行長
     ///
-    /// bpp 3・4それぞれのBPP - 1, BPP, BPP + 1 と、ベクタ本体の32バイト境界の前後、
+    /// bpp 1・3・4それぞれのBPP - 1, BPP, BPP + 1 と、ベクタ本体の32バイト境界の前後、
     /// 絶対値の総和が16bitに収まらない512バイト超を含む。
     const ROW_LENGTHS: [usize; 20] = [
         0, 1, 2, 3, 4, 5, 6, 7, 8, 31, 32, 33, 63, 64, 65, 95, 96, 97, 512, 513,
@@ -565,7 +577,7 @@ mod tests {
 
     #[test]
     fn filtering_is_reversible() {
-        for bpp in [3, 4] {
+        for bpp in [1, 3, 4] {
             for width in [1usize, 2, 7, 11, 32] {
                 let (stride, height) = (width * bpp, 5);
                 let data = noise(stride * height, width as u32);
@@ -588,7 +600,7 @@ mod tests {
     /// 行の比較が前の行の状態を引きずらないところまで踏む。
     #[test]
     fn images_with_varying_rows_are_reversible() {
-        for bpp in [3, 4] {
+        for bpp in [1, 3, 4] {
             for width in [5usize, 64, 200] {
                 let stride = width * bpp;
                 let textured = noise(stride, width as u32);
@@ -631,6 +643,7 @@ mod tests {
     /// 5種のフィルタは、どれを強制しても逆適用で元に戻る
     #[test]
     fn every_filter_is_reversible() {
+        forced_filters_are_reversible::<1>();
         forced_filters_are_reversible::<3>();
         forced_filters_are_reversible::<4>();
     }
@@ -702,7 +715,7 @@ mod tests {
     /// 直前の行と同じ内容の行はUpで全0になり、Upが選ばれる
     #[test]
     fn a_repeated_row_selects_up() {
-        for bpp in [3, 4] {
+        for bpp in [1, 3, 4] {
             let stride = 16 * bpp;
             let row = noise(stride, 3);
             let data = [row.clone(), row].concat();
@@ -716,8 +729,8 @@ mod tests {
     /// 0x80が並ぶ行では、行頭のbppバイトだけが残るSubが最小になる
     #[test]
     fn a_row_of_0x80_selects_sub() {
-        // 幅171(bpp3)・128(bpp4)の行は絶対値の総和が16bitに収まらない
-        for (bpp, width) in [(3, 16), (3, 171), (4, 16), (4, 128)] {
+        // 幅513(bpp1)・171(bpp3)・128(bpp4)の行は絶対値の総和が16bitに収まらない
+        for (bpp, width) in [(1, 16), (1, 513), (3, 16), (3, 171), (4, 16), (4, 128)] {
             let stride = width * bpp;
             let data = vec![0x80u8; stride];
 
@@ -822,7 +835,7 @@ mod tests {
     /// Unfilteredはどの行長・画素サイズでも逆適用で元に戻る
     #[test]
     fn unfiltered_images_are_reversible() {
-        for bpp in [3, 4] {
+        for bpp in [1, 3, 4] {
             for width in [1usize, 2, 7, 11, 32] {
                 let (stride, height) = (width * bpp, 5);
                 let data = noise(stride * height, width as u32);
@@ -915,6 +928,10 @@ mod tests {
                     // SAFETY: avx2の存在をこの関数の冒頭で確認している
                     assert_eq!(unsafe { avx2::abs_sum(&cur) }, scalar::abs_sum(&cur));
 
+                    assert_apply_parity!(1, SUB, &cur, &prev);
+                    assert_apply_parity!(1, UP, &cur, &prev);
+                    assert_apply_parity!(1, AVERAGE, &cur, &prev);
+                    assert_apply_parity!(1, PAETH, &cur, &prev);
                     assert_apply_parity!(3, SUB, &cur, &prev);
                     assert_apply_parity!(3, UP, &cur, &prev);
                     assert_apply_parity!(3, AVERAGE, &cur, &prev);
@@ -936,7 +953,7 @@ mod tests {
             return;
         }
 
-        for bpp in [3, 4] {
+        for bpp in [1, 3, 4] {
             for stride in ROW_LENGTHS {
                 for height in [1, 2, 3, 4, 7] {
                     for data in patterns(stride * height, 3) {
