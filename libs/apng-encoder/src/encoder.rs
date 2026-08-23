@@ -170,6 +170,9 @@ struct Pending {
 /// dispose_opは次のフレームの圧縮後サイズを見て決めるため、書き出しは1フレーム遅れる。
 /// [`Config::reduce_color`] が有効なときだけ、出力の色種別が決まるまでのフレームを
 /// さらに内部へ溜める。
+///
+/// 溜めるかどうかに関わらず、直前のフレームとそれを描く前のキャンバスの2面を常に抱える
+/// (1920x1080のRGBA8で約16.6MB)。
 pub struct Encoder<W: Write> {
     writer: W,
     width: u32,
@@ -258,7 +261,7 @@ impl<W: Write> Encoder<W> {
             .checked_mul(height as usize)
             .ok_or(Error::ImageTooLarge { width, height })?;
 
-        // 落とせる余地があるのはアルファを持つ入力だけなので、それ以外は保留しない
+        // 落とせる余地があるのはアルファを持つ入力だけなので、それ以外は溜めない
         let deferred = config.reduce_color && config.color_type == ColorType::Rgba8;
 
         let mut encoder = Encoder {
@@ -322,9 +325,15 @@ impl<W: Write> Encoder<W> {
     ///
     /// `data` は上から下・左から右の順に並んだ `幅 * 高さ * 1画素のバイト数` バイトであること。
     ///
+    /// 投入されたフレームはその場では書き出さず、dispose_opが決まる次の呼び出し、
+    /// または [`Encoder::finish`] で書き出す。
+    ///
     /// # Errors
     /// `data` の長さが合わないとき、宣言したフレーム数を超えたとき、書き出しに失敗したとき、
     /// または過去の書き出し失敗でエンコーダが使用不能なとき。
+    ///
+    /// 書き出しの失敗は1つ前に投入されたフレームのものになる。最後に投入したフレームの
+    /// 書き出しは [`Encoder::finish`] で報告される。
     pub fn add_frame(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
         if self.poisoned {
             return Err(Error::Poisoned);
@@ -400,11 +409,14 @@ impl<W: Write> Encoder<W> {
 
     /// 保留中のフレームをdispose_op=PREVIOUSで捨てるときの、投入されたフレームの矩形
     ///
-    /// 次の場合は捨てても得にならないため、候補にせず `None` を返す。
-    /// - 書き出しを待っているフレームが無いとき
-    /// - 保留中のフレームが先頭フレームのとき。静止画に対応するfcTLの
-    ///   dispose_op=PREVIOUSはBACKGROUNDとして扱われ、キャンバスが復元されない
-    /// - 矩形が捨てない場合より小さくならないとき
+    /// 次の場合は捨てても割に合わないため、候補にせず `None` を返す。
+    /// - 書き出しを待っているフレームが無いとき。捨てる先が無く、
+    ///   [`Self::canvas`] もまだ埋まっていない
+    /// - 保留中のフレームが先頭フレームのとき。先頭のfcTLの
+    ///   dispose_op=PREVIOUSはBACKGROUNDとして扱われてキャンバスが復元されず、
+    ///   [`Self::canvas`] もまだ埋まっていない
+    /// - 矩形が捨てない場合より小さくならないとき。圧縮すれば小さくなることは
+    ///   あるが、それを測る圧縮の方が高くつく
     fn restored_rect(&self, data: &[u8], kept: Rect) -> Option<Rect> {
         if self.pending.is_none() || self.frames_accepted < 2 {
             return None;
