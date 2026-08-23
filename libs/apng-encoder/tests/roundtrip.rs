@@ -26,8 +26,7 @@ fn config(color_type: ColorType) -> Config {
         color_type,
         compression_level: 6,
         num_plays: 0,
-        reduce_color: false,
-        max_spool_bytes: DEFAULT_MAX_SPOOL_BYTES,
+        ..Config::default()
     }
 }
 

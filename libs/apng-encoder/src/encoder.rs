@@ -72,6 +72,19 @@ pub struct Config {
     pub max_spool_bytes: usize,
 }
 
+/// 既定は無限ループするRGB8で、圧縮レベルは6、色種別は落とさない
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            color_type: ColorType::Rgb8,
+            compression_level: 6,
+            num_plays: 0,
+            reduce_color: false,
+            max_spool_bytes: DEFAULT_MAX_SPOOL_BYTES,
+        }
+    }
+}
+
 /// APNGエンコーダ
 ///
 /// [`Encoder::add_frame`] でフレームを1つずつ書き出し、[`Encoder::finish`] で終端する。
