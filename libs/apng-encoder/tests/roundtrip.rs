@@ -762,3 +762,46 @@ fn a_single_frame_input_is_decided_on_that_frame() {
         assert_reduced_roundtrip(&bytes, &input, expected);
     }
 }
+
+/// 差分矩形の内側にあるアルファは、矩形の原点から離れていても見つかる
+///
+/// 走査が矩形の先頭だけに縮むと、アルファが無いものとして扱われてRGBへ落ちてしまう。
+#[test]
+fn alpha_anywhere_inside_a_partial_rect_is_found() {
+    const BLOCK: u32 = 3;
+    const ORIGIN: (u32, u32) = (4, 2);
+
+    for hole in [(0u32, 0u32), (1, 1), (BLOCK - 1, BLOCK - 1)] {
+        let base = vec![0xFFu8; REDUCE_FRAME_LEN];
+        let mut changed = base.clone();
+        for y in 0..BLOCK {
+            for x in 0..BLOCK {
+                let start =
+                    ((ORIGIN.1 + y) as usize * REDUCE_WIDTH as usize + (ORIGIN.0 + x) as usize) * 4;
+                changed[start..start + 3].fill(0x10 + (y * BLOCK + x) as u8);
+                if (x, y) == hole {
+                    changed[start + 3] = 0x80;
+                }
+            }
+        }
+
+        let input = vec![base, changed];
+        let (bytes, _) = encode_with(
+            REDUCE_WIDTH,
+            REDUCE_HEIGHT,
+            reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+            &input,
+        );
+
+        let (_, decoded) = decode(&bytes);
+        assert_eq!(
+            rects(&decoded),
+            [
+                (0, 0, REDUCE_WIDTH, REDUCE_HEIGHT),
+                (ORIGIN.0, ORIGIN.1, BLOCK, BLOCK)
+            ],
+            "{hole:?}"
+        );
+        assert_reduced_roundtrip(&bytes, &input, png::ColorType::Rgba);
+    }
+}
