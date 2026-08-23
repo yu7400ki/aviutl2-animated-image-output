@@ -1,5 +1,7 @@
-//! PNGチャンクの書き出し
+//! PNGチャンクの書き出しと、APNGのフレームを並べる連番の管理
 
+use crate::delay::FrameDelay;
+use crate::diff::Rect;
 use crate::error::Error;
 use std::io::Write;
 
@@ -8,6 +10,104 @@ pub(crate) const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A,
 
 /// チャンクのデータ長の上限
 const MAX_LEN: usize = 0x7FFF_FFFF;
+
+/// 前のフレームを消さずに次のフレームを描画する
+pub(crate) const DISPOSE_OP_NONE: u8 = 0;
+/// フレームの領域を描画前の内容へ戻してから次のフレームを描画する
+pub(crate) const DISPOSE_OP_PREVIOUS: u8 = 2;
+/// フレームの内容で領域を置き換える
+pub(crate) const BLEND_OP_SOURCE: u8 = 0;
+/// フレームの内容をキャンバスへアルファ合成する
+pub(crate) const BLEND_OP_OVER: u8 = 1;
+
+/// チャンクを順に並べる書き出し先
+///
+/// fcTLとfdATが共有する連番と、書き出したフレーム数を保つ。
+pub(crate) struct ChunkWriter<W: Write> {
+    writer: W,
+    /// fcTLとfdATで共有する連番
+    sequence: u32,
+    /// 実際に書き出したフレーム数
+    emitted: u32,
+}
+
+impl<W: Write> ChunkWriter<W> {
+    pub(crate) fn new(writer: W) -> Self {
+        ChunkWriter {
+            writer,
+            sequence: 0,
+            emitted: 0,
+        }
+    }
+
+    /// PNGシグネチャを書き出す
+    pub(crate) fn write_signature(&mut self) -> Result<(), Error> {
+        self.writer.write_all(&SIGNATURE)?;
+        Ok(())
+    }
+
+    /// 連番を持たないチャンクを1つ書き出す
+    pub(crate) fn write(&mut self, chunk_type: [u8; 4], data: &[u8]) -> Result<(), Error> {
+        write(&mut self.writer, chunk_type, data)
+    }
+
+    /// fcTLに続けて、圧縮した本体をIDATかfdATで書き出す
+    pub(crate) fn write_frame(
+        &mut self,
+        rect: Rect,
+        delay: FrameDelay,
+        dispose: u8,
+        blend: u8,
+        body: &[u8],
+    ) -> Result<(), Error> {
+        self.write_fctl(rect, delay, dispose, blend)?;
+
+        // 先頭フレームはIDATに入り、以降はfdATに入る
+        if self.emitted == 0 {
+            write(&mut self.writer, *b"IDAT", body)?;
+        } else {
+            write_parts(
+                &mut self.writer,
+                *b"fdAT",
+                &[&self.sequence.to_be_bytes(), body],
+            )?;
+            self.sequence += 1;
+        }
+
+        self.emitted += 1;
+        Ok(())
+    }
+
+    fn write_fctl(
+        &mut self,
+        rect: Rect,
+        delay: FrameDelay,
+        dispose: u8,
+        blend: u8,
+    ) -> Result<(), Error> {
+        let (delay_num, delay_den) = delay.to_parts();
+
+        let mut fctl = [0u8; 26];
+        fctl[0..4].copy_from_slice(&self.sequence.to_be_bytes());
+        fctl[4..8].copy_from_slice(&rect.width.to_be_bytes());
+        fctl[8..12].copy_from_slice(&rect.height.to_be_bytes());
+        fctl[12..16].copy_from_slice(&rect.x.to_be_bytes());
+        fctl[16..20].copy_from_slice(&rect.y.to_be_bytes());
+        fctl[20..22].copy_from_slice(&delay_num.to_be_bytes());
+        fctl[22..24].copy_from_slice(&delay_den.to_be_bytes());
+        fctl[24] = dispose;
+        fctl[25] = blend;
+        write(&mut self.writer, *b"fcTL", &fctl)?;
+
+        self.sequence += 1;
+        Ok(())
+    }
+
+    /// 書き出し先を返す
+    pub(crate) fn into_inner(self) -> W {
+        self.writer
+    }
+}
 
 /// チャンクを1つ書き出す (長さ u32BE + 型 + データ + CRC32)
 pub(crate) fn write<W: Write>(w: &mut W, chunk_type: [u8; 4], data: &[u8]) -> Result<(), Error> {

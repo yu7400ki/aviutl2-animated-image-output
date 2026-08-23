@@ -2,21 +2,23 @@
 
 mod alpha;
 mod chunk;
+mod codec;
 mod delay;
+mod delta;
 mod diff;
 mod encoder;
 mod error;
 mod filter;
+mod layout;
 mod palette;
 mod region;
 mod spool;
 mod zlib;
 
 pub use delay::FrameDelay;
-pub use encoder::{
-    COMPRESSION_LEVELS, ColorReduction, ColorType, Config, DEFAULT_MAX_SPOOL_BYTES, Encoder,
-};
+pub use encoder::{COMPRESSION_LEVELS, ColorReduction, Config, DEFAULT_MAX_SPOOL_BYTES, Encoder};
 pub use error::Error;
+pub use layout::ColorType;
 
 /// テストで共有する素材の生成
 #[cfg(test)]
