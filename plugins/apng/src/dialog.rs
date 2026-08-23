@@ -3,7 +3,7 @@ use apng_encoder::COMPRESSION_LEVELS;
 use win32_dialog::{
     Dialog, MessageBox,
     layout::{FlexLayout, JustifyContent, SizeValue, labeled},
-    widget::{Button, ComboBox, Number},
+    widget::{Button, CheckBox, ComboBox, Number},
 };
 use windows::Win32::Foundation::HWND;
 
@@ -27,6 +27,8 @@ pub fn show_config_dialog(
             *COMPRESSION_LEVELS.start() as i32,
             *COMPRESSION_LEVELS.end() as i32,
         );
+
+    let reduce_color_checkbox = CheckBox::new("色数の最適化").checked(default_config.reduce_color);
 
     let dialog = Dialog::new("APNG出力設定");
     let handle = dialog.handle();
@@ -69,6 +71,7 @@ pub fn show_config_dialog(
         .with_layout(labeled("ループ回数 (0=無限ループ)", repeat_input.clone()))
         .with_layout(labeled("カラーフォーマット", color_combobox.clone()))
         .with_layout(labeled(&compression_label(), compression_input.clone()))
+        .with_widget(reduce_color_checkbox.clone())
         .with_layout(
             FlexLayout::row()
                 .with_gap(10.0)
@@ -95,6 +98,7 @@ pub fn show_config_dialog(
             _ => Default::default(),
         },
         compression_level: compression_input.get_value().map_err(|_| ())?,
+        reduce_color: reduce_color_checkbox.is_checked(),
     }))
 }
 

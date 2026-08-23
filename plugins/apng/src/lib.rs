@@ -1,7 +1,7 @@
 mod config;
 mod dialog;
 
-use apng_encoder::{ColorType, Config as EncoderConfig, Encoder, FrameDelay};
+use apng_encoder::{ColorReduction, ColorType, Config as EncoderConfig, Encoder, FrameDelay};
 use aviutl2::{
     FileFilter, IniConfig, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
     register_logger, register_output_plugin,
@@ -26,7 +26,25 @@ fn encoder_config(config: &Config) -> EncoderConfig {
         },
         compression_level: config.compression_level,
         num_plays: config.repeat,
+        reduce_color: config.reduce_color,
         ..EncoderConfig::default()
+    }
+}
+
+/// 色数の最適化が出力の色種別に及ぼした結果の説明
+fn color_reduction_message(reduction: ColorReduction) -> String {
+    match reduction {
+        ColorReduction::Palette { colors } => {
+            format!("色数の最適化: パレットに置き換えました ({}色)", colors)
+        }
+        ColorReduction::AlphaDropped => "色数の最適化: アルファを削除しました".into(),
+        ColorReduction::Kept => {
+            "色数の最適化: 色数が多いため、カラーフォーマットのまま出力しました".into()
+        }
+        ColorReduction::Abandoned => {
+            "色数の最適化: 解析に使えるメモリを超えたため、カラーフォーマットのまま出力しました"
+                .into()
+        }
     }
 }
 
@@ -68,6 +86,10 @@ fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
             .map_err(|e| format!("フレーム書き込みエラー: {}", e))?;
 
         info.rest_time_disp(frame, info.num_frames());
+    }
+
+    if let Some(reduction) = encoder.color_reduction() {
+        logger::info(&color_reduction_message(reduction));
     }
 
     encoder
@@ -185,5 +207,44 @@ mod tests {
         });
         assert_eq!(encoder_config.num_plays, 5);
         assert_eq!(encoder_config.compression_level, 3);
+    }
+
+    #[test]
+    fn the_color_reduction_setting_is_passed_through() {
+        assert!(
+            !encoder_config(&Config {
+                reduce_color: false,
+                ..Config::default()
+            })
+            .reduce_color
+        );
+        assert!(
+            encoder_config(&Config {
+                reduce_color: true,
+                ..Config::default()
+            })
+            .reduce_color
+        );
+    }
+
+    /// 結果ごとに違う説明が出て、パレットの色数は文面に載る
+    #[test]
+    fn every_color_reduction_has_its_own_message() {
+        let messages = [
+            ColorReduction::Palette { colors: 198 },
+            ColorReduction::AlphaDropped,
+            ColorReduction::Kept,
+            ColorReduction::Abandoned,
+        ]
+        .map(color_reduction_message);
+
+        assert!(messages[0].contains("198"));
+        for (index, message) in messages.iter().enumerate() {
+            assert!(!message.is_empty());
+            assert!(
+                !messages[index + 1..].contains(message),
+                "重複した説明: {message}"
+            );
+        }
     }
 }
