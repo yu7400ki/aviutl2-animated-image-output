@@ -232,6 +232,17 @@ fn decide_output(spool: &Spool, input: ColorType, is_last: bool) -> Option<Decis
     }
 }
 
+/// 圧縮後の合計から、アルファを落とすかどうかを決める
+///
+/// 同じ大きさなら1画素のバイト数が小さいアルファを落とした方を採る。
+fn smaller_output(dropped: u64, kept: u64) -> Output {
+    if dropped <= kept {
+        Output::Rgb8
+    } else {
+        Output::Rgba8
+    }
+}
+
 /// 書き出しを待っているフレーム
 ///
 /// フレームのdispose_opは次のフレームの圧縮後サイズを見るまで決まらないため、
@@ -628,8 +639,7 @@ impl<W: Write> Encoder<W> {
 
     /// アルファを落とした表現と落とさない表現を圧縮して比べ、小さい方を採る
     ///
-    /// 見るのは先頭の [`COLOR_PROBE_FRAMES`] フレームまで。同じ大きさなら
-    /// 1画素のバイト数が小さいアルファを落とした方を採る。
+    /// 見るのは先頭の [`COLOR_PROBE_FRAMES`] フレームまで。
     ///
     /// ここでの圧縮はどちらの表現を採るかを決めるためのもので、フィルタ戦略の
     /// プローブには数えない。数えないままなので戦略はまだ固まっておらず、どちらの
@@ -647,11 +657,7 @@ impl<W: Write> Encoder<W> {
             kept += self.compressed.len() as u64;
         }
 
-        if dropped <= kept {
-            Output::Rgb8
-        } else {
-            Output::Rgba8
-        }
+        smaller_output(dropped, kept)
     }
 
     /// 溜めたフレームを `output` の表現へ直してフィルタして圧縮し、[`Self::compressed`] へ格納する
