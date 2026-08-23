@@ -788,6 +788,32 @@ mod tests {
         }
     }
 
+    /// 溜めたフレームで固めた戦略は、書き出しへ移った後も変わらない
+    ///
+    /// 透過が見つかった時点で溜めたぶんがまとめて圧縮されるため、そこでプローブが
+    /// 尽きる。以降のフレームは書き出し経路を通る。
+    #[test]
+    fn the_strategy_fixed_by_spooled_frames_stays_fixed() {
+        let config = Config {
+            color_type: ColorType::Rgba8,
+            reduce_color: true,
+            ..Config::default()
+        };
+
+        let mut input: Vec<Vec<u8>> = (0..PROBE_FRAMES)
+            .map(|seed| with_alpha(&flat_frame(seed)))
+            .collect();
+        input.last_mut().expect("フレームがある")[3] = 0x80;
+        input.extend((0..4).map(|seed| with_alpha(&detailed_frame(seed))));
+
+        let bytes = encode(&input, config);
+        let types = filter_types(&bytes, 4);
+        assert_eq!(types.len(), input.len());
+        for (index, frame) in types.iter().enumerate().skip(PROBE_FRAMES as usize) {
+            assert!(frame.iter().all(|&f| f == 0), "フレーム {index}: {frame:?}");
+        }
+    }
+
     /// プローブは候補ごとの圧縮後バイト数を積み、合計の小さい方へ固める
     #[test]
     fn the_probe_fixes_the_candidate_with_the_smaller_total() {
