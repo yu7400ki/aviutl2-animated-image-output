@@ -692,11 +692,9 @@ impl<W: Write> Encoder<W> {
         self.palette = (output == Output::Indexed8).then(|| colors.into_palette());
         self.reduction = Some(match decision {
             Decision::Abandoned => ColorReduction::Abandoned,
+            Decision::Compared(Output::Rgb8) => ColorReduction::AlphaDropped,
             // 圧縮して比べた結果なので、残った理由は落とすと大きくなること
-            Decision::Compared(_) => match output {
-                Output::Rgb8 => ColorReduction::AlphaDropped,
-                _ => ColorReduction::AlphaKept,
-            },
+            Decision::Compared(_) => ColorReduction::AlphaKept,
             // 溜めた内容だけで定まる先は、パレットか透過を含むRGBAか入力そのもの
             Decision::Fixed(_) => match output {
                 Output::Indexed8 => ColorReduction::Palette {
