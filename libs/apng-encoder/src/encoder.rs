@@ -218,8 +218,6 @@ enum Stage {
     Streaming {
         /// 出力の画素表現
         output: Output,
-        /// 出力がパレット参照のときの、添字と色の対応
-        palette: Option<Palette>,
         /// 書き出しを待っているフレーム
         pending: Option<Pending>,
     },
@@ -227,10 +225,9 @@ enum Stage {
 
 impl Stage {
     /// 出力の画素表現を確定した直後の、まだ何も保留していない段階
-    fn streaming(output: Output, palette: Option<Palette>) -> Self {
+    fn streaming(output: Output) -> Self {
         Stage::Streaming {
             output,
-            palette,
             pending: None,
         }
     }
@@ -301,7 +298,7 @@ impl<W: Write> Encoder<W> {
                 alpha_choice: None,
             }
         } else {
-            Stage::streaming(Output::from(config.color_type), None)
+            Stage::streaming(Output::from(config.color_type))
         };
         let mut encoder = Encoder {
             chunks: ChunkWriter::new(writer),
@@ -424,13 +421,7 @@ impl<W: Write> Encoder<W> {
                 spool,
                 alpha_choice,
             } => parts.spool_frame(spool, alpha_choice, data, delay)?,
-            Stage::Streaming {
-                output,
-                palette,
-                pending,
-            } => {
-                // 出力がパレット参照に決まるのは最後のフレームで、以降のフレームは来ない
-                debug_assert!(palette.is_none());
+            Stage::Streaming { output, pending } => {
                 parts.stream_frame(*output, pending, data, delay)?;
                 None
             }
@@ -532,10 +523,10 @@ impl<W: Write> Parts<'_, W> {
 
         // 抱えきれない大きさが来たら、入力の色種別で確定して溜めたぶんを流す
         if !spool.can_hold(region_len) {
-            let (output, palette) = self.commit(spool, Decision::Abandoned)?;
+            let output = self.commit(spool, Decision::Abandoned)?;
             self.emit_frame(data, rect, delay, output)?;
             self.delta.advance(data, DISPOSE_OP_NONE);
-            return Ok(Some(Stage::streaming(output, palette)));
+            return Ok(Some(Stage::streaming(output)));
         }
 
         spool.push(
@@ -549,10 +540,7 @@ impl<W: Write> Parts<'_, W> {
 
         let is_last = self.frames_accepted + 1 == self.num_frames;
         let next = match self.decide_output(spool, alpha_choice, is_last) {
-            Some(decision) => {
-                let (output, palette) = self.commit(spool, decision)?;
-                Some(Stage::streaming(output, palette))
-            }
+            Some(decision) => Some(Stage::streaming(self.commit(spool, decision)?)),
             None => None,
         };
         self.delta.advance(data, DISPOSE_OP_NONE);
@@ -641,12 +629,10 @@ impl<W: Write> Parts<'_, W> {
 
     /// 出力の画素表現を確定し、ヘッダに続けて溜めたフレームを書き出す
     ///
-    /// 確定した表現と、パレット参照ならその対応を返す。
-    fn commit(
-        &mut self,
-        spool: &mut Spool,
-        decision: Decision,
-    ) -> Result<(Output, Option<Palette>), Error> {
+    /// パレット参照へ落とした場合の添字と色の対応は、ヘッダと溜めたフレームを
+    /// 書き終えるまでしか要らない。出力がパレット参照に決まるのは最後のフレームで、
+    /// 以降のフレームは来ないため、書き出しへ移った後に引くことがない。
+    fn commit(&mut self, spool: &mut Spool, decision: Decision) -> Result<Output, Error> {
         let (frames, colors) = spool.drain();
         let output = match decision {
             Decision::Fixed(output) | Decision::Compared(output) => output,
@@ -685,7 +671,7 @@ impl<W: Write> Parts<'_, W> {
             self.codec.give(body);
         }
 
-        Ok((output, palette))
+        Ok(output)
     }
 
     /// 溜めるのをやめたフレームを1つ書き出す
