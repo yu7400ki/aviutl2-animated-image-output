@@ -94,8 +94,8 @@ pub(crate) fn pack_over(
     out.reserve(rect.width as usize * rect.height as usize * RGBA);
 
     let mut collapsed = false;
-    for (prev, curr) in region_rows(prev, curr, stride, rect) {
-        for (p, c) in prev.chunks_exact(RGBA).zip(curr.chunks_exact(RGBA)) {
+    for (prev_row, curr_row) in region_rows(prev, curr, stride, rect) {
+        for (p, c) in prev_row.chunks_exact(RGBA).zip(curr_row.chunks_exact(RGBA)) {
             if p == c {
                 collapsed = true;
                 out.extend_from_slice(&TRANSPARENT);
@@ -113,6 +113,7 @@ pub(crate) fn pack_over(
     }
     collapsed
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

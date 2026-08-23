@@ -638,25 +638,23 @@ impl<W: Write> Encoder<W> {
         };
         let mut over = std::mem::take(&mut self.over);
         over.clear();
-        let packed = diff::pack_over(base, data, self.stride, rect, &mut over);
-
-        if !packed {
-            self.over = over;
-            return (BLEND_OP_SOURCE, source);
-        }
-
-        let out_bpp = self.output.bytes_per_pixel();
-        let source_len = self.compressed.len();
-        std::mem::swap(&mut self.compressed, &mut self.blend_probed);
-        let over_probe = self.compress(&over, rect.width as usize * out_bpp, out_bpp);
-        self.over = over;
-
-        if self.compressed.len() < source_len {
-            (BLEND_OP_OVER, over_probe)
-        } else {
+        let chosen = if diff::pack_over(base, data, self.stride, rect, &mut over) {
+            let out_bpp = self.output.bytes_per_pixel();
+            let source_len = self.compressed.len();
             std::mem::swap(&mut self.compressed, &mut self.blend_probed);
+            let over_probe = self.compress(&over, rect.width as usize * out_bpp, out_bpp);
+
+            if self.compressed.len() < source_len {
+                (BLEND_OP_OVER, over_probe)
+            } else {
+                std::mem::swap(&mut self.compressed, &mut self.blend_probed);
+                (BLEND_OP_SOURCE, source)
+            }
+        } else {
             (BLEND_OP_SOURCE, source)
-        }
+        };
+        self.over = over;
+        chosen
     }
 
     /// 保留中のフレームを `dispose` で書き出し、本体に使っていた領域を返す
