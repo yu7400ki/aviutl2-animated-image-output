@@ -58,3 +58,64 @@ impl IniConfig for Config {
             .set("compression_level", self.compression_level.to_string());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load(entries: &[(&str, &str)]) -> Config {
+        let mut ini = Ini::new();
+        let mut section = ini.with_section(Some(Config::SECTION));
+        for (key, value) in entries {
+            section.set(*key, *value);
+        }
+        Config::load_from(ini.section(Some(Config::SECTION)))
+    }
+
+    #[test]
+    fn missing_section_falls_back_to_default() {
+        let config = Config::load_from(None);
+        let default = Config::default();
+        assert_eq!(config.repeat, default.repeat);
+        assert!(config.color_format == default.color_format);
+        assert_eq!(config.compression_level, default.compression_level);
+    }
+
+    #[test]
+    fn saved_values_round_trip() {
+        let saved = Config {
+            repeat: 3,
+            color_format: ColorFormat::Rgba32,
+            compression_level: 9,
+        };
+
+        let mut ini = Ini::new();
+        saved.save_to(&mut ini);
+        let loaded = Config::load_from(ini.section(Some(Config::SECTION)));
+
+        assert_eq!(loaded.repeat, saved.repeat);
+        assert!(loaded.color_format == saved.color_format);
+        assert_eq!(loaded.compression_level, saved.compression_level);
+    }
+
+    #[test]
+    fn out_of_range_compression_level_falls_back_to_default() {
+        let default = Config::default().compression_level;
+        for value in ["0", "10", "-1", "high", ""] {
+            assert_eq!(
+                load(&[("compression_level", value)]).compression_level,
+                default
+            );
+        }
+    }
+
+    /// 認識しないキーだけのセクションは既定値になる
+    #[test]
+    fn unknown_keys_are_ignored() {
+        let config = load(&[("compression_type", "2"), ("filter_type", "4")]);
+        assert_eq!(
+            config.compression_level,
+            Config::default().compression_level
+        );
+    }
+}
