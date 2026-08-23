@@ -146,10 +146,11 @@ const PROBE_FRAMES: u32 = 4;
 
 /// 出力の色種別を決めるまでに両方の表現で圧縮するフレーム数
 ///
-/// 先頭フレームと差分矩形のフレームで中身の性質が違うのは戦略を決めるときと
-/// 同じなので、[`PROBE_FRAMES`] と同じ回数を取る。比べるための圧縮は書き出しに
-/// 使い回せないため、増やした分だけ丸ごと余分になる。
-const COLOR_PROBE_FRAMES: u32 = PROBE_FRAMES;
+/// 先頭フレームはキャンバス全体を書くため、差分矩形を書く以降のフレームとは
+/// 中身の性質が違う。アルファを落とせるかどうかの傾きはフレームごとの振れが
+/// 大きく、行ごとのフィルタを選ぶときより多くの差分矩形を見ないと定まらない。
+/// 比べるための圧縮は書き出しに使い回せないため、増やした分だけ丸ごと余分になる。
+const COLOR_PROBE_FRAMES: u32 = 8;
 
 /// フィルタ戦略の決定
 ///
@@ -1170,13 +1171,13 @@ mod tests {
     /// 全画素が不透明でも、アルファを落として小さくなる素材だけが落とされる
     #[test]
     fn the_smaller_of_the_two_opaque_representations_is_written() {
-        let input: Vec<Vec<u8>> = (0..PROBE_FRAMES + 2)
+        let input: Vec<Vec<u8>> = (0..COLOR_PROBE_FRAMES + 2)
             .map(|seed| with_alpha(&detailed_frame(seed)))
             .collect();
         let bytes = encode(&input, reduce_rgba_config());
         assert_eq!(output_bytes_per_pixel(&bytes), 3);
 
-        let input: Vec<Vec<u8>> = (0..PROBE_FRAMES + 2)
+        let input: Vec<Vec<u8>> = (0..COLOR_PROBE_FRAMES + 2)
             .map(|seed| with_alpha(&dithered_frame(seed)))
             .collect();
         let bytes = encode(&input, reduce_rgba_config());
