@@ -14,16 +14,9 @@ const pluginSettings = {
         description: "透過無し / 透過付き",
       },
       {
-        name: "圧縮",
-        description: "標準 / 高速 / 最高",
-      },
-      {
-        name: "アダプティブフィルター",
-        description: "自動的に最適なフィルターを選択（処理時間は長くなります）",
-      },
-      {
-        name: "フィルター",
-        description: "PNG のフィルター設定（なし、Sub、Up、Average、Paeth）",
+        name: "圧縮レベル",
+        description:
+          "圧縮率と速度のトレードオフ（1-9、既定 6、値が大きいほど高圧縮）",
       },
     ],
   },
