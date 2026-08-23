@@ -460,14 +460,21 @@ mod tests {
         out
     }
 
-    /// 端数と境界を含む行長 (bpp 3・4それぞれのBPP - 1, BPP, BPP + 1 を含む)
-    const ROW_LENGTHS: [usize; 13] = [0, 1, 2, 3, 4, 5, 31, 32, 33, 63, 64, 65, 96];
+    /// 端数と境界を含む行長
+    ///
+    /// bpp 3・4それぞれのBPP - 1, BPP, BPP + 1 と、ベクタ本体の32バイト境界の前後、
+    /// 絶対値の総和が16bitに収まらない512バイト超を含む。
+    const ROW_LENGTHS: [usize; 20] = [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 31, 32, 33, 63, 64, 65, 95, 96, 97, 512, 513,
+    ];
 
     /// フィルタの分岐を広く踏むバイト列
     fn patterns(len: usize, seed: u32) -> Vec<Vec<u8>> {
         vec![
             noise(len, seed),
+            vec![0x00; len],
             vec![0x80; len],
+            vec![0xFF; len],
             (0..len).map(|i| i as u8).collect(),
             (0..len).map(|i| (i / 16 * 16) as u8).collect(),
             noise(len, seed + 100).iter().map(|v| v & 3).collect(),
@@ -627,13 +634,14 @@ mod tests {
     /// 0x80が並ぶ行では、行頭のbppバイトだけが残るSubが最小になる
     #[test]
     fn a_row_of_0x80_selects_sub() {
-        for bpp in [3, 4] {
-            let stride = 16 * bpp;
+        // 幅171(bpp3)・128(bpp4)の行は絶対値の総和が16bitに収まらない
+        for (bpp, width) in [(3, 16), (3, 171), (4, 16), (4, 128)] {
+            let stride = width * bpp;
             let data = vec![0x80u8; stride];
 
             let filtered = filter_scalar(&data, stride, bpp);
 
-            assert_eq!(filters_of(&filtered, stride), [SUB], "bpp={bpp}");
+            assert_eq!(filters_of(&filtered, stride), [SUB], "bpp={bpp} w={width}");
         }
     }
 
@@ -751,7 +759,7 @@ mod tests {
 
         for bpp in [3, 4] {
             for stride in ROW_LENGTHS {
-                for height in [1, 4] {
+                for height in [1, 2, 3, 4, 7] {
                     for data in patterns(stride * height, 3) {
                         assert_eq!(
                             filter_avx2(&data, stride, bpp),
