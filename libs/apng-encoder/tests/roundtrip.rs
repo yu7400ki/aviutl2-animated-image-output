@@ -1769,16 +1769,14 @@ fn an_opaque_input_that_grows_without_alpha_keeps_its_alpha() {
 }
 
 /// 符号化して、色種別を落とした結果を取り出す
-fn reduction_of(config: Config, input: &[Vec<u8>]) -> Option<ColorReduction> {
+fn reduction_of(
+    width: u32,
+    height: u32,
+    config: Config,
+    input: &[Vec<u8>],
+) -> Option<ColorReduction> {
     let delay = FrameDelay::new(1001, 30000).unwrap();
-    let mut encoder = Encoder::new(
-        Vec::new(),
-        REDUCE_WIDTH,
-        REDUCE_HEIGHT,
-        input.len() as u32,
-        config,
-    )
-    .unwrap();
+    let mut encoder = Encoder::new(Vec::new(), width, height, input.len() as u32, config).unwrap();
     for data in input {
         encoder.add_frame(data, delay).unwrap();
     }
@@ -1795,6 +1793,8 @@ fn a_palette_is_reported_with_its_color_count() {
         let input = vec![palette_frame(colors, 0), palette_frame(colors, 0)];
         assert_eq!(
             reduction_of(
+                REDUCE_WIDTH,
+                REDUCE_HEIGHT,
                 reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
                 &input
             ),
@@ -1812,6 +1812,8 @@ fn a_dropped_alpha_is_reported() {
     let input = reducible_frames(4, None);
     assert_eq!(
         reduction_of(
+            REDUCE_WIDTH,
+            REDUCE_HEIGHT,
             reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
             &input
         ),
@@ -1819,21 +1821,46 @@ fn a_dropped_alpha_is_reported() {
     );
 }
 
-/// 入力の色種別のままだったことが分かる
+/// 透過があってアルファを落とせなかったことが分かる
 #[test]
-fn a_kept_color_type_is_reported() {
-    let transparent = reducible_frames(4, Some(0));
+fn an_alpha_that_could_not_be_dropped_is_reported() {
+    let input = reducible_frames(4, Some(0));
     assert_eq!(
         reduction_of(
+            REDUCE_WIDTH,
+            REDUCE_HEIGHT,
             reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
-            &transparent
+            &input
         ),
-        Some(ColorReduction::Kept)
+        Some(ColorReduction::AlphaRequired)
     );
+}
 
+/// 全画素が不透明でも、落とすと大きくなって残したことは透過と区別して分かる
+#[test]
+fn an_alpha_kept_for_its_size_is_reported() {
+    let input: Vec<Vec<u8>> = (0..4)
+        .map(|seed| dithered_frame(ColorType::Rgba8, seed))
+        .collect();
+    assert_eq!(
+        reduction_of(
+            FILTER_WIDTH,
+            FILTER_HEIGHT,
+            reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+            &input
+        ),
+        Some(ColorReduction::AlphaKept)
+    );
+}
+
+/// 落とせる要素が無く入力の色種別のままだったことが分かる
+#[test]
+fn a_kept_color_type_is_reported() {
     let rgb = distinct_frames(ColorType::Rgb8, 4);
     assert_eq!(
         reduction_of(
+            REDUCE_WIDTH,
+            REDUCE_HEIGHT,
             reduce_config(ColorType::Rgb8, DEFAULT_MAX_SPOOL_BYTES),
             &rgb
         ),
@@ -1848,11 +1875,21 @@ fn an_abandoned_analysis_is_reported() {
     // 2フレーム目を溜められない上限
     let limit = REDUCE_FRAME_LEN + REDUCE_FRAME_LEN / 2;
     assert_eq!(
-        reduction_of(reduce_config(ColorType::Rgba8, limit), &input),
+        reduction_of(
+            REDUCE_WIDTH,
+            REDUCE_HEIGHT,
+            reduce_config(ColorType::Rgba8, limit),
+            &input
+        ),
         Some(ColorReduction::Abandoned)
     );
     assert_eq!(
-        reduction_of(reduce_config(ColorType::Rgba8, 0), &input),
+        reduction_of(
+            REDUCE_WIDTH,
+            REDUCE_HEIGHT,
+            reduce_config(ColorType::Rgba8, 0),
+            &input
+        ),
         Some(ColorReduction::Abandoned)
     );
 }
@@ -1861,5 +1898,13 @@ fn an_abandoned_analysis_is_reported() {
 #[test]
 fn nothing_is_reported_without_the_setting() {
     let input = reducible_frames(4, None);
-    assert_eq!(reduction_of(config(ColorType::Rgba8), &input), None);
+    assert_eq!(
+        reduction_of(
+            REDUCE_WIDTH,
+            REDUCE_HEIGHT,
+            config(ColorType::Rgba8),
+            &input
+        ),
+        None
+    );
 }

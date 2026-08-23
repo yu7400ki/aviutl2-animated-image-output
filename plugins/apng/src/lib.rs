@@ -38,6 +38,10 @@ fn color_reduction_message(reduction: ColorReduction) -> String {
             format!("色数の最適化: パレットに置き換えました ({}色)", colors)
         }
         ColorReduction::AlphaDropped => "色数の最適化: アルファを削除しました".into(),
+        ColorReduction::AlphaRequired => "色数の最適化: 透過があるためアルファを残しました".into(),
+        ColorReduction::AlphaKept => {
+            "色数の最適化: アルファを削除すると大きくなるため残しました".into()
+        }
         ColorReduction::Kept => {
             "色数の最適化: 色数が多いため、カラーフォーマットのまま出力しました".into()
         }
@@ -227,20 +231,35 @@ mod tests {
         );
     }
 
-    /// 結果ごとに違う説明が出て、パレットの色数は文面に載る
+    /// 結果ごとに決まった説明が出て、パレットの色数は文面に載る
     #[test]
     fn every_color_reduction_has_its_own_message() {
-        let messages = [
-            ColorReduction::Palette { colors: 198 },
-            ColorReduction::AlphaDropped,
-            ColorReduction::Kept,
-            ColorReduction::Abandoned,
-        ]
-        .map(color_reduction_message);
+        let cases = [
+            (
+                ColorReduction::Palette { colors: 198 },
+                "パレットに置き換え",
+            ),
+            (ColorReduction::AlphaDropped, "アルファを削除しました"),
+            (ColorReduction::AlphaRequired, "透過があるため"),
+            (ColorReduction::AlphaKept, "削除すると大きくなるため"),
+            (ColorReduction::Kept, "色数が多いため"),
+            (ColorReduction::Abandoned, "メモリを超えたため"),
+        ];
+
+        let messages: Vec<String> = cases
+            .iter()
+            .map(|&(reduction, expected)| {
+                let message = color_reduction_message(reduction);
+                assert!(
+                    message.contains(expected),
+                    "{reduction:?} の説明に {expected} が無い: {message}"
+                );
+                message
+            })
+            .collect();
 
         assert!(messages[0].contains("198"));
         for (index, message) in messages.iter().enumerate() {
-            assert!(!message.is_empty());
             assert!(
                 !messages[index + 1..].contains(message),
                 "重複した説明: {message}"

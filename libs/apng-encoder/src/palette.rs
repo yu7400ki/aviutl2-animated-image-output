@@ -91,6 +91,13 @@ impl Colors {
         self.exceeded
     }
 
+    /// 数えた色の種類数
+    ///
+    /// 上限を超えた後は数えないため、超えていない間だけ意味を持つ。
+    pub(crate) fn len(&self) -> u16 {
+        self.entries.len() as u16
+    }
+
     /// 画素列に現れる色を数える
     ///
     /// `pixels` は1画素 `bpp` バイトが隙間なく並んでいること。`bpp` は3か4であること。
@@ -167,11 +174,6 @@ pub(crate) struct Palette {
 }
 
 impl Palette {
-    /// 載せた色数
-    pub(crate) fn len(&self) -> u16 {
-        self.colors.len() as u16
-    }
-
     /// PLTEチャンクのデータ部
     ///
     /// 添字順に3バイトのR,G,Bを並べたもの。

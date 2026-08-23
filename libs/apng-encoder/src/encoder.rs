@@ -224,7 +224,11 @@ pub enum ColorReduction {
     },
     /// アルファを落とした
     AlphaDropped,
-    /// 色がパレットに収まらず、入力の色種別のままにした
+    /// 透過する画素があり、アルファを落とせなかった
+    AlphaRequired,
+    /// アルファを落とすと大きくなるため、落とさなかった
+    AlphaKept,
+    /// 落とせる要素が無く、入力の色種別のままにした
     Kept,
     /// 溜めたフレームが上限に達し、解析を打ち切って入力の色種別のままにした
     Abandoned,
@@ -655,14 +659,23 @@ impl<W: Write> Encoder<W> {
             Decision::Abandoned => Output::from(self.input),
         };
 
+        let color_count = colors.len();
         self.palette = (output == Output::Indexed8).then(|| colors.into_palette());
-        self.reduction = Some(match (decision, output) {
-            (Decision::Abandoned, _) => ColorReduction::Abandoned,
-            (_, Output::Indexed8) => ColorReduction::Palette {
-                colors: self.palette.as_ref().map_or(0, Palette::len),
+        self.reduction = Some(match decision {
+            Decision::Abandoned => ColorReduction::Abandoned,
+            // 圧縮して比べた結果なので、残った理由は落とすと大きくなること
+            Decision::Compare => match output {
+                Output::Rgb8 => ColorReduction::AlphaDropped,
+                _ => ColorReduction::AlphaKept,
             },
-            (_, Output::Rgb8) if self.input == ColorType::Rgba8 => ColorReduction::AlphaDropped,
-            _ => ColorReduction::Kept,
+            // 溜めた内容だけで定まる先は、パレットか透過を含むRGBAか入力そのもの
+            Decision::Fixed(_) => match output {
+                Output::Indexed8 => ColorReduction::Palette {
+                    colors: color_count,
+                },
+                Output::Rgba8 => ColorReduction::AlphaRequired,
+                Output::Rgb8 => ColorReduction::Kept,
+            },
         });
         self.output = output;
         self.write_header()?;
