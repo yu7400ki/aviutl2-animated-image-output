@@ -112,9 +112,47 @@ impl Palette {
     /// 画素列を添字へ写して `out` へ追記する
     ///
     /// `pixels` は1画素 `bpp` バイトが隙間なく並び、その色がすべてこのテーブルに
-    /// 載っていること。
+    /// 載っていること。載っているかは [`Coverage`] で確かめられる。
     pub(crate) fn append_indices(&self, pixels: &[u8], bpp: usize, out: &mut Vec<u8>) {
         self.indexed.append_indices(pixels, bpp, out);
+    }
+}
+
+/// 据えたテーブルに載っていない色が現れたかを見る表
+///
+/// 先頭区間から据えたテーブルは、以降のフレームの色を覆っているとは限らない。
+/// 載せた色を数えた表へフレームの画素を足し、種類が増えたかどうかで見る。
+/// 透過ラン用に足したスロットは数えない。そのエントリは添字を引く対象ではなく、
+/// 標識が後から現れたフレームは載っていない色を持つことになる。
+pub(crate) struct Coverage {
+    colors: Colors,
+    /// 据えたテーブルに載っている色の種類数
+    len: u16,
+}
+
+impl Coverage {
+    /// `palette` に載っている色だけを数えた表
+    pub(crate) fn of(palette: &Palette) -> Self {
+        // 色は画素と同じ並びで詰まっているため、1画素4バイトとして数え直せる
+        let packed: Vec<u8> = palette
+            .indexed
+            .colors()
+            .iter()
+            .flat_map(|color| color.to_le_bytes())
+            .collect();
+        let mut colors = Colors::new();
+        colors.observe(&packed, 4);
+
+        let len = colors.count();
+        Coverage { colors, len }
+    }
+
+    /// `pixels` の色がすべて載っているか
+    ///
+    /// `pixels` は1画素 `bpp` バイトが隙間なく並んでいること。
+    pub(crate) fn covers(&mut self, pixels: &[u8], bpp: usize) -> bool {
+        self.colors.observe(pixels, bpp);
+        !self.colors.exceeded() && self.colors.count() == self.len
     }
 }
 

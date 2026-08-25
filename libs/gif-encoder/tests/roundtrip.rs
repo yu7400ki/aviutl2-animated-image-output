@@ -5,7 +5,9 @@
 //! ffmpeg の2つでデコードする。ffmpeg が見つからない環境では、そちらだけを
 //! 飛ばして `gif` クレートの結果で判定する。
 
-use gif_encoder::{ColorType, Config, Encoder, Error, FrameDelay, PaletteKind, Report};
+use gif_encoder::{
+    ColorType, Config, DEFAULT_MAX_SPOOL_BYTES, Encoder, Error, FrameDelay, PaletteKind, Report,
+};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -41,7 +43,18 @@ fn encode(
     let config = Config {
         color_type,
         num_plays,
+        ..Config::default()
     };
+    encode_with(width, height, config, frames)
+}
+
+/// 設定を指定してフレーム列を符号化する
+fn encode_with(
+    width: u32,
+    height: u32,
+    config: Config,
+    frames: &[Vec<u8>],
+) -> Result<(Vec<u8>, Report), Error> {
     let mut encoder = Encoder::new(Vec::new(), width, height, frames.len() as u32, config)?;
     for (index, data) in frames.iter().enumerate() {
         encoder.add_frame(data, delay_of(index))?;
@@ -446,7 +459,9 @@ fn multiple_frames_share_one_exact_color_table() {
         .collect();
 
     let (_, report) = round_trip(WIDTH, HEIGHT, ColorType::Rgb8, &frames);
-    let PaletteKind::Exact { colors } = report.palette;
+    let PaletteKind::Exact { colors } = report.palette else {
+        panic!("全フレームを見て据えていない: {:?}", report.palette)
+    };
     assert!(colors <= 64, "和集合が {colors} 色まで広がっている");
 }
 
@@ -677,6 +692,144 @@ fn an_opaque_pixel_turning_transparent_is_rejected() {
 
     assert!(matches!(
         encode(WIDTH, HEIGHT, color, &[first, second], 0),
+        Err(Error::UnsupportedTransparency)
+    ));
+}
+
+/// スプールの上限で使う素材
+///
+/// 全フレームが先頭フレームと同じ2色しか使わないため、先頭区間だけで据えた
+/// カラーテーブルでも以降のフレームを覆える。
+fn moving_sprite(width: u32, height: u32, count: usize) -> Vec<Vec<u8>> {
+    let color = ColorType::Rgb8;
+    (0..count)
+        .map(|index| {
+            let mut frame = solid(width, height, color, &[0x30, 0x50, 0x70]);
+            let at = index as u32 % (width * height);
+            set_pixel(
+                &mut frame,
+                width,
+                color,
+                at % width,
+                at / width,
+                &[0xF0, 0xF0, 0xF0],
+            );
+            frame
+        })
+        .collect()
+}
+
+/// スプールの上限に達しても、溜めた区間と以降のフレームが同じ判定で書かれる
+#[test]
+fn frames_beyond_the_spool_limit_survive_both_decoders() {
+    const WIDTH: u32 = 8;
+    const HEIGHT: u32 = 4;
+    let frames = moving_sprite(WIDTH, HEIGHT, 9);
+
+    // 上限まで溜めた出力は、溜めきった出力とフレームごとに一致する
+    let (whole, report) = round_trip(WIDTH, HEIGHT, ColorType::Rgb8, &frames);
+    assert!(matches!(report.palette, PaletteKind::Exact { .. }));
+    let composed = compose(&decode_with_gif(&whole));
+
+    for limit in [0, 64, 256, DEFAULT_MAX_SPOOL_BYTES] {
+        let config = Config {
+            max_spool_bytes: limit,
+            ..Config::default()
+        };
+        let (bytes, report) = encode_with(WIDTH, HEIGHT, config, &frames).unwrap();
+        let decoded = decode_with_gif(&bytes);
+
+        assert_eq!(decoded.frames.len(), frames.len(), "上限 {limit}");
+        assert_eq!(compose(&decoded), composed, "上限 {limit} の合成結果が違う");
+        assert!(
+            report.peak_spool_bytes >= (WIDTH * HEIGHT) as usize * 3,
+            "上限 {limit} で先頭フレームが溜まっていない"
+        );
+
+        if let Some(raw) = decode_with_ffmpeg(&bytes) {
+            let frame_len = (WIDTH * HEIGHT) as usize * 4;
+            assert_eq!(raw.len(), frame_len * frames.len(), "上限 {limit}");
+            for (index, actual) in raw.chunks_exact(frame_len).enumerate() {
+                assert_eq!(
+                    actual, composed[index],
+                    "ffmpeg の {index} 番目 (上限 {limit})"
+                );
+            }
+        }
+    }
+}
+
+/// 上限に達した経路では、先頭区間から据えたことがレポートに出る
+#[test]
+fn a_table_settled_from_a_prefix_is_reported() {
+    const WIDTH: u32 = 8;
+    const HEIGHT: u32 = 4;
+    let frames = moving_sprite(WIDTH, HEIGHT, 5);
+
+    let config = Config {
+        max_spool_bytes: 0,
+        ..Config::default()
+    };
+    let (_, report) = encode_with(WIDTH, HEIGHT, config, &frames).unwrap();
+    assert_eq!(
+        report.palette,
+        PaletteKind::ExactFromPrefix {
+            colors: 2,
+            extra: 0
+        }
+    );
+
+    // 先頭フレームだけを溜めたぶんが山になる
+    let region = (WIDTH * HEIGHT) as usize * 3;
+    assert!(report.peak_spool_bytes >= region);
+    assert!(report.peak_spool_bytes < region * 2);
+}
+
+/// 先頭区間から据えたテーブルに無い色が後から現れたら弾く
+#[test]
+fn a_color_appearing_after_the_settlement_is_rejected() {
+    const WIDTH: u32 = 8;
+    const HEIGHT: u32 = 4;
+    let color = ColorType::Rgb8;
+
+    let first = solid(WIDTH, HEIGHT, color, &[0x30, 0x50, 0x70]);
+    let mut second = first.clone();
+    set_pixel(&mut second, WIDTH, color, 2, 1, &[0xF0, 0xF0, 0xF0]);
+
+    let config = Config {
+        max_spool_bytes: 0,
+        ..Config::default()
+    };
+    assert!(matches!(
+        encode_with(WIDTH, HEIGHT, config, &[first, second]),
+        Err(Error::TooManyColors)
+    ));
+}
+
+/// 溜めた区間の最後のフレームは、続きを見るまで書き出さない
+///
+/// 上限で決着した直後のフレームが「不透明 → 透過」の遷移を持つとき、その判定は
+/// 保留したままの最後のフレームに対して行われる。区間の中で書き出してしまうと
+/// 遷移を判定する相手が無くなり、表現できないことに気づけない。
+#[test]
+fn the_last_spooled_frame_is_carried_into_streaming() {
+    const WIDTH: u32 = 4;
+    const HEIGHT: u32 = 2;
+    let color = ColorType::Rgba8;
+
+    // 標識を先頭フレームへ入れて、先頭区間の和集合が2枚目の色を覆うようにする
+    let mut first = solid(WIDTH, HEIGHT, color, &[0x20, 0x40, 0x60, 0xFF]);
+    set_pixel(&mut first, WIDTH, color, 0, 0, &[0, 0, 0, 0]);
+    let mut second = first.clone();
+    set_pixel(&mut second, WIDTH, color, 1, 1, &[0, 0, 0, 0]);
+
+    let config = Config {
+        color_type: color,
+        max_spool_bytes: 0,
+        ..Config::default()
+    };
+    assert!(matches!(
+        encode_with(WIDTH, HEIGHT, config, &[first, second]),
         Err(Error::UnsupportedTransparency)
     ));
 }

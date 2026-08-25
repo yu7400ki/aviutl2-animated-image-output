@@ -24,6 +24,8 @@ pub(crate) struct Spool {
     frames: Vec<Spooled>,
     /// 抱えている画素データの概算バイト数
     len: usize,
+    /// 抱えられるメモリの上限バイト数
+    limit: usize,
     /// 直前に溜めたフレームの正規化した入力
     ///
     /// 差分矩形を求めるためだけに持つ。溜めた領域には数えない。
@@ -33,10 +35,11 @@ pub(crate) struct Spool {
 }
 
 impl Spool {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(limit: usize) -> Self {
         Spool {
             frames: Vec::new(),
             len: 0,
+            limit,
             previous: Vec::new(),
             colors: Colors::new(),
         }
@@ -47,6 +50,21 @@ impl Spool {
     /// クロップ済みの領域に、フレームごとの管理領域を加えたもの。
     pub(crate) fn len(&self) -> usize {
         self.len
+    }
+
+    /// `region_len` バイトの領域をもう1つ抱えても上限を超えないか
+    ///
+    /// カラーテーブルは1枚も溜めずには据えられないため、空のスプールは上限に
+    /// 関わらず受け入れる。
+    pub(crate) fn can_hold(&self, region_len: usize) -> bool {
+        if self.frames.is_empty() {
+            return true;
+        }
+
+        region_len
+            .checked_add(FRAME_OVERHEAD)
+            .and_then(|need| self.len.checked_add(need))
+            .is_some_and(|total| total <= self.limit)
     }
 
     /// 投入されたフレームを溜めるときの矩形
@@ -89,7 +107,7 @@ impl Spool {
 
     /// 溜めたフレームを投入した順に、色の和集合と合わせて取り出して空へ戻す
     pub(crate) fn drain(&mut self) -> (Vec<Spooled>, Colors) {
-        let spool = std::mem::replace(self, Spool::new());
+        let spool = std::mem::replace(self, Spool::new(self.limit));
         (spool.frames, spool.colors)
     }
 }
@@ -124,14 +142,14 @@ mod tests {
 
     #[test]
     fn the_first_frame_covers_the_logical_screen() {
-        let mut spool = Spool::new();
+        let mut spool = Spool::new(usize::MAX);
         assert_eq!(push(&mut spool, &frame(0x10)), layout().whole());
     }
 
     /// 2枚目以降は直前に溜めたフレームとの差分になる
     #[test]
     fn later_frames_are_cropped_against_the_previous_one() {
-        let mut spool = Spool::new();
+        let mut spool = Spool::new(usize::MAX);
         push(&mut spool, &frame(0x10));
 
         let mut next = frame(0x10);
@@ -150,7 +168,7 @@ mod tests {
     /// 差分の無いフレームは1画素の矩形になる
     #[test]
     fn an_identical_frame_becomes_a_unit_rect() {
-        let mut spool = Spool::new();
+        let mut spool = Spool::new(usize::MAX);
         push(&mut spool, &frame(0x10));
         assert_eq!(
             push(&mut spool, &frame(0x10)),
@@ -165,7 +183,7 @@ mod tests {
 
     #[test]
     fn frames_come_back_in_the_order_they_were_pushed() {
-        let mut spool = Spool::new();
+        let mut spool = Spool::new(usize::MAX);
         for value in [0x10u8, 0x20, 0x30] {
             push(&mut spool, &frame(value));
         }
@@ -179,7 +197,7 @@ mod tests {
     /// 抱えているバイト数は、切り出した領域とフレームごとの管理領域の合計
     #[test]
     fn the_length_counts_the_regions_and_their_overhead() {
-        let mut spool = Spool::new();
+        let mut spool = Spool::new(usize::MAX);
         push(&mut spool, &frame(0x10));
         assert_eq!(
             spool.len(),
@@ -200,7 +218,7 @@ mod tests {
     /// 取り出した後は先頭フレームを迎える前の状態へ戻る
     #[test]
     fn draining_leaves_the_spool_empty() {
-        let mut spool = Spool::new();
+        let mut spool = Spool::new(usize::MAX);
         push(&mut spool, &frame(0x10));
         spool.drain();
 
@@ -208,10 +226,38 @@ mod tests {
         assert_eq!(push(&mut spool, &frame(0x20)), layout().whole());
     }
 
+    #[test]
+    fn the_limit_is_reached_before_it_is_exceeded() {
+        let region = (WIDTH * HEIGHT) as usize * 3;
+        let mut spool = Spool::new(region + FRAME_OVERHEAD + 8 + FRAME_OVERHEAD);
+        push(&mut spool, &frame(0x10));
+
+        assert!(spool.can_hold(8));
+        assert!(!spool.can_hold(9));
+    }
+
+    /// カラーテーブルを据えるには1枚が要るため、空のスプールは上限を見ない
+    #[test]
+    fn an_empty_spool_holds_the_first_frame_at_any_limit() {
+        let mut spool = Spool::new(0);
+        assert!(spool.can_hold(usize::MAX));
+
+        push(&mut spool, &frame(0x10));
+        assert!(!spool.can_hold(0));
+    }
+
+    /// 加算が溢れる大きさは、上限に収まらないものとして扱う
+    #[test]
+    fn an_overflowing_request_does_not_fit() {
+        let mut spool = Spool::new(usize::MAX);
+        push(&mut spool, &frame(0x10));
+        assert!(!spool.can_hold(usize::MAX));
+    }
+
     /// 矩形の外にある色は数えない
     #[test]
     fn only_the_cropped_region_is_counted() {
-        let mut spool = Spool::new();
+        let mut spool = Spool::new(usize::MAX);
         let rect = Rect {
             x: 0,
             y: 0,

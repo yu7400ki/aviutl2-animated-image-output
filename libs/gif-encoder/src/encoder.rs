@@ -6,7 +6,7 @@ use crate::frame::{self, Canvas};
 use crate::layout::{ColorType, Layout};
 use crate::normalize;
 use crate::spool::{Spool, Spooled};
-use crate::table::Palette;
+use crate::table::{Coverage, Palette};
 use anim_core::{FrameDelay, Rect, paste};
 use std::borrow::Cow;
 use std::io::Write;
@@ -15,6 +15,16 @@ use std::io::Write;
 ///
 /// 0と1は多くのデコーダが10へ引き上げるため、それを避ける下限を置く。
 const MIN_DELAY: u64 = 2;
+
+/// [`Config::max_spool_bytes`] の目安となる値
+///
+/// グローバルカラーテーブルは1枚目の画像データより前に書く必要があるため、
+/// 色が決まるまでのフレームをエンコーダが抱えることになり、その量は素材の
+/// 大きさとフレーム数に比例する。
+///
+/// この512MiBは、1920x1080のRGBA8 (1フレーム約8.29MB) が全画面差分で続く場合の
+/// 64フレーム、30fpsで約2.1秒に相当する。
+pub const DEFAULT_MAX_SPOOL_BYTES: usize = 512 << 20;
 
 /// エンコード設定
 #[derive(Debug, Clone, Copy)]
@@ -25,6 +35,14 @@ pub struct Config {
     pub color_type: ColorType,
     /// アニメーションの再生回数 (0で無限ループ)
     pub num_plays: u32,
+    /// 溜めたフレームが抱えるメモリの上限バイト数
+    /// ([`DEFAULT_MAX_SPOOL_BYTES`] が目安)
+    ///
+    /// クロップ済みの画素データに、フレームごとの管理領域を加えた概算で数える。
+    /// 超える場合はそこまでの色でカラーテーブルを据え、以降のフレームは
+    /// 1フレーム遅れで書き出す。カラーテーブルは1枚も溜めずには据えられない
+    /// ため、先頭フレームだけは上限に関わらず溜める。
+    pub max_spool_bytes: usize,
 }
 
 /// 既定は無限ループするRGB8
@@ -33,6 +51,7 @@ impl Default for Config {
         Config {
             color_type: ColorType::Rgb8,
             num_plays: 0,
+            max_spool_bytes: DEFAULT_MAX_SPOOL_BYTES,
         }
     }
 }
@@ -44,6 +63,13 @@ pub enum PaletteKind {
     Exact {
         /// 色の和集合の大きさ
         colors: u16,
+    },
+    /// 溜めきれず、先頭区間の色を据えた
+    ExactFromPrefix {
+        /// 据えた区間の色の和集合の大きさ
+        colors: u16,
+        /// 据えた後に現れた、テーブルに無い色の数 (0なら可逆)
+        extra: u16,
     },
 }
 
@@ -92,6 +118,10 @@ struct Streaming {
     canvas: Canvas,
     /// 書き出しを待っているフレーム
     pending: Option<Pending>,
+    /// 先頭区間から据えたテーブルが以降のフレームの色を覆っているか見る表
+    ///
+    /// 全フレームを見て据えた場合は覆っていることが分かっているため `None`。
+    coverage: Option<Coverage>,
 }
 
 /// GIFのエンコーダ
@@ -143,7 +173,7 @@ impl<W: Write> Encoder<W> {
         Ok(Encoder {
             writer,
             layout: Layout::new(width, height, config.color_type)?,
-            stage: Stage::Deciding(Spool::new()),
+            stage: Stage::Deciding(Spool::new(config.max_spool_bytes)),
             num_frames,
             num_plays: config.num_plays,
             frames_accepted: 0,
@@ -313,6 +343,16 @@ impl<W: Write> Parts<'_, W> {
         delay: FrameDelay,
     ) -> Result<Option<Stage>, Error> {
         let rect = spool.rect_of(self.layout, pixels);
+        let region_len = rect.area() as usize * self.layout.bytes_per_pixel;
+
+        // 抱えきれない大きさが来たら、そこまでの色で据えて溜めたぶんを流し、
+        // 投入されたフレームは以降と同じ逐次の経路へ通す
+        if !spool.can_hold(region_len) {
+            let mut streaming = self.commit(spool, true)?;
+            self.write_frame(&mut streaming, pixels, delay)?;
+            return Ok(Some(Stage::Streaming(streaming)));
+        }
+
         spool.push(self.layout, pixels, rect, delay);
         *self.peak_spool_bytes = (*self.peak_spool_bytes).max(spool.len());
 
@@ -321,30 +361,47 @@ impl<W: Write> Parts<'_, W> {
             return Ok(None);
         }
 
-        let streaming = self.commit(spool)?;
+        let streaming = self.commit(spool, false)?;
         Ok(Some(Stage::Streaming(streaming)))
     }
 
     /// 色を決めてヘッダからカラーテーブルまでを書き、溜めたフレームを流す
-    fn commit(&mut self, spool: &mut Spool) -> Result<Streaming, Error> {
+    ///
+    /// `from_prefix` は溜めきれずに決着したことを表す。据えた色は溜めた区間の
+    /// ものでしかないため、以降のフレームの色を覆っているとは限らない。
+    fn commit(&mut self, spool: &mut Spool, from_prefix: bool) -> Result<Streaming, Error> {
         let (frames, colors) = spool.drain();
         if colors.exceeded() {
             return Err(Error::TooManyColors);
         }
 
-        let kind = PaletteKind::Exact {
-            colors: colors.count(),
-        };
+        let colors_count = colors.count();
         let palette = Palette::from_colors(colors);
-        *self.palette_kind = Some(kind);
+        *self.palette_kind = Some(if from_prefix {
+            // 据えた時点では、テーブルに無い色はまだ1つも現れていない
+            PaletteKind::ExactFromPrefix {
+                colors: colors_count,
+                extra: 0,
+            }
+        } else {
+            PaletteKind::Exact {
+                colors: colors_count,
+            }
+        });
         self.write_head(&palette)?;
 
         let mut streaming = Streaming {
             palette,
             canvas: Canvas::new(*self.layout),
             pending: None,
+            coverage: None,
         };
         self.replay(&frames, &mut streaming)?;
+
+        // 溜めた区間の色は和集合そのもので、覆っているか見る必要があるのは以降だけ
+        if from_prefix {
+            streaming.coverage = Some(Coverage::of(&streaming.palette));
+        }
         Ok(streaming)
     }
 
@@ -392,6 +449,13 @@ impl<W: Write> Parts<'_, W> {
         pixels: &[u8],
         delay: FrameDelay,
     ) -> Result<(), Error> {
+        // 添字を引けない色が混じっていれば、矩形も廃棄方法も意味を持たない
+        if let Some(coverage) = &mut streaming.coverage
+            && !coverage.covers(pixels, self.layout.bytes_per_pixel)
+        {
+            return Err(Error::TooManyColors);
+        }
+
         // 廃棄方法は保留中のフレームのもので、投入されたフレームが載るキャンバスを
         // 決める。決めてからそのキャンバスで矩形と添字を求める
         if let Some(pending) = streaming.pending.take() {

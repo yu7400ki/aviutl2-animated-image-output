@@ -11,7 +11,7 @@ mod spool;
 mod table;
 
 pub use anim_core::FrameDelay;
-pub use encoder::{Config, Encoder, PaletteKind, Report};
+pub use encoder::{Config, DEFAULT_MAX_SPOOL_BYTES, Encoder, PaletteKind, Report};
 pub use error::Error;
 pub use layout::ColorType;
 
