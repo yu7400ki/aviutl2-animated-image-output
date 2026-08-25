@@ -988,13 +988,12 @@ fn an_opaque_animation_keeps_every_frame() {
     );
 }
 
-/// 透過インデックスを持たないテーブルでは、後から現れた透過画素を弾く
+/// 先頭区間がちょうど256色を埋めても、透過を持てる入力ならスロットを取る
 ///
-/// 和集合がちょうど256色を埋めた先頭区間から据えると透過スロットが取れない。
-/// 廃棄方法は画面から画素を抜けるが、抜いた位置を書かずに済ませる添字が無く、
-/// 透過の位置そのものを表現できない。
+/// 先頭区間から据えたテーブルは以降のフレームの色を覆う保証が無く、覆っていない
+/// 色が透過なら廃棄方法では書けない。明け渡した1色は最近傍へ写る。
 #[test]
-fn a_transparent_pixel_without_a_transparent_index_is_rejected() {
+fn a_prefix_that_fills_the_table_still_reserves_a_transparent_slot() {
     let color = ColorType::Rgba8;
     let first: Vec<u8> = (0..256).flat_map(|i| [i as u8, 0, 0, 0xFF]).collect();
     let mut second = first.clone();
@@ -1005,10 +1004,42 @@ fn a_transparent_pixel_without_a_transparent_index_is_rejected() {
         max_spool_bytes: 0,
         ..Config::default()
     };
-    assert!(matches!(
-        encode_with(16, 16, config, &[first, second]),
-        Err(Error::UnsupportedTransparency)
-    ));
+    // 明け渡した色の画素は最近傍へ写る。写す先は6-6-6のビン単位で引くので、
+    // 隣り合う色のどれになるかはビンの幅まで開く
+    let (bytes, report) = round_trip_config(16, 16, config, &[first, second], 4);
+    assert_eq!(report.palette, PaletteKind::ExactFromPrefix { colors: 256 });
+    assert!(
+        report.approximated_pixels > 0,
+        "明け渡した色が最近傍へ写っていない"
+    );
+
+    let decoded = decode_with_gif(&bytes);
+    assert!(
+        decoded.frames[0].transparent.is_some(),
+        "透過スロットを取っていない"
+    );
+    assert_eq!(
+        disposals(&bytes),
+        [gif::DisposalMethod::Background, gif::DisposalMethod::Keep]
+    );
+}
+
+/// 透過を持てない入力では、和集合が埋まったテーブルの色を明け渡さない
+#[test]
+fn a_prefix_that_fills_the_table_keeps_every_color_without_alpha() {
+    let first: Vec<u8> = (0..256).flat_map(|i| [i as u8, 0, 0]).collect();
+    let mut second = first.clone();
+    set_pixel(&mut second, 16, ColorType::Rgb8, 1, 1, &[0, 0, 0]);
+
+    let config = Config {
+        color_type: ColorType::Rgb8,
+        max_spool_bytes: 0,
+        ..Config::default()
+    };
+    let (bytes, report) = round_trip_config(16, 16, config, &[first, second], 0);
+    assert_eq!(report.palette, PaletteKind::ExactFromPrefix { colors: 256 });
+    assert_eq!(report.approximated_pixels, 0, "色を明け渡している");
+    assert_eq!(decode_with_gif(&bytes).frames[0].transparent, None);
 }
 
 /// スプールの上限で使う素材

@@ -290,8 +290,7 @@ impl<W: Write> Encoder<W> {
     /// # Errors
     /// バイト数が寸法と色種別から決まる長さと違うとき
     /// [`Error::FrameSizeMismatch`]。宣言したフレーム数を超えたとき
-    /// [`Error::FrameCountMismatch`]。透過インデックスを持たない
-    /// テーブルに透過画素が現れたとき [`Error::UnsupportedTransparency`]。
+    /// [`Error::FrameCountMismatch`]。
     pub fn add_frame(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
         if self.poisoned {
             return Err(Error::Poisoned);
@@ -495,7 +494,11 @@ impl<W: Write> Parts<'_, W> {
                 } else {
                     PaletteKind::Exact { colors: count }
                 };
-                (Palette::from_colors(settled.colors), kind)
+                // 先頭区間から据えたテーブルは以降のフレームの色を覆う保証が無く、
+                // 覆っていない色が透過なら廃棄方法では書けない。透過を持てる入力では
+                // 1色を明け渡してでもスロットを取る
+                let reserve = from_prefix && self.layout.color_type == ColorType::Rgba8;
+                (Palette::from_colors(settled.colors, reserve), kind)
             }
         };
         *self.palette_kind = Some(kind);
@@ -589,7 +592,7 @@ impl<W: Write> Parts<'_, W> {
                     rendered,
                     delay,
                     pacing,
-                )?;
+                );
                 let disposed = waiting.rect;
                 self.write_pending(waiting, disposal)?;
                 canvas.advance(disposal, disposed, rendered, laid.rect);
@@ -632,10 +635,6 @@ impl<W: Write> Parts<'_, W> {
 ///
 /// 抜く候補が2つ立ったときは、両方を符号化して圧縮後の大きさで選ぶ。抜きたい
 /// 画素が保留中のフレームの矩形の外にあるときは、その矩形を広げて符号化し直す。
-///
-/// # Errors
-/// 透過インデックスを持たないテーブルに透過画素が現れたとき
-/// [`Error::UnsupportedTransparency`]。
 fn choose_disposal(
     canvas: &mut Canvas,
     palette: &mut Palette,
@@ -644,17 +643,19 @@ fn choose_disposal(
     rendered: &[u8],
     delay: u16,
     pacing: &mut RestorePacing,
-) -> Result<(u8, Pending), Error> {
+) -> (u8, Pending) {
     if canvas.kept().expressible(rendered) {
         let laid = lay_out(canvas.kept(), rendered, palette, indices, delay);
-        return Ok((DISPOSAL_DO_NOT_DISPOSE, laid));
+        return (DISPOSAL_DO_NOT_DISPOSE, laid);
     }
 
-    // 抜いた画素を書かずに済ませるには透過インデックスが要る。持たないテーブルは
-    // 抜いた先を色で塗ることしかできず、透過の位置そのものを表現できない
-    if palette.transparent().is_none() {
-        return Err(Error::UnsupportedTransparency);
-    }
+    // ここへ来るのは投入されたフレームに透過画素があるときだけで、そのとき
+    // テーブルは必ず透過インデックスを持つ。抜いた画素を書かずに済ませる添字が
+    // 無ければ、透過の位置そのものを表現できない
+    debug_assert!(
+        palette.transparent().is_some(),
+        "透過インデックスの無いテーブルに透過画素が現れた"
+    );
 
     // 広げた分は描く直前の画面と一致する画素なので透過ランに潰れ、
     // 描いた後の画面は変わらない
@@ -680,16 +681,16 @@ fn choose_disposal(
     let previous = disposed.previous();
     let cleared = lay_out(background, rendered, palette, indices, delay);
     if !previous.expressible(rendered) || !pacing.should_try() {
-        return Ok((DISPOSAL_RESTORE_TO_BACKGROUND, cleared));
+        return (DISPOSAL_RESTORE_TO_BACKGROUND, cleared);
     }
 
     let restored = lay_out(previous, rendered, palette, indices, delay);
     let taken = restored.body.len() < cleared.body.len();
     pacing.record(taken);
     if taken {
-        Ok((DISPOSAL_RESTORE_TO_PREVIOUS, restored))
+        (DISPOSAL_RESTORE_TO_PREVIOUS, restored)
     } else {
-        Ok((DISPOSAL_RESTORE_TO_BACKGROUND, cleared))
+        (DISPOSAL_RESTORE_TO_BACKGROUND, cleared)
     }
 }
 

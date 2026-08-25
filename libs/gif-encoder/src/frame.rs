@@ -391,7 +391,7 @@ mod tests {
         for frame in frames {
             colors.observe(frame, bpp);
         }
-        Palette::from_colors(colors)
+        Palette::from_colors(colors, false)
     }
 
     /// 先頭フレームを描き、その矩形を返す

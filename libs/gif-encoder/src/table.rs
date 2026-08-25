@@ -95,16 +95,24 @@ impl Palette {
     /// 透過標識が和集合にあるなら、そのエントリがそのまま透過インデックスになる。
     /// 素材自身の透過画素と未変更画素のランはどちらも「キャンバスを書き換えない」
     /// という同じ意味なので、スロットを分けない。標識が無いときだけ透過ラン用の
-    /// スロットを1つ足すが、和集合が [`MAX_COLORS`] を埋めているなら足せない。
-    /// 可逆性は透過ランの削減より優先するため、そのときは透過ランを諦める。
+    /// スロットを1つ足す。
+    ///
+    /// `reserve_transparent` は、和集合が [`MAX_COLORS`] を埋めていてもスロットを
+    /// 取るかを決める。取るときは最後に見つけた色を1つ落とす。落とした色の画素は
+    /// 最近傍へ写り、[`Palette::approximated`] に数えられる。
     ///
     /// # Panics
     /// 色数が [`MAX_COLORS`] を超えているとき。
-    pub(crate) fn from_colors(colors: Colors) -> Self {
+    pub(crate) fn from_colors(colors: Colors, reserve_transparent: bool) -> Self {
         // GIFは添字の局所性に無関心なので、見つけた順のまま添字を振る
         let mut entries = colors.into_indexed(|_| ()).colors().to_vec();
-        if !entries.contains(&TRANSPARENT) && entries.len() < MAX_COLORS {
-            entries.push(TRANSPARENT);
+        if !entries.contains(&TRANSPARENT) {
+            if reserve_transparent && entries.len() == MAX_COLORS {
+                entries.pop();
+            }
+            if entries.len() < MAX_COLORS {
+                entries.push(TRANSPARENT);
+            }
         }
         Palette::new(entries)
     }
@@ -290,7 +298,7 @@ mod tests {
     #[test]
     fn the_marker_entry_doubles_as_the_transparent_index() {
         let pixels = [1u8, 2, 3, 0xFF, 0, 0, 0, 0, 4, 5, 6, 0xFF];
-        let palette = Palette::from_colors(colors_of(&pixels, 4));
+        let palette = Palette::from_colors(colors_of(&pixels, 4), false);
 
         assert_eq!(palette.transparent(), Some(1));
         assert_eq!(palette.table().len(), 4, "透過スロットを余分に足している");
@@ -300,7 +308,7 @@ mod tests {
     #[test]
     fn an_opaque_union_gains_a_transparent_slot() {
         let pixels = [1u8, 2, 3, 4, 5, 6];
-        let palette = Palette::from_colors(colors_of(&pixels, 3));
+        let palette = Palette::from_colors(colors_of(&pixels, 3), false);
 
         assert_eq!(palette.transparent(), Some(2));
         assert_eq!(
@@ -318,10 +326,42 @@ mod tests {
         let pixels: Vec<u8> = (0..MAX_COLORS)
             .flat_map(|i| [i as u8, (i >> 8) as u8, 0])
             .collect();
-        let palette = Palette::from_colors(colors_of(&pixels, 3));
+        let palette = Palette::from_colors(colors_of(&pixels, 3), false);
 
         assert_eq!(palette.transparent(), None);
         assert_eq!(palette.table().len(), MAX_COLORS);
+    }
+
+    /// スロットを確保するときは、最後に見つけた色を明け渡す
+    #[test]
+    fn reserving_a_slot_drops_the_last_color_found() {
+        let pixels: Vec<u8> = (0..MAX_COLORS)
+            .flat_map(|i| [i as u8, (i >> 8) as u8, 0])
+            .collect();
+        let palette = Palette::from_colors(colors_of(&pixels, 3), true);
+
+        assert_eq!(palette.transparent(), Some((MAX_COLORS - 1) as u8));
+        assert_eq!(palette.colors(), (MAX_COLORS - 1) as u16);
+        assert!(
+            !palette
+                .table()
+                .bytes()
+                .chunks_exact(3)
+                .any(|color| color == [(MAX_COLORS - 1) as u8, ((MAX_COLORS - 1) >> 8) as u8, 0]),
+            "明け渡した色がテーブルに残っている"
+        );
+    }
+
+    /// 上限に届いていない和集合は、確保を頼まれても色を明け渡さない
+    #[test]
+    fn reserving_a_slot_keeps_every_color_below_the_limit() {
+        let pixels: Vec<u8> = (0..MAX_COLORS - 1)
+            .flat_map(|i| [i as u8, (i >> 8) as u8, 0])
+            .collect();
+        let palette = Palette::from_colors(colors_of(&pixels, 3), true);
+
+        assert_eq!(palette.colors(), (MAX_COLORS - 1) as u16);
+        assert_eq!(palette.transparent(), Some((MAX_COLORS - 1) as u8));
     }
 
     /// 空きが1つだけ残っている和集合にはスロットが入る
@@ -330,7 +370,7 @@ mod tests {
         let pixels: Vec<u8> = (0..MAX_COLORS - 1)
             .flat_map(|i| [i as u8, (i >> 8) as u8, 0])
             .collect();
-        let palette = Palette::from_colors(colors_of(&pixels, 3));
+        let palette = Palette::from_colors(colors_of(&pixels, 3), false);
 
         assert_eq!(palette.transparent(), Some((MAX_COLORS - 1) as u8));
         assert_eq!(palette.table().len(), MAX_COLORS);
