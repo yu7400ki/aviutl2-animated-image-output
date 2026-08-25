@@ -238,12 +238,27 @@ fn restore_transparent_marker(rgba: &mut [u8]) {
     }
 }
 
-/// 出力を2つのデコーダへ通し、フレームごとの合成結果を正規化した入力と突き合わせる
+/// 出力を2つのデコーダへ通し、フレームごとの合成結果が入力と一致することを確かめる
 fn round_trip(
     width: u32,
     height: u32,
     color_type: ColorType,
     frames: &[Vec<u8>],
+) -> (Vec<u8>, Report) {
+    round_trip_within(width, height, color_type, frames, 0)
+}
+
+/// 出力を2つのデコーダへ通し、合成結果が入力から `tolerance` 以内であることを
+/// 確かめる
+///
+/// 量子化の経路では入力と一致しない。構造 (寸法・フレーム数・遅延・透過の位置)
+/// はそのまま確かめ、色だけをチャネルあたりの最大誤差で見る。
+fn round_trip_within(
+    width: u32,
+    height: u32,
+    color_type: ColorType,
+    frames: &[Vec<u8>],
+    tolerance: u8,
 ) -> (Vec<u8>, Report) {
     let (bytes, report) = encode(width, height, color_type, frames, 0).unwrap();
     let expected: Vec<Vec<u8>> = frames
@@ -267,9 +282,12 @@ fn round_trip(
     }
 
     for (index, (actual, expected)) in compose(&decoded).iter().zip(&expected).enumerate() {
-        let decoder = format!("`gif` クレートの {index} 番目");
-        assert_transparency(actual, expected, &decoder);
-        assert_eq!(actual, expected, "{decoder} の合成結果が違う");
+        assert_close(
+            actual,
+            expected,
+            tolerance,
+            &format!("`gif` クレートの {index} 番目"),
+        );
     }
 
     if let Some(raw) = decode_with_ffmpeg(&bytes) {
@@ -280,13 +298,44 @@ fn round_trip(
             "ffmpeg が返したフレーム数が違う"
         );
         for (index, (actual, expected)) in raw.chunks_exact(frame_len).zip(&expected).enumerate() {
-            let decoder = format!("ffmpeg の {index} 番目");
-            assert_transparency(actual, expected, &decoder);
-            assert_eq!(actual, expected.as_slice(), "{decoder} の合成結果が違う");
+            assert_close(
+                actual,
+                expected,
+                tolerance,
+                &format!("ffmpeg の {index} 番目"),
+            );
         }
     }
 
     (bytes, report)
+}
+
+/// 合成結果が入力から `tolerance` 以内であることを確かめる
+///
+/// 透過の位置に許容は無い。2値なので近いも遠いも無く、食い違えば別の絵になる。
+fn assert_close(actual: &[u8], expected: &[u8], tolerance: u8, decoder: &str) {
+    assert_transparency(actual, expected, decoder);
+    if tolerance == 0 {
+        assert_eq!(actual, expected, "{decoder} の合成結果が違う");
+        return;
+    }
+
+    for (at, (actual, expected)) in actual
+        .chunks_exact(4)
+        .zip(expected.chunks_exact(4))
+        .enumerate()
+    {
+        if expected[3] == 0 {
+            continue;
+        }
+        for channel in 0..3 {
+            let error = actual[channel].abs_diff(expected[channel]);
+            assert!(
+                error <= tolerance,
+                "{decoder} の {at} 画素目のずれが大きい: {error} > {tolerance}"
+            );
+        }
+    }
 }
 
 /// 透過画素の位置が正規化した入力と一致する
@@ -307,6 +356,11 @@ fn assert_transparency(actual: &[u8], expected: &[u8], decoder: &str) {
         positions(expected),
         "{decoder} で透過画素の位置が違う"
     );
+}
+
+/// 6-6-6のビンが1つずつ違うRGBA8の画素
+fn distinct_bin(index: u32) -> [u8; 4] {
+    [(index % 64 * 4) as u8, (index / 64 * 4) as u8, 0, u8::MAX]
 }
 
 /// 一様な色で埋めたフレーム
@@ -820,9 +874,29 @@ fn a_table_settled_from_a_prefix_is_reported() {
     assert!(report.peak_spool_bytes < region * 2);
 }
 
-/// 先頭区間から据えたテーブルに無い色が後から現れたら弾く
+/// 溜めきれず先頭区間だけから量子化したことがレポートに出る
 #[test]
-fn a_color_appearing_after_the_settlement_is_rejected() {
+fn a_table_quantized_from_a_prefix_is_reported() {
+    const WIDTH: u32 = 64;
+    const HEIGHT: u32 = 8;
+
+    let frames = quantized_frames(WIDTH, HEIGHT, 3);
+    let config = Config {
+        max_spool_bytes: 0,
+        ..Config::default()
+    };
+    let (_, report) = encode_with(WIDTH, HEIGHT, config, &frames).unwrap();
+
+    assert!(
+        matches!(report.palette, PaletteKind::QuantizedFromPrefix { .. }),
+        "{:?}",
+        report.palette
+    );
+}
+
+/// 先頭区間から据えたテーブルに無い色が後から現れたら、最近傍へ写す
+#[test]
+fn a_color_appearing_after_the_settlement_is_mapped_to_its_nearest() {
     const WIDTH: u32 = 8;
     const HEIGHT: u32 = 4;
     let color = ColorType::Rgb8;
@@ -835,18 +909,23 @@ fn a_color_appearing_after_the_settlement_is_rejected() {
         max_spool_bytes: 0,
         ..Config::default()
     };
-    assert!(matches!(
-        encode_with(WIDTH, HEIGHT, config, &[first, second]),
-        Err(Error::TooManyColors)
-    ));
+    let (bytes, report) = encode_with(WIDTH, HEIGHT, config, &[first, second]).unwrap();
+    assert_eq!(report.palette, PaletteKind::ExactFromPrefix { colors: 1 });
+
+    // 据えたテーブルの非透過色は1つしかなく、後から現れた色もそこへ写る
+    let decoded = decode_with_gif(&bytes);
+    let solid_screen = solid(WIDTH, HEIGHT, ColorType::Rgba8, &[0x30, 0x50, 0x70, 0xFF]);
+    for (index, screen) in compose(&decoded).iter().enumerate() {
+        assert_eq!(screen, &solid_screen, "{index} 番目の合成結果が違う");
+    }
 }
 
-/// 先頭区間が上限いっぱいの色で、257色目が後から現れたら弾く
+/// 先頭区間が上限いっぱいの色で、257色目が後から現れたら最近傍へ写す
 ///
 /// 溜めた区間の和集合が上限を埋めていると透過スロットが取れず、矩形の中の
 /// 未変更画素も添字を引く。潰されない画素で載っていない色に当たる経路になる。
 #[test]
-fn a_257th_color_after_a_full_prefix_is_rejected() {
+fn a_257th_color_after_a_full_prefix_is_mapped_to_its_nearest() {
     const WIDTH: u32 = 16;
     const HEIGHT: u32 = 16;
     let color = ColorType::Rgb8;
@@ -861,10 +940,14 @@ fn a_257th_color_after_a_full_prefix_is_rejected() {
         max_spool_bytes: 0,
         ..Config::default()
     };
-    assert!(matches!(
-        encode_with(WIDTH, HEIGHT, config, &[first, second]),
-        Err(Error::TooManyColors)
-    ));
+    let (bytes, report) = encode_with(WIDTH, HEIGHT, config, &[first, second]).unwrap();
+    assert_eq!(report.palette, PaletteKind::ExactFromPrefix { colors: 256 });
+
+    // 赤だけが候補ごとに違い、ビンの中心 (実値1.5) に最も近いのは実値1の色
+    let decoded = decode_with_gif(&bytes);
+    let screen = &compose(&decoded)[1];
+    let at = ((2 * WIDTH + 3) * 4) as usize;
+    assert_eq!(screen[at..at + 4], [0x01, 0x40, 0x80, 0xFF]);
 }
 
 /// 全画素不透明の先頭区間の後に透過画素が現れたら、遷移として弾く
@@ -1005,39 +1088,151 @@ fn a_frame_count_of_zero_is_rejected() {
     ));
 }
 
+/// 和集合が上限を超えたら量子化して据える
+///
+/// 箱の境界はビンの境界にしか置けないため、色は6-6-6のビンごとに散らす。
 #[test]
-fn more_than_256_colors_are_rejected() {
-    let data: Vec<u8> = (0..257)
-        .flat_map(|i| [i as u8, (i >> 8) as u8, 0, 0xFF])
+fn more_than_256_colors_go_through_quantization() {
+    let data: Vec<u8> = (0..257).flat_map(distinct_bin).collect();
+    // 1つの箱へ最大3つのビンがまとまり、両端の色は平均から実値4だけ離れる
+    let (_, report) = round_trip_within(257, 1, ColorType::Rgba8, &[data], 4);
+
+    // 257個のビンを255の箱へ割るので、隣り合う2組だけが1つの箱へまとまる
+    assert_eq!(report.palette, PaletteKind::Quantized { colors: 255 });
+}
+
+/// 色豊かな背景の上を1画素が動くフレーム列
+///
+/// 背景の512色で和集合が上限を超えるため、量子化の経路に乗る。
+fn quantized_frames(width: u32, height: u32, count: usize) -> Vec<Vec<u8>> {
+    let background: Vec<u8> = (0..width * height)
+        .flat_map(|i| [(i % width * 4) as u8, (i / width * 32) as u8, 0])
         .collect();
-    assert!(matches!(
-        encode(257, 1, ColorType::Rgba8, &[data], 0),
-        Err(Error::TooManyColors)
-    ));
+
+    (0..count)
+        .map(|index| {
+            let mut frame = background.clone();
+            set_pixel(
+                &mut frame,
+                width,
+                ColorType::Rgb8,
+                index as u32 % width,
+                index as u32 % height,
+                &[0xFF, 0x7F, 0xFF],
+            );
+            frame
+        })
+        .collect()
+}
+
+/// 量子化の経路でも、フレームごとの合成が入力に十分近い
+#[test]
+fn a_quantized_animation_survives_both_decoders() {
+    const WIDTH: u32 = 64;
+    const HEIGHT: u32 = 8;
+
+    let frames = quantized_frames(WIDTH, HEIGHT, 6);
+    // 512個のビンを255の箱へ割るので、1つの箱に最大3つのビンが入る
+    let (_, report) = round_trip_within(WIDTH, HEIGHT, ColorType::Rgb8, &frames, 6);
+
+    assert!(
+        matches!(report.palette, PaletteKind::Quantized { .. }),
+        "{:?}",
+        report.palette
+    );
+}
+
+/// 入力が変わらない画素は、量子化の経路でも画面上の色が変わらない
+///
+/// 変わっていない画素は写し直さず前の描画後の色を持ち越すため、パレットの
+/// 誤差が時間方向に揺れとして現れない。
+#[test]
+fn unchanged_input_keeps_the_color_on_screen() {
+    const WIDTH: u32 = 64;
+    const HEIGHT: u32 = 8;
+
+    let frames = quantized_frames(WIDTH, HEIGHT, 6);
+    let (bytes, _) = encode(WIDTH, HEIGHT, ColorType::Rgb8, &frames, 0).unwrap();
+    let screens = compose(&decode_with_gif(&bytes));
+
+    for (index, inputs) in frames.windows(2).enumerate() {
+        let (before, after) = (&screens[index], &screens[index + 1]);
+        for at in 0..(WIDTH * HEIGHT) as usize {
+            if inputs[0][at * 3..at * 3 + 3] != inputs[1][at * 3..at * 3 + 3] {
+                continue;
+            }
+            assert_eq!(
+                before[at * 4..at * 4 + 4],
+                after[at * 4..at * 4 + 4],
+                "{index} 番目から {at} 画素目の色が揺れた"
+            );
+        }
+    }
+}
+
+/// 量子化で同じ色へ落ちた画素は、入力が変わっていても差分矩形に入らない
+///
+/// 同じ6-6-6のビンに入る2色は必ず同じ箱へ落ちるため、その間の書き換えは
+/// 描画後の色を変えない。矩形を入力の画素で求めると、この画素まで含んでしまう。
+#[test]
+fn a_pixel_that_quantizes_to_the_same_color_stays_out_of_the_rect() {
+    const WIDTH: u32 = 64;
+    const HEIGHT: u32 = 8;
+    let color = ColorType::Rgb8;
+
+    // 512色を6-6-6のビンへ1つずつ散らす
+    let first: Vec<u8> = (0..WIDTH * HEIGHT)
+        .flat_map(|i| [(i % WIDTH * 4) as u8, (i / WIDTH * 32) as u8, 0])
+        .collect();
+
+    let mut second = first.clone();
+    // 実値を2だけ動かす。ビンは変わらないので同じ箱へ落ちる
+    set_pixel(&mut second, WIDTH, color, 8, 2, &[8 * 4 + 2, 2 * 32, 0]);
+    // 離れたビンへ動かす。こちらは描画後の色が変わる
+    set_pixel(&mut second, WIDTH, color, 40, 6, &[40 * 4, 6 * 32, 128]);
+
+    let (bytes, report) = encode(WIDTH, HEIGHT, color, &[first, second], 0).unwrap();
+    assert!(
+        matches!(report.palette, PaletteKind::Quantized { .. }),
+        "{:?}",
+        report.palette
+    );
+
+    let decoded = decode_with_gif(&bytes);
+    assert_eq!(decoded.frames[1].rect(), (40, 6, 1, 1));
 }
 
 /// 和集合は全フレームで数えるため、後のフレームが上限を超えさせる
 #[test]
-fn colors_accumulated_across_frames_are_rejected() {
+fn colors_accumulated_across_frames_go_through_quantization() {
     let width = 200u32;
     let frames: Vec<Vec<u8>> = (0..2)
         .map(|index| (0..width).flat_map(|i| [i as u8, index as u8, 0]).collect())
         .collect();
-    assert!(matches!(
-        encode(width, 1, ColorType::Rgb8, &frames, 0),
-        Err(Error::TooManyColors)
-    ));
+    let (_, report) = round_trip_within(width, 1, ColorType::Rgb8, &frames, 4);
+
+    assert!(
+        matches!(report.palette, PaletteKind::Quantized { .. }),
+        "{:?}",
+        report.palette
+    );
 }
 
 /// 256色の非透過色に透過画素が加わると和集合が上限を超える
+///
+/// 量子化の経路は非透過色を255色までに抑えるため、透過スロットが必ず取れる。
 #[test]
-fn a_transparent_pixel_beyond_256_opaque_colors_is_rejected() {
-    let mut data: Vec<u8> = (0..256).flat_map(|i| [i as u8, 0, 0, 0xFF]).collect();
+fn a_transparent_pixel_beyond_256_opaque_colors_takes_the_transparent_slot() {
+    let mut data: Vec<u8> = (0..256).flat_map(distinct_bin).collect();
     data.extend_from_slice(&[0, 0, 0, 0]);
-    assert!(matches!(
-        encode(257, 1, ColorType::Rgba8, &[data], 0),
-        Err(Error::TooManyColors)
-    ));
+    let (bytes, report) = round_trip_within(257, 1, ColorType::Rgba8, &[data], 4);
+
+    assert_eq!(report.palette, PaletteKind::Quantized { colors: 255 });
+    let decoded = decode_with_gif(&bytes);
+    assert!(
+        decoded.frames[0].transparent.is_some(),
+        "透過インデックスが載っていない"
+    );
 }
 
 #[test]

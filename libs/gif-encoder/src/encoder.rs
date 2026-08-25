@@ -6,7 +6,7 @@ use crate::frame::{self, Canvas};
 use crate::layout::{ColorType, Layout};
 use crate::normalize;
 use crate::spool::{Spool, Spooled};
-use crate::table::Palette;
+use crate::table::{Palette, QUANTIZED_COLORS};
 use anim_core::{FrameDelay, Rect, paste};
 use std::borrow::Cow;
 use std::io::Write;
@@ -67,6 +67,16 @@ pub enum PaletteKind {
     /// 溜めきれず、先頭区間の色を据えた
     ExactFromPrefix {
         /// 据えた区間の色の和集合の大きさ
+        colors: u16,
+    },
+    /// 全フレームのヒストグラムから量子化した
+    Quantized {
+        /// 量子化で得た非透過色の数
+        colors: u16,
+    },
+    /// 溜めきれず、先頭区間だけから量子化した
+    QuantizedFromPrefix {
+        /// 量子化で得た非透過色の数
         colors: u16,
     },
 }
@@ -196,8 +206,7 @@ impl<W: Write> Encoder<W> {
     /// # Errors
     /// バイト数が寸法と色種別から決まる長さと違うとき
     /// [`Error::FrameSizeMismatch`]。宣言したフレーム数を超えたとき
-    /// [`Error::FrameCountMismatch`]。全フレームの色の和集合がカラーテーブルに
-    /// 収まらないとき [`Error::TooManyColors`]。不透明な画素が透過になる遷移が
+    /// [`Error::FrameCountMismatch`]。不透明な画素が透過になる遷移が
     /// あるとき [`Error::UnsupportedTransparency`]。
     pub fn add_frame(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
         if self.poisoned {
@@ -370,26 +379,36 @@ impl<W: Write> Parts<'_, W> {
 
     /// 色を決めてヘッダからカラーテーブルまでを書き、溜めたフレームを流す
     ///
+    /// 溜めた区間の色が上限に収まっていればそのまま据えて可逆に出し、超えて
+    /// いればヒストグラムから量子化する。
+    ///
     /// `from_prefix` は溜めきれずに決着したことを表す。据えた色は溜めた区間の
     /// ものでしかないため、以降のフレームの色を覆っているとは限らない。覆って
-    /// いないことは、その色を写す時点で分かる。
+    /// いない色は最近傍で写る。
     fn commit(&mut self, spool: &mut Spool, from_prefix: bool) -> Result<Streaming, Error> {
-        let (frames, colors) = spool.drain();
-        if colors.exceeded() {
-            return Err(Error::TooManyColors);
-        }
-
-        let colors_count = colors.count();
-        let palette = Palette::from_colors(colors);
-        *self.palette_kind = Some(if from_prefix {
-            PaletteKind::ExactFromPrefix {
-                colors: colors_count,
+        let settled = spool.drain();
+        let (palette, kind) = match settled.histogram {
+            Some(histogram) => {
+                let colors = histogram.quantize(QUANTIZED_COLORS);
+                let count = colors.len() as u16;
+                let kind = if from_prefix {
+                    PaletteKind::QuantizedFromPrefix { colors: count }
+                } else {
+                    PaletteKind::Quantized { colors: count }
+                };
+                (Palette::from_quantized(&colors), kind)
             }
-        } else {
-            PaletteKind::Exact {
-                colors: colors_count,
+            None => {
+                let count = settled.colors.count();
+                let kind = if from_prefix {
+                    PaletteKind::ExactFromPrefix { colors: count }
+                } else {
+                    PaletteKind::Exact { colors: count }
+                };
+                (Palette::from_colors(settled.colors), kind)
             }
-        });
+        };
+        *self.palette_kind = Some(kind);
         self.write_head(&palette)?;
 
         let mut streaming = Streaming {
@@ -399,7 +418,7 @@ impl<W: Write> Parts<'_, W> {
             rendered: Vec::new(),
             pending: None,
         };
-        self.replay(&frames, &mut streaming)?;
+        self.replay(&settled.frames, &mut streaming)?;
         Ok(streaming)
     }
 
@@ -456,7 +475,7 @@ impl<W: Write> Parts<'_, W> {
             rendered,
             pending,
         } = streaming;
-        canvas.render(previous, pixels, palette, rendered)?;
+        canvas.render(previous, pixels, palette, rendered);
 
         // 廃棄方法は保留中のフレームのもので、投入されたフレームが載るキャンバスを
         // 決める。決めてからそのキャンバスで矩形と添字を求める
@@ -468,7 +487,7 @@ impl<W: Write> Parts<'_, W> {
 
         let rect = canvas.rect_of(rendered);
         let mut indices = Vec::new();
-        canvas.append_indices(rendered, rect, palette, &mut indices)?;
+        canvas.append_indices(rendered, rect, palette, &mut indices);
 
         *pending = Some(Pending {
             rect,

@@ -1,7 +1,6 @@
 //! 差分矩形・廃棄方法・透過ランの決定
 
 use crate::block::DISPOSAL_DO_NOT_DISPOSE;
-use crate::error::Error;
 use crate::layout::{ColorType, Layout};
 use crate::normalize::TRANSPARENT;
 use crate::table::Palette;
@@ -100,16 +99,13 @@ impl Canvas {
     /// 保つため、パレットが変わっても静止した領域は揺れない。
     ///
     /// `previous` は直前に投入されたフレームの正規化した入力。先頭フレームでは空。
-    ///
-    /// # Errors
-    /// 写す先がテーブルに無い色があるとき [`Error::TooManyColors`]。
     pub(crate) fn render(
         &self,
         previous: &[u8],
         frame: &[u8],
-        palette: &Palette,
+        palette: &mut Palette,
         out: &mut Vec<u8>,
-    ) -> Result<(), Error> {
+    ) {
         let bpp = self.layout.bytes_per_pixel;
         out.clear();
         out.reserve(self.layout.frame_len);
@@ -130,10 +126,9 @@ impl Canvas {
                 out.extend_from_slice(pixel);
                 continue;
             }
-            let index = palette.index_of(pixel, bpp).ok_or(Error::TooManyColors)?;
+            let index = palette.index_of(pixel, bpp);
             out.extend_from_slice(&palette.color_at(index).to_le_bytes()[..bpp]);
         }
-        Ok(())
     }
 
     /// `rect` の添字列を `out` へ追記する
@@ -143,15 +138,14 @@ impl Canvas {
     /// 同じ値の長いランになる。潰すのが写すより先なので、テーブルに載っていない
     /// 色を持ち越した未変更画素もそのまま潰れる。
     ///
-    /// # Errors
-    /// 潰されず、テーブルにも載っていない色があるとき [`Error::TooManyColors`]。
+    /// `frame` は [`Canvas::render`] が写した描画後の色。
     pub(crate) fn append_indices(
         &self,
         frame: &[u8],
         rect: Rect,
-        palette: &Palette,
+        palette: &mut Palette,
         out: &mut Vec<u8>,
-    ) -> Result<(), Error> {
+    ) {
         let stride = self.layout.stride;
         let bpp = self.layout.bytes_per_pixel;
         // 先頭フレームには前が無く、未変更画素そのものが存在しない
@@ -168,12 +162,11 @@ impl Canvas {
                     (Some(transparent), Some(previous)) if previous[at..at + bpp] == *pixel => {
                         transparent
                     }
-                    _ => palette.index_of(pixel, bpp).ok_or(Error::TooManyColors)?,
+                    _ => palette.index_of(pixel, bpp),
                 };
                 out.push(index);
             }
         }
-        Ok(())
     }
 
     /// 描き終えたフレームでキャンバスを進める
@@ -314,7 +307,7 @@ mod tests {
         next[0] = 0x7F;
         next[(WIDTH * HEIGHT - 1) as usize * 4] = 0x7E;
 
-        let palette = palette_of(&[&first, &next], 4);
+        let mut palette = palette_of(&[&first, &next], 4);
         let transparent = palette.transparent().expect("透過インデックスが無い");
 
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
@@ -323,9 +316,7 @@ mod tests {
         assert_eq!(rect, layout(ColorType::Rgba8).whole(), "矩形が全画面でない");
 
         let mut indices = Vec::new();
-        canvas
-            .append_indices(&next, rect, &palette, &mut indices)
-            .unwrap();
+        canvas.append_indices(&next, rect, &mut palette, &mut indices);
         let last = indices.len() - 1;
         assert_ne!(indices[0], transparent, "変わった画素まで潰れている");
         assert_ne!(indices[last], transparent, "変わった画素まで潰れている");
@@ -339,15 +330,13 @@ mod tests {
     #[test]
     fn the_first_frame_maps_every_pixel_through_the_table() {
         let frame = opaque(0x10);
-        let palette = palette_of(&[&frame], 4);
+        let mut palette = palette_of(&[&frame], 4);
         let transparent = palette.transparent().expect("透過インデックスが無い");
 
         let canvas = Canvas::new(layout(ColorType::Rgba8));
         let rect = canvas.rect_of(&frame);
         let mut indices = Vec::new();
-        canvas
-            .append_indices(&frame, rect, &palette, &mut indices)
-            .unwrap();
+        canvas.append_indices(&frame, rect, &mut palette, &mut indices);
 
         assert!(
             indices.iter().all(|&index| index != transparent),
@@ -362,16 +351,14 @@ mod tests {
         let full: Vec<u8> = (0..256)
             .flat_map(|i| [i as u8, (i >> 8) as u8, 0])
             .collect();
-        let palette = palette_of(&[&full], 3);
+        let mut palette = palette_of(&[&full], 3);
         assert_eq!(palette.transparent(), None);
 
         let mut canvas = Canvas::new(layout(ColorType::Rgb8));
         drawn(&mut canvas, &frame);
 
         let mut indices = Vec::new();
-        canvas
-            .append_indices(&frame, UNCHANGED, &palette, &mut indices)
-            .unwrap();
+        canvas.append_indices(&frame, UNCHANGED, &mut palette, &mut indices);
         assert_eq!(indices, [0]);
     }
 
@@ -381,15 +368,13 @@ mod tests {
         let mut first = opaque(0x10);
         first[..4].fill(0);
 
-        let palette = palette_of(&[&first], 4);
+        let mut palette = palette_of(&[&first], 4);
         let transparent = palette.transparent().expect("透過インデックスが無い");
 
         let canvas = Canvas::new(layout(ColorType::Rgba8));
         let rect = canvas.rect_of(&first);
         let mut indices = Vec::new();
-        canvas
-            .append_indices(&first, rect, &palette, &mut indices)
-            .unwrap();
+        canvas.append_indices(&first, rect, &mut palette, &mut indices);
 
         assert_eq!(indices[0], transparent);
         assert!(indices[1..].iter().all(|&index| index != transparent));
@@ -404,16 +389,14 @@ mod tests {
         let mut second = opaque(0x10);
         second[0] = 0x7F;
 
-        let palette = palette_of(&[&first, &second], 4);
+        let mut palette = palette_of(&[&first, &second], 4);
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
-        canvas.render(&[], &first, &palette, &mut rendered).unwrap();
+        canvas.render(&[], &first, &mut palette, &mut rendered);
         assert_eq!(rendered, first, "先頭フレームが写っていない");
         drawn(&mut canvas, &rendered);
 
-        canvas
-            .render(&first, &second, &palette, &mut rendered)
-            .unwrap();
+        canvas.render(&first, &second, &mut palette, &mut rendered);
         assert_eq!(rendered, second);
     }
 
@@ -427,17 +410,13 @@ mod tests {
         let mut second = opaque(0x10);
         second[..4].fill(0);
 
-        let palette = palette_of(&[&first], 4);
-        assert_eq!(palette.index_of(&[0, 0, 0, 0], 4), None);
-
+        let mut palette = palette_of(&[&first], 4);
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
-        canvas.render(&[], &first, &palette, &mut rendered).unwrap();
+        canvas.render(&[], &first, &mut palette, &mut rendered);
         drawn(&mut canvas, &rendered);
 
-        canvas
-            .render(&first, &second, &palette, &mut rendered)
-            .unwrap();
+        canvas.render(&first, &second, &mut palette, &mut rendered);
         assert_eq!(rendered[..4], [0, 0, 0, 0]);
         assert_eq!(choose_disposal(&canvas, &rendered), None);
     }
@@ -446,7 +425,7 @@ mod tests {
     #[test]
     fn a_partial_width_rect_is_cropped_row_by_row() {
         let frame = opaque(0x10);
-        let palette = palette_of(&[&frame], 4);
+        let mut palette = palette_of(&[&frame], 4);
 
         let canvas = Canvas::new(layout(ColorType::Rgba8));
         let rect = Rect {
@@ -456,9 +435,7 @@ mod tests {
             height: 2,
         };
         let mut indices = Vec::new();
-        canvas
-            .append_indices(&frame, rect, &palette, &mut indices)
-            .unwrap();
+        canvas.append_indices(&frame, rect, &mut palette, &mut indices);
 
         let expected: Vec<u8> = [1u8, 2, 5, 6]
             .iter()

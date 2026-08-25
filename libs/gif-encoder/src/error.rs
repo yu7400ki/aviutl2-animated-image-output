@@ -17,11 +17,6 @@ pub enum Error {
     FrameSizeMismatch { expected: usize, actual: usize },
     /// 投入されたフレーム数が宣言したフレーム数と一致しない
     FrameCountMismatch { expected: u32, actual: u32 },
-    /// カラーテーブルに載せられない色がある
-    ///
-    /// 色の和集合が上限256を超えたか、先頭区間から据えたテーブルに無い色が
-    /// 後のフレームに現れた。
-    TooManyColors,
     /// 不透明な画素が透過になる遷移がある
     UnsupportedTransparency,
     /// 書き出し先のI/Oエラー
@@ -52,9 +47,6 @@ impl fmt::Display for Error {
                     f,
                     "フレーム数が一致しません: 宣言 {expected}、投入 {actual}"
                 )
-            }
-            Error::TooManyColors => {
-                write!(f, "カラーテーブルに載せられない色があります")
             }
             Error::UnsupportedTransparency => {
                 write!(f, "不透明な画素が透過になるフレームは扱えません")

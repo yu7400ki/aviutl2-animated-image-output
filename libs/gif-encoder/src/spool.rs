@@ -2,6 +2,7 @@
 
 use crate::frame::bounding_rect;
 use crate::layout::Layout;
+use crate::quantize::Histogram;
 use anim_core::{Colors, FrameDelay, Rect, crop};
 
 /// 溜めたフレーム1つ
@@ -15,6 +16,18 @@ pub(crate) struct Spooled {
 
 /// フレーム1つを溜めるのに、画素データとは別にかかるバイト数
 const FRAME_OVERHEAD: usize = size_of::<Spooled>();
+
+/// 溜めた区間から取り出した、色を決めるための材料
+pub(crate) struct Settled {
+    /// 投入された順のフレーム
+    pub(crate) frames: Vec<Spooled>,
+    /// 溜めた区間に現れた色の和集合
+    pub(crate) colors: Colors,
+    /// 6-6-6のヒストグラム
+    ///
+    /// 和集合が上限を超えたときだけ持つ。持っているなら量子化の経路になる。
+    pub(crate) histogram: Option<Histogram>,
+}
 
 /// クロップ済みの領域を、グローバルカラーテーブルが決まるまで溜める
 ///
@@ -32,6 +45,8 @@ pub(crate) struct Spool {
     previous: Vec<u8>,
     /// 溜めた領域に現れた色の和集合
     colors: Colors,
+    /// 量子化に使うヒストグラム。和集合が上限を超えた時点で確保する
+    histogram: Option<Histogram>,
 }
 
 impl Spool {
@@ -42,6 +57,7 @@ impl Spool {
             limit,
             previous: Vec::new(),
             colors: Colors::new(),
+            histogram: None,
         }
     }
 
@@ -100,15 +116,46 @@ impl Spool {
             delay,
             data: region,
         });
+        self.accumulate(layout.bytes_per_pixel);
 
         self.previous.clear();
         self.previous.extend_from_slice(data);
     }
 
-    /// 溜めたフレームを投入した順に、色の和集合と合わせて取り出して空へ戻す
-    pub(crate) fn drain(&mut self) -> (Vec<Spooled>, Colors) {
+    /// 和集合が上限を超えていたら、直前に溜めたフレームをヒストグラムへ積む
+    ///
+    /// ヒストグラムが覆う区間は決着時のスプールと一致していなければならない。
+    /// 確保するのは超えた時点なので、そこまでに溜めたフレームを遡って積んでから
+    /// 以降のフレームを足す。超えた後のフレームだけを積むと、先頭区間の色が
+    /// 分割に寄与しない。
+    fn accumulate(&mut self, bytes_per_pixel: usize) {
+        if !self.colors.exceeded() {
+            return;
+        }
+
+        match &mut self.histogram {
+            Some(histogram) => {
+                let last = self.frames.last().expect("直前に溜めたフレームがある");
+                histogram.observe(&last.data, bytes_per_pixel);
+            }
+            None => {
+                let mut histogram = Histogram::new();
+                for frame in &self.frames {
+                    histogram.observe(&frame.data, bytes_per_pixel);
+                }
+                self.histogram = Some(histogram);
+            }
+        }
+    }
+
+    /// 溜めたフレームを投入した順に、色を決める材料と合わせて取り出して空へ戻す
+    pub(crate) fn drain(&mut self) -> Settled {
         let spool = std::mem::replace(self, Spool::new(self.limit));
-        (spool.frames, spool.colors)
+        Settled {
+            frames: spool.frames,
+            colors: spool.colors,
+            histogram: spool.histogram,
+        }
     }
 }
 
@@ -188,10 +235,10 @@ mod tests {
             push(&mut spool, &frame(value));
         }
 
-        let (frames, colors) = spool.drain();
-        let heads: Vec<u8> = frames.iter().map(|frame| frame.data[2]).collect();
+        let settled = spool.drain();
+        let heads: Vec<u8> = settled.frames.iter().map(|frame| frame.data[2]).collect();
         assert_eq!(heads, [0x10, 0x20, 0x30]);
-        assert_eq!(colors.count(), 3 * (WIDTH * HEIGHT) as u16);
+        assert_eq!(settled.colors.count(), 3 * (WIDTH * HEIGHT) as u16);
     }
 
     /// 抱えているバイト数は、切り出した領域とフレームごとの管理領域の合計
@@ -254,6 +301,44 @@ mod tests {
         assert!(!spool.can_hold(usize::MAX));
     }
 
+    /// 和集合が上限を超えた時点で、そこまでに溜めたフレームを遡って積む
+    ///
+    /// 3フレームで和集合は384色になり、上限を超えるのは3枚目。超えた後の
+    /// フレームだけを積むと、先頭2枚の色が分割に寄与しない。
+    #[test]
+    fn the_histogram_reaches_back_over_the_frames_already_spooled() {
+        const WIDE: u32 = 128;
+        let layout = Layout::new(WIDE, 1, ColorType::Rgb8).unwrap();
+        let mut spool = Spool::new(usize::MAX);
+
+        let shade = |index: u32| (index * 64) as u8;
+        for index in 0..3 {
+            let data: Vec<u8> = (0..WIDE).flat_map(|i| [i as u8, shade(index), 0]).collect();
+            let rect = spool.rect_of(&layout, &data);
+            spool.push(&layout, &data, rect, delay());
+        }
+
+        let histogram = spool
+            .drain()
+            .histogram
+            .expect("和集合が上限を超えてもヒストグラムを持っていない");
+        for index in 0..3 {
+            let color = u32::from_le_bytes([0, shade(index), 0, u8::MAX]);
+            assert!(
+                histogram.weight_of(color) > 0,
+                "{index} フレーム目の色が積まれていない"
+            );
+        }
+    }
+
+    /// 和集合が上限に収まっている間はヒストグラムを確保しない
+    #[test]
+    fn a_union_within_the_limit_leaves_the_histogram_unallocated() {
+        let mut spool = Spool::new(usize::MAX);
+        push(&mut spool, &frame(0x10));
+        assert!(spool.drain().histogram.is_none());
+    }
+
     /// 矩形の外にある色は数えない
     #[test]
     fn only_the_cropped_region_is_counted() {
@@ -265,6 +350,6 @@ mod tests {
             height: 1,
         };
         spool.push(&layout(), &frame(0x10), rect, delay());
-        assert_eq!(spool.drain().1.count(), 1);
+        assert_eq!(spool.drain().colors.count(), 1);
     }
 }

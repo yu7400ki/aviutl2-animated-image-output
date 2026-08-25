@@ -7,6 +7,7 @@ mod frame;
 mod layout;
 mod lzw;
 mod normalize;
+mod quantize;
 mod spool;
 mod table;
 

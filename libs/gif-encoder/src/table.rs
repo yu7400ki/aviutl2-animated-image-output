@@ -1,7 +1,14 @@
 //! カラーテーブルと、色から添字を引く対応
 
 use crate::normalize::TRANSPARENT;
+use crate::quantize::Nearest;
 use anim_core::{Colors, Indexed, MAX_COLORS};
+
+/// 量子化したテーブルに載せる非透過色の上限
+///
+/// 量子化の経路では1色多く載せるより透過ランを取る方が常に得なので、
+/// 透過スロットを必ず1つ残す。
+pub(crate) const QUANTIZED_COLORS: usize = MAX_COLORS - 1;
 
 /// カラーテーブルが持てる最小のエントリ数
 ///
@@ -67,6 +74,8 @@ pub(crate) struct Palette {
     table: ColorTable,
     /// このテーブルの透過インデックス
     transparent: Option<u8>,
+    /// 完全一致が外れた色を写す先
+    nearest: Nearest,
 }
 
 impl Palette {
@@ -92,13 +101,48 @@ impl Palette {
             }
             None => None,
         };
-        let table = ColorTable::new(&entries);
+        Palette::new(indexed, entries, transparent)
+    }
 
+    /// 量子化した色をカラーテーブルへ据える
+    ///
+    /// 透過スロットを必ず1つ足す。素材自身の透過画素と未変更画素のランは
+    /// どちらも「キャンバスを書き換えない」という同じ意味なので、
+    /// [`Palette::from_colors`] と同じくスロットを分けない。
+    ///
+    /// # Panics
+    /// `colors` が空か、[`QUANTIZED_COLORS`] を超えているとき。
+    pub(crate) fn from_quantized(colors: &[u32]) -> Self {
+        assert!(!colors.is_empty(), "量子化した色が1つも無い");
+        assert!(colors.len() <= QUANTIZED_COLORS, "透過スロットが取れない");
+
+        let bytes: Vec<u8> = colors
+            .iter()
+            .chain(std::iter::once(&TRANSPARENT))
+            .flat_map(|color| color.to_le_bytes())
+            .collect();
+        let mut observed = Colors::new();
+        observed.observe(&bytes, 4);
+
+        // 別々の箱が同じ平均色に落ちることがあり、その重複はここで畳まれる
+        let indexed = observed.into_indexed(|_| ());
+        let entries = indexed.colors().to_vec();
+        let transparent = entries
+            .iter()
+            .position(|&color| color == TRANSPARENT)
+            .map(|index| index as u8);
+        Palette::new(indexed, entries, transparent)
+    }
+
+    fn new(indexed: Indexed, entries: Vec<u32>, transparent: Option<u8>) -> Self {
+        let table = ColorTable::new(&entries);
+        let nearest = Nearest::new(&entries);
         Palette {
             indexed,
             entries,
             table,
             transparent,
+            nearest,
         }
     }
 
@@ -120,14 +164,27 @@ impl Palette {
         self.transparent
     }
 
-    /// 画素の色の添字。このテーブルに載っていなければ `None`
+    /// 画素の色を写す先の添字
     ///
-    /// `pixel` は1画素 `bpp` バイトが並んでいること。透過ラン用に足したスロットは
-    /// 引く対象ではない。そのエントリはキャンバスと一致する画素にだけ置くもので、
-    /// 標識を持つ画素を写す先ではない。
-    pub(crate) fn index_of(&self, pixel: &[u8], bpp: usize) -> Option<u8> {
-        self.indexed.index_of(pixel, bpp)
+    /// `pixel` は1画素 `bpp` バイトが並んでいること。まず完全一致を引き、外れた
+    /// ときだけ最近傍探索へ落とす。量子化したテーブルにも素材の色がそのまま
+    /// 載ることがあり、可逆の経路では全画素が完全一致で解決する。
+    ///
+    /// 透過のエントリは最近傍の候補にならない。素材自身の透過画素は完全一致で
+    /// 引け、透過ラン用に足したスロットはキャンバスと一致する画素にだけ置く
+    /// もので、どちらも色を近似する相手ではない。
+    pub(crate) fn index_of(&mut self, pixel: &[u8], bpp: usize) -> u8 {
+        match self.indexed.index_of(pixel, bpp) {
+            Some(index) => index,
+            None => self.nearest.index_of(pack(pixel, bpp)),
+        }
     }
+}
+
+/// 色を `R | G<<8 | B<<16 | A<<24` へ詰める
+fn pack(pixel: &[u8], bpp: usize) -> u32 {
+    let alpha = if bpp == 4 { pixel[3] } else { u8::MAX };
+    u32::from_le_bytes([pixel[0], pixel[1], pixel[2], alpha])
 }
 
 #[cfg(test)]
