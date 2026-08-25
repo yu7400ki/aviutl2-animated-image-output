@@ -9,6 +9,15 @@ const ALPHA_THRESHOLD: u8 = 128;
 /// 完全透過の標識 (`R | G<<8 | B<<16 | A<<24` で詰めた値)
 pub(crate) const TRANSPARENT: u32 = 0;
 
+/// 画素を `R | G<<8 | B<<16 | A<<24` へ詰める
+///
+/// `pixel` は1画素 `bpp` バイトが並んでいること。透過を持てない3バイトの画素は
+/// アルファを255とみなす。
+pub(crate) fn pack(pixel: &[u8], bpp: usize) -> u32 {
+    let alpha = if bpp == 4 { pixel[3] } else { u8::MAX };
+    u32::from_le_bytes([pixel[0], pixel[1], pixel[2], alpha])
+}
+
 /// RGBA8の画素列の透過を2値へ正規化し、完全透過へ潰した画素数を返す
 ///
 /// `pixels` は1画素4バイトが隙間なく並んでいること。

@@ -174,6 +174,8 @@ pub(crate) struct Histogram {
     blue: Box<[u64]>,
     /// 実値の二乗和
     squared: Box<[u128]>,
+    /// 重みが載っているビンの数
+    distinct: usize,
 }
 
 impl Histogram {
@@ -186,7 +188,21 @@ impl Histogram {
             green: zeros(),
             blue: zeros(),
             squared: vec![0u128; CELLS].into_boxed_slice(),
+            distinct: 0,
         }
+    }
+
+    /// 重みが載っているビンの数
+    ///
+    /// 分割はビンの境界にしか置けないため、この数より多くの色は割り出せない。
+    pub(crate) fn distinct(&self) -> usize {
+        self.distinct
+    }
+
+    /// 色を `count` 画素ぶん積む
+    pub(crate) fn observe_color(&mut self, color: u32, count: u64) {
+        let [r, g, b, _] = color.to_le_bytes();
+        self.add(r, g, b, count);
     }
 
     /// 画素列の色を、1画素あたり `weight` の重みで積む
@@ -223,6 +239,9 @@ impl Histogram {
             (b >> BIN_SHIFT) as usize + 1,
         );
         let (r, g, b) = (u64::from(r), u64::from(g), u64::from(b));
+        if self.weight[cell] == 0 {
+            self.distinct += 1;
+        }
         self.weight[cell] += count;
         self.red[cell] += count * r;
         self.green[cell] += count * g;

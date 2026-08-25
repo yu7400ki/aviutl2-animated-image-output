@@ -104,10 +104,21 @@ impl Screen<'_> {
                     }
                     _ => palette.index_of(pixel, bpp),
                 };
+                palette.mark_used(index);
                 out.push(index);
             }
         }
     }
+}
+
+/// 入力が変わった画素を写した結果の集計
+///
+/// 持ち越した画素と透過標識はどちらにも数えない。パレットを通らないため。
+pub(crate) struct Rendered {
+    /// 完全一致が無く最近傍へ写した画素数
+    pub(crate) approximated: u64,
+    /// 写す先との誤差が閾値を超えた画素数
+    pub(crate) exceeded: u64,
 }
 
 /// 保留中のフレームを廃棄した後の画面
@@ -264,17 +275,23 @@ impl Canvas {
     /// 保つため、パレットが変わっても静止した領域は揺れない。
     ///
     /// `previous` は直前に投入されたフレームの正規化した入力。先頭フレームでは空。
+    /// `tolerance` は誤差を数える二乗距離の閾値。
     pub(crate) fn render(
         &self,
         previous: &[u8],
         frame: &[u8],
         palette: &mut Palette,
+        tolerance: u32,
         out: &mut Vec<u8>,
-    ) {
+    ) -> Rendered {
         let bpp = self.layout.bytes_per_pixel;
         out.clear();
         out.reserve(self.layout.frame_len);
 
+        let mut rendered = Rendered {
+            approximated: 0,
+            exceeded: 0,
+        };
         // 先頭フレームには前が無く、持ち越せる色も無い
         let carried = self.drawn.then_some((previous, self.after.as_slice()));
         for (at, pixel) in frame.chunks_exact(bpp).enumerate() {
@@ -291,9 +308,12 @@ impl Canvas {
                 out.extend_from_slice(pixel);
                 continue;
             }
-            let index = palette.index_of(pixel, bpp);
-            out.extend_from_slice(&palette.color_at(index).to_le_bytes()[..bpp]);
+            let mapped = palette.map(pixel, bpp);
+            rendered.approximated += u64::from(mapped.approximated);
+            rendered.exceeded += u64::from(mapped.error > tolerance);
+            out.extend_from_slice(&palette.color_at(mapped.index).to_le_bytes()[..bpp]);
         }
+        rendered
     }
 
     /// 先頭フレームを描く
@@ -639,11 +659,11 @@ mod tests {
         let mut palette = palette_of(&[&first, &second], 4);
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
-        canvas.render(&[], &first, &mut palette, &mut rendered);
+        canvas.render(&[], &first, &mut palette, 0, &mut rendered);
         assert_eq!(rendered, first, "先頭フレームが写っていない");
         start(&mut canvas, &rendered);
 
-        canvas.render(&first, &second, &mut palette, &mut rendered);
+        canvas.render(&first, &second, &mut palette, 0, &mut rendered);
         assert_eq!(rendered, second);
     }
 
@@ -660,10 +680,10 @@ mod tests {
         let mut palette = palette_of(&[&first], 4);
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
-        canvas.render(&[], &first, &mut palette, &mut rendered);
+        canvas.render(&[], &first, &mut palette, 0, &mut rendered);
         start(&mut canvas, &rendered);
 
-        canvas.render(&first, &second, &mut palette, &mut rendered);
+        canvas.render(&first, &second, &mut palette, 0, &mut rendered);
         assert_eq!(rendered[..4], [0, 0, 0, 0]);
         assert!(!canvas.kept().expressible(&rendered));
     }

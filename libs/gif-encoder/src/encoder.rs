@@ -8,8 +8,9 @@ use crate::frame::{Canvas, Screen};
 use crate::layout::{ColorType, Layout};
 use crate::lzw;
 use crate::normalize;
+use crate::rebuild::rebuild;
 use crate::spool::{Ring, Spool, Spooled};
-use crate::table::{Palette, QUANTIZED_COLORS};
+use crate::table::{ColorTable, Palette, QUANTIZED_COLORS};
 use anim_core::{FrameDelay, Rect, paste};
 use std::borrow::Cow;
 use std::io::Write;
@@ -89,6 +90,13 @@ pub enum PaletteKind {
 pub struct Report {
     /// グローバルカラーテーブルの据え方
     pub palette: PaletteKind,
+    /// カラーテーブルを据え直した回数 (0ならグローバルの1枚で足りた)
+    pub rebuilds: u32,
+    /// ローカルカラーテーブルを書いたフレーム数
+    ///
+    /// テーブルがグローバルと異なる間は、前のフレームの色表を参照する手段が
+    /// GIFに無いため全フレームに書く。
+    pub local_tables: u32,
     /// 完全一致が無く最近傍へ写した画素数
     ///
     /// 0なら全画素が据えたテーブルの色そのままで解決した。可逆の経路では常に0で、
@@ -113,7 +121,18 @@ pub struct Report {
 ///
 /// 書き出しはこのフレーム数だけ遅れる。廃棄方法を決めるための1フレーム保留を
 /// 含むので、リングに留まるのは `LOOKAHEAD - 1` フレーム。
-const LOOKAHEAD: usize = 4;
+const LOOKAHEAD: usize = 8;
+
+/// カラーテーブルを据え直すかどうかを分ける、写した色との距離
+///
+/// これを超える誤差の画素が [`REBUILD_FLOOR_PERMILLE`] 以上現れたら据え直す。
+const REBUILD_TOLERANCE: u32 = 20;
+
+/// 誤差が [`REBUILD_TOLERANCE`] を超えた画素が論理画面に占める割合の下限 (千分率)
+const REBUILD_FLOOR_PERMILLE: u64 = 20;
+
+/// 維持するエントリを決める、直近の出力のフレーム数
+const KEEP_WINDOW: u32 = 8;
 
 /// 描く直前へ戻す候補を試すのをやめるまでの連敗数
 const RESTORE_LOSS_STREAK: u32 = 6;
@@ -169,9 +188,9 @@ impl RestorePacing {
 /// 廃棄方法は次のフレームを見るまで決まらず、グラフィック制御拡張は画像記述子の
 /// 前に置く必要があるため、書けるようになるまで1つぶんを保持する。
 ///
-/// 透過インデックスと最小符号長は、添字を作ったときのカラーテーブルから取って
-/// 一緒に運ぶ。添字はそのテーブルを引くものなので、書き出す時点のテーブルから
-/// 引き直すと組み合わせが崩れうる。
+/// 透過インデックス・最小符号長・ローカルカラーテーブルは、添字を作ったときの
+/// カラーテーブルから取って一緒に運ぶ。添字はそのテーブルを引くものなので、
+/// 書き出す時点のテーブルから引き直すと組み合わせが崩れうる。
 struct Pending {
     rect: Rect,
     /// 1/100秒へ丸めた遅延
@@ -180,8 +199,63 @@ struct Pending {
     transparent: Option<u8>,
     /// 添字を引いたテーブルのLZW最小符号長
     min_code_size: u8,
+    /// このフレームに書くローカルカラーテーブル。グローバルのままなら `None`
+    local: Option<ColorTable>,
     /// LZWで圧縮した画像データ
     body: Vec<u8>,
+}
+
+/// 書き出しに使うカラーテーブル
+///
+/// 保留中のフレームは、それを符号化した時点のテーブルで添字が振られている。
+/// 据え直しを挟むと現在のテーブルと別になるため、保留中のフレームを符号化し直す
+/// 経路のために1つ前を持つ。
+struct Palettes {
+    /// いま据えているテーブル
+    current: Palette,
+    /// 保留中のフレームを符号化したテーブル。現在と同じなら `None`
+    earlier: Option<Palette>,
+    /// 手放したテーブルが最近傍へ写した画素数の合計
+    retired: u64,
+    /// どこかのテーブルが写す先として黒を足したか
+    black_fallback: bool,
+}
+
+impl Palettes {
+    fn new(palette: Palette) -> Self {
+        Palettes {
+            black_fallback: palette.black_fallback(),
+            current: palette,
+            earlier: None,
+            retired: 0,
+        }
+    }
+
+    /// 保留中のフレームを符号化したテーブル
+    fn earlier(&mut self) -> &mut Palette {
+        self.earlier.as_mut().unwrap_or(&mut self.current)
+    }
+
+    /// 据え直したテーブルへ移り、今までのものを保留中のフレームのために残す
+    fn replace(&mut self, palette: Palette) {
+        debug_assert!(self.earlier.is_none(), "1フレームで2度据え直している");
+        self.black_fallback |= palette.black_fallback();
+        self.earlier = Some(std::mem::replace(&mut self.current, palette));
+    }
+
+    /// 保留中のフレームを書き終えたので、1つ前のテーブルを手放す
+    fn retire(&mut self) {
+        if let Some(earlier) = self.earlier.take() {
+            self.retired += earlier.approximated();
+        }
+    }
+
+    /// 手放したものも含め、最近傍へ写した画素数
+    fn approximated(&self) -> u64 {
+        self.retired
+            + self.current.approximated()
+            + self.earlier.as_ref().map_or(0, Palette::approximated)
+    }
 }
 
 /// エンコーダが進む段階
@@ -213,8 +287,10 @@ struct Streaming {
 /// 求める。量子化を通すと別々の入力色が同じ色へ落ちることがあり、それは
 /// 出力上は未変更だからで、比べる面を分けないとこの一致を見落とす。
 struct Writing {
-    /// 据えたグローバルカラーテーブル
-    palette: Palette,
+    /// 書き出しに使うカラーテーブル
+    palettes: Palettes,
+    /// 書き出しへ渡したフレーム数。エントリの最終使用を数える時計になる
+    frames: u32,
     /// 直前に書き出しへ渡されたフレームの正規化した入力
     previous: Vec<u8>,
     /// 描画後の色の面
@@ -249,6 +325,10 @@ pub struct Encoder<W: Write> {
     poisoned: bool,
     /// グローバルカラーテーブルの据え方。決まるまでは `None`
     palette_kind: Option<PaletteKind>,
+    /// カラーテーブルを据え直した回数
+    rebuilds: u32,
+    /// ローカルカラーテーブルを書いたフレーム数
+    local_tables: u32,
     /// 完全透過へ潰した画素数
     binarized_pixels: u64,
     /// 遅延を下限で切り上げたか
@@ -284,6 +364,8 @@ impl<W: Write> Encoder<W> {
             frames_accepted: 0,
             poisoned: false,
             palette_kind: None,
+            rebuilds: 0,
+            local_tables: 0,
             binarized_pixels: 0,
             delay_clamped: false,
             peak_spool_bytes: 0,
@@ -358,8 +440,8 @@ impl<W: Write> Encoder<W> {
                 // 次のフレームが無く、廃棄方法が変えられるキャンバスの続きも無い
                 parts.write_pending(pending, DISPOSAL_DO_NOT_DISPOSE)?;
             }
-            approximated_pixels = streaming.writing.palette.approximated();
-            black_fallback = streaming.writing.palette.black_fallback();
+            approximated_pixels = streaming.writing.palettes.approximated();
+            black_fallback = streaming.writing.palettes.black_fallback;
         }
 
         block::trailer(&mut self.writer)?;
@@ -369,6 +451,8 @@ impl<W: Write> Encoder<W> {
             palette: self
                 .palette_kind
                 .expect("全フレームを投入した時点で色は決まっている"),
+            rebuilds: self.rebuilds,
+            local_tables: self.local_tables,
             approximated_pixels,
             black_fallback,
             binarized_pixels: self.binarized_pixels,
@@ -391,6 +475,8 @@ impl<W: Write> Encoder<W> {
             frames_accepted,
             poisoned: _,
             palette_kind,
+            rebuilds,
+            local_tables,
             binarized_pixels: _,
             delay_clamped,
             peak_spool_bytes,
@@ -402,6 +488,8 @@ impl<W: Write> Encoder<W> {
                 writer,
                 layout,
                 palette_kind,
+                rebuilds,
+                local_tables,
                 delay_clamped,
                 peak_spool_bytes,
                 num_frames: *num_frames,
@@ -437,6 +525,8 @@ struct Parts<'a, W: Write> {
     writer: &'a mut W,
     layout: &'a Layout,
     palette_kind: &'a mut Option<PaletteKind>,
+    rebuilds: &'a mut u32,
+    local_tables: &'a mut u32,
     delay_clamped: &'a mut bool,
     peak_spool_bytes: &'a mut usize,
     num_frames: u32,
@@ -516,7 +606,8 @@ impl<W: Write> Parts<'_, W> {
         let mut streaming = Box::new(Streaming {
             ring: Ring::new(LOOKAHEAD),
             writing: Writing {
-                palette,
+                palettes: Palettes::new(palette),
+                frames: 0,
                 previous: Vec::new(),
                 canvas: Canvas::new(*self.layout),
                 rendered: Vec::new(),
@@ -578,14 +669,14 @@ impl<W: Write> Parts<'_, W> {
         let Some(due) = ring.push(pixels.to_vec(), delay) else {
             return Ok(());
         };
-        self.write_frame(writing, &due.pixels, due.delay)
+        self.write_frame(writing, ring, &due.pixels, due.delay)
     }
 
     /// 先読みリングに残ったフレームをすべて書き出しへ渡す
     fn drain(&mut self, streaming: &mut Streaming) -> Result<(), Error> {
         let Streaming { ring, writing } = streaming;
         while let Some(due) = ring.take() {
-            self.write_frame(writing, &due.pixels, due.delay)?;
+            self.write_frame(writing, ring, &due.pixels, due.delay)?;
         }
         Ok(())
     }
@@ -598,11 +689,13 @@ impl<W: Write> Parts<'_, W> {
     fn write_frame(
         &mut self,
         writing: &mut Writing,
+        ring: &Ring,
         pixels: &[u8],
         delay: FrameDelay,
     ) -> Result<(), Error> {
         let Writing {
-            palette,
+            palettes,
+            frames,
             previous,
             canvas,
             rendered,
@@ -610,19 +703,45 @@ impl<W: Write> Parts<'_, W> {
             pending,
             pacing,
         } = writing;
-        canvas.render(previous, pixels, palette, rendered);
+        *frames += 1;
+        palettes.current.set_frame(*frames);
+
+        let tolerance = REBUILD_TOLERANCE * REBUILD_TOLERANCE;
+        let mut mapped =
+            canvas.render(previous, pixels, &mut palettes.current, tolerance, rendered);
+        if mapped.exceeded > self.rebuild_floor() {
+            let fresh = rebuild(
+                self.layout,
+                &palettes.current,
+                KEEP_WINDOW,
+                tolerance,
+                previous,
+                std::iter::once(pixels).chain(ring.window()),
+            );
+            palettes.replace(fresh);
+            palettes.current.set_frame(*frames);
+            mapped = canvas.render(previous, pixels, &mut palettes.current, tolerance, rendered);
+            *self.rebuilds += 1;
+        }
+        palettes.current.note_approximated(mapped.approximated);
 
         let delay = self.hundredths(delay);
         match pending.take() {
             None => {
-                let laid = lay_out(canvas.kept(), rendered, palette, indices, delay);
+                let laid = lay_out(
+                    canvas.kept(),
+                    rendered,
+                    &mut palettes.current,
+                    indices,
+                    delay,
+                );
                 canvas.start(rendered);
                 *pending = Some(laid);
             }
             Some(mut waiting) => {
                 let (disposal, laid) = choose_disposal(
                     canvas,
-                    palette,
+                    palettes,
                     indices,
                     &mut waiting,
                     rendered,
@@ -635,10 +754,17 @@ impl<W: Write> Parts<'_, W> {
                 *pending = Some(laid);
             }
         }
+        palettes.retire();
 
         previous.clear();
         previous.extend_from_slice(pixels);
         Ok(())
+    }
+
+    /// 据え直しに踏み切る、誤差が閾値を超えた画素数の下限
+    fn rebuild_floor(&self) -> u64 {
+        let pixels = u64::from(self.layout.width) * u64::from(self.layout.height);
+        pixels * REBUILD_FLOOR_PERMILLE / 1000
     }
 
     /// 保留していたフレームを `disposal` で書き出す
@@ -650,7 +776,12 @@ impl<W: Write> Parts<'_, W> {
             pending.rect.y as u16,
             pending.rect.width as u16,
             pending.rect.height as u16,
+            pending.local.as_ref().map(ColorTable::size_field),
         )?;
+        if let Some(table) = &pending.local {
+            block::color_table(self.writer, table.bytes())?;
+            *self.local_tables += 1;
+        }
         block::image_body(self.writer, pending.min_code_size, &pending.body)?;
         Ok(())
     }
@@ -671,9 +802,11 @@ impl<W: Write> Parts<'_, W> {
 ///
 /// 抜く候補が2つ立ったときは、両方を符号化して圧縮後の大きさで選ぶ。抜きたい
 /// 画素が保留中のフレームの矩形の外にあるときは、その矩形を広げて符号化し直す。
+/// 符号化し直すのは保留中のフレームなので、そのフレームを符号化したテーブルを
+/// 引く。
 fn choose_disposal(
     canvas: &mut Canvas,
-    palette: &mut Palette,
+    palettes: &mut Palettes,
     indices: &mut Vec<u8>,
     pending: &mut Pending,
     rendered: &[u8],
@@ -681,7 +814,13 @@ fn choose_disposal(
     pacing: &mut RestorePacing,
 ) -> (u8, Pending) {
     if canvas.kept().expressible(rendered) {
-        let laid = lay_out(canvas.kept(), rendered, palette, indices, delay);
+        let laid = lay_out(
+            canvas.kept(),
+            rendered,
+            &mut palettes.current,
+            indices,
+            delay,
+        );
         return (DISPOSAL_DO_NOT_DISPOSE, laid);
     }
 
@@ -689,7 +828,7 @@ fn choose_disposal(
     // テーブルは必ず透過インデックスを持つ。抜いた画素を書かずに済ませる添字が
     // 無ければ、透過の位置そのものを表現できない
     debug_assert!(
-        palette.transparent().is_some(),
+        palettes.current.transparent().is_some(),
         "透過インデックスの無いテーブルに透過画素が現れた"
     );
 
@@ -701,7 +840,7 @@ fn choose_disposal(
             canvas.restored(),
             canvas.composite(),
             widened,
-            palette,
+            palettes.earlier(),
             indices,
             pending.delay,
         );
@@ -715,12 +854,12 @@ fn choose_disposal(
     );
 
     let previous = disposed.previous();
-    let cleared = lay_out(background, rendered, palette, indices, delay);
+    let cleared = lay_out(background, rendered, &mut palettes.current, indices, delay);
     if !previous.expressible(rendered) || !pacing.should_try() {
         return (DISPOSAL_RESTORE_TO_BACKGROUND, cleared);
     }
 
-    let restored = lay_out(previous, rendered, palette, indices, delay);
+    let restored = lay_out(previous, rendered, &mut palettes.current, indices, delay);
     let taken = restored.body.len() < cleared.body.len();
     pacing.record(taken);
     if taken {
@@ -772,6 +911,7 @@ fn encode_on(
         delay,
         transparent: palette.transparent(),
         min_code_size,
+        local: palette.local_table(),
         body,
     }
 }

@@ -220,6 +220,11 @@ impl Ring {
     pub(crate) fn take(&mut self) -> Option<Held> {
         self.frames.pop_front()
     }
+
+    /// 書き出し位置より先のフレームを、投入された順に見る
+    pub(crate) fn window(&self) -> impl Iterator<Item = &[u8]> {
+        self.frames.iter().map(|held| held.pixels.as_slice())
+    }
 }
 
 #[cfg(test)]

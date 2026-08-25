@@ -96,20 +96,23 @@ pub(crate) fn graphic_control<W: Write>(
 
 /// 画像記述子を書く
 ///
-/// ローカルカラーテーブルは持たず、インターレースもSortもしない。
+/// `table_size` を渡すとローカルカラーテーブルを持つ宣言になり、直後に
+/// [`color_table`] でその中身を書く。インターレースもSortもしない。
 pub(crate) fn image_descriptor<W: Write>(
     writer: &mut W,
     left: u16,
     top: u16,
     width: u16,
     height: u16,
+    table_size: Option<u8>,
 ) -> io::Result<()> {
+    let packed = table_size.map_or(0, |size| 0x80 | size);
     writer.write_all(&[IMAGE_SEPARATOR])?;
     writer.write_all(&left.to_le_bytes())?;
     writer.write_all(&top.to_le_bytes())?;
     writer.write_all(&width.to_le_bytes())?;
     writer.write_all(&height.to_le_bytes())?;
-    writer.write_all(&[0])
+    writer.write_all(&[packed])
 }
 
 /// 圧縮済みの画像データを書く
@@ -190,11 +193,21 @@ mod tests {
 
     #[test]
     fn the_image_descriptor_uses_neither_a_local_table_nor_interlace() {
-        let bytes = written(|out| image_descriptor(out, 1, 2, 0x0304, 0x0506));
+        let bytes = written(|out| image_descriptor(out, 1, 2, 0x0304, 0x0506, None));
         assert_eq!(
             bytes,
             [0x2C, 0x01, 0x00, 0x02, 0x00, 0x04, 0x03, 0x06, 0x05, 0x00]
         );
+    }
+
+    /// ローカルカラーテーブルを持つフレームはその旗と大きさの欄を立てる
+    #[test]
+    fn a_local_table_sets_the_flag_and_the_size_field() {
+        let bytes = written(|out| image_descriptor(out, 0, 0, 1, 1, Some(7)));
+        assert_eq!(bytes[9], 0b1000_0111);
+
+        let bytes = written(|out| image_descriptor(out, 0, 0, 1, 1, Some(0)));
+        assert_eq!(bytes[9], 0b1000_0000);
     }
 
     #[test]

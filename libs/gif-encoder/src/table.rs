@@ -1,6 +1,6 @@
 //! カラーテーブルと、色から添字を引く対応
 
-use crate::normalize::TRANSPARENT;
+use crate::normalize::{TRANSPARENT, pack};
 use crate::quantize::Nearest;
 use anim_core::{Colors, Indexed, MAX_COLORS};
 
@@ -28,6 +28,7 @@ const MIN_ENTRIES: usize = 2;
 const MIN_CODE_SIZE: u8 = 2;
 
 /// 添字順に並べたRGBの三つ組
+#[derive(Clone)]
 pub(crate) struct ColorTable {
     /// RGBの三つ組を並べたバイト列 (長さは `3 * エントリ数`)
     bytes: Vec<u8>,
@@ -71,6 +72,24 @@ impl ColorTable {
     }
 }
 
+/// 画素をテーブルへ写した結果
+pub(crate) struct Mapped {
+    /// 写す先の添字
+    pub(crate) index: u8,
+    /// 写す先の色との二乗距離。完全一致なら0
+    pub(crate) error: u32,
+    /// 完全一致が無く最近傍へ落ちたか
+    pub(crate) approximated: bool,
+}
+
+/// 据え直しても残すエントリ1つ
+#[derive(Clone, Copy)]
+pub(crate) struct Kept {
+    pub(crate) color: u32,
+    /// 最後に添字を出力へ書いたフレーム番号
+    pub(crate) last_used: u32,
+}
+
 /// 据えたカラーテーブルと、そこへ色を写す対応
 pub(crate) struct Palette {
     /// 和集合の色から添字を引く対応
@@ -87,6 +106,12 @@ pub(crate) struct Palette {
     approximated: u64,
     /// 写す先として [`OPAQUE_BLACK`] を足したか
     black_fallback: bool,
+    /// グローバルカラーテーブルではなく、フレームごとに書く色表か
+    local: bool,
+    /// エントリごとの、最後に添字を出力へ書いたフレーム番号 (0は一度も無い)
+    last_used: Vec<u32>,
+    /// いま処理しているフレーム番号
+    frame: u32,
 }
 
 impl Palette {
@@ -134,6 +159,41 @@ impl Palette {
         Palette::new(entries)
     }
 
+    /// 添字順に並べた色をそのままテーブルにする
+    ///
+    /// 写す先を測るためだけのテーブルを組むときに使う。
+    ///
+    /// # Panics
+    /// `entries` が空か、[`MAX_COLORS`] を超えているとき。
+    pub(crate) fn from_entries(entries: Vec<u32>) -> Self {
+        Palette::new(entries)
+    }
+
+    /// 維持したエントリと残差の色でテーブルを据え直す
+    ///
+    /// 非透過色は255色までに抑え、透過スロットを1つ確保する。維持したエントリの
+    /// 最終使用は据え直した後も引き継ぐ。据え直したテーブルはフレームごとに
+    /// 書き出される。
+    ///
+    /// # Panics
+    /// 非透過色が1つも残らないとき。
+    pub(crate) fn from_rebuilt(kept: &[Kept], residual: &[u32]) -> Self {
+        let mut entries: Vec<u32> = kept.iter().map(|entry| entry.color).collect();
+        entries.extend_from_slice(residual);
+        entries.truncate(QUANTIZED_COLORS);
+        assert!(!entries.is_empty(), "据え直したテーブルに非透過色が無い");
+        entries.push(TRANSPARENT);
+
+        let mut palette = Palette::new(entries);
+        palette.local = true;
+        for entry in kept {
+            if let Some(index) = palette.indexed.index_of(&entry.color.to_le_bytes(), 4) {
+                palette.last_used[index as usize] = entry.last_used;
+            }
+        }
+        palette
+    }
+
     /// 添字順に並べた色からテーブルと引く対応を作る
     ///
     /// 引く対応はテーブルのエントリそのものから作る。書き出す色がすべて完全一致で
@@ -162,6 +222,7 @@ impl Palette {
         let nearest = Nearest::new(&entries);
 
         Palette {
+            last_used: vec![0; entries.len()],
             indexed,
             entries,
             table,
@@ -169,7 +230,48 @@ impl Palette {
             nearest,
             approximated: 0,
             black_fallback,
+            local: false,
+            frame: 0,
         }
+    }
+
+    /// これから処理するフレーム番号を覚える
+    ///
+    /// 以降の [`Palette::mark_used`] はこの番号で最終使用を更新する。
+    pub(crate) fn set_frame(&mut self, frame: u32) {
+        self.frame = frame;
+    }
+
+    /// 添字を出力へ書いたことを覚える
+    pub(crate) fn mark_used(&mut self, index: u8) {
+        self.last_used[index as usize] = self.frame;
+    }
+
+    /// 直近 `window` フレームの出力で使った非透過エントリ
+    ///
+    /// 瞬きで戻ってきた色と、廃棄方法で抜かれた画素を書き直す色を、テーブルを
+    /// 据え直しても失わないために残す。
+    pub(crate) fn recently_used(&self, window: u32) -> Vec<Kept> {
+        let oldest = self.frame.saturating_sub(window);
+        self.entries
+            .iter()
+            .zip(&self.last_used)
+            .filter(|&(&color, &used)| color != TRANSPARENT && used > 0 && used >= oldest)
+            .map(|(&color, &used)| Kept {
+                color,
+                last_used: used,
+            })
+            .collect()
+    }
+
+    /// このフレームに書くローカルカラーテーブル。グローバルのままなら `None`
+    pub(crate) fn local_table(&self) -> Option<ColorTable> {
+        self.local.then(|| self.table.clone())
+    }
+
+    /// 最近傍へ写した画素を数に加える
+    pub(crate) fn note_approximated(&mut self, count: u64) {
+        self.approximated += count;
     }
 
     /// 透過でないエントリの数
@@ -205,7 +307,7 @@ impl Palette {
         self.transparent
     }
 
-    /// 画素の色を写す先の添字
+    /// 画素の色を写す先と、そこまでの誤差
     ///
     /// `pixel` は1画素 `bpp` バイトが並んでいること。まず完全一致を引き、外れた
     /// ときだけ最近傍探索へ落とす。量子化したテーブルにも素材の色がそのまま
@@ -214,27 +316,46 @@ impl Palette {
     /// 透過のエントリは最近傍の候補にならない。素材自身の透過画素は完全一致で
     /// 引け、透過ラン用に足したスロットはキャンバスと一致する画素にだけ置く
     /// もので、どちらも色を近似する相手ではない。
-    pub(crate) fn index_of(&mut self, pixel: &[u8], bpp: usize) -> u8 {
-        match self.indexed.index_of(pixel, bpp) {
-            Some(index) => index,
-            None => {
-                let color = pack(pixel, bpp);
-                // 標識がここへ落ちるのは透過を表現できないテーブルのときだけ。
-                // 先頭フレームの矩形は論理画面全体なので、素材に透過があれば
-                // 標識は和集合に入る。以降のフレームで現れた標識は、廃棄方法の
-                // 判定が先に弾く
-                debug_assert!(color != TRANSPARENT, "透過標識を色として近似している");
-                self.approximated += 1;
-                self.nearest.index_of(color)
-            }
+    pub(crate) fn map(&mut self, pixel: &[u8], bpp: usize) -> Mapped {
+        if let Some(index) = self.indexed.index_of(pixel, bpp) {
+            return Mapped {
+                index,
+                error: 0,
+                approximated: false,
+            };
         }
+
+        let color = pack(pixel, bpp);
+        // 標識がここへ落ちるのは透過を表現できないテーブルのときだけ。
+        // 先頭フレームの矩形は論理画面全体なので、素材に透過があれば
+        // 標識は和集合に入る。以降のフレームで現れた標識は、廃棄方法の
+        // 判定が先に弾く
+        debug_assert!(color != TRANSPARENT, "透過標識を色として近似している");
+        let index = self.nearest.index_of(color);
+        Mapped {
+            index,
+            error: distance(color, self.entries[index as usize]),
+            approximated: true,
+        }
+    }
+
+    /// 画素の色を写す先の添字。最近傍へ落ちたら数に加える
+    pub(crate) fn index_of(&mut self, pixel: &[u8], bpp: usize) -> u8 {
+        let mapped = self.map(pixel, bpp);
+        self.approximated += u64::from(mapped.approximated);
+        mapped.index
     }
 }
 
-/// 色を `R | G<<8 | B<<16 | A<<24` へ詰める
-fn pack(pixel: &[u8], bpp: usize) -> u32 {
-    let alpha = if bpp == 4 { pixel[3] } else { u8::MAX };
-    u32::from_le_bytes([pixel[0], pixel[1], pixel[2], alpha])
+/// 2色のRGBの二乗距離
+fn distance(a: u32, b: u32) -> u32 {
+    let [ar, ag, ab, _] = a.to_le_bytes();
+    let [br, bg, bb, _] = b.to_le_bytes();
+    let squared = |x: u8, y: u8| {
+        let difference = i32::from(x) - i32::from(y);
+        (difference * difference) as u32
+    };
+    squared(ar, br) + squared(ag, bg) + squared(ab, bb)
 }
 
 #[cfg(test)]

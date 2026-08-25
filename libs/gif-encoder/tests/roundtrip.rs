@@ -1189,6 +1189,9 @@ fn a_table_quantized_from_a_prefix_is_reported() {
 ///
 /// 和集合が透過標識だけだと写す先の候補が1つも残らない。カラーテーブルは
 /// 2エントリ未満を書けないため、埋め草の黒がその候補になる。
+///
+/// 後から現れる色は黒のすぐ隣に置く。誤差が大きいとテーブルを据え直す経路へ
+/// 逸れ、写す先が埋め草でなくなる。
 #[test]
 fn an_opaque_pixel_after_a_fully_transparent_prefix_is_mapped_to_the_padding() {
     const WIDTH: u32 = 4;
@@ -1197,7 +1200,7 @@ fn an_opaque_pixel_after_a_fully_transparent_prefix_is_mapped_to_the_padding() {
 
     let first = solid(WIDTH, HEIGHT, color, &[0, 0, 0, 0]);
     let mut second = first.clone();
-    set_pixel(&mut second, WIDTH, color, 1, 1, &[0x10, 0x20, 0x30, 0xFF]);
+    set_pixel(&mut second, WIDTH, color, 1, 1, &[0x01, 0x00, 0x00, 0xFF]);
 
     let config = Config {
         color_type: color,
@@ -1220,6 +1223,9 @@ fn an_opaque_pixel_after_a_fully_transparent_prefix_is_mapped_to_the_padding() {
 }
 
 /// 先頭区間から据えたテーブルに無い色が後から現れたら、最近傍へ写す
+///
+/// 後から現れる色は据えた色のすぐ隣に置く。誤差が大きいとテーブルを据え直す
+/// 経路へ逸れ、最近傍へ写らずに済んでしまう。
 #[test]
 fn a_color_appearing_after_the_settlement_is_mapped_to_its_nearest() {
     const WIDTH: u32 = 8;
@@ -1228,7 +1234,7 @@ fn a_color_appearing_after_the_settlement_is_mapped_to_its_nearest() {
 
     let first = solid(WIDTH, HEIGHT, color, &[0x30, 0x50, 0x70]);
     let mut second = first.clone();
-    set_pixel(&mut second, WIDTH, color, 2, 1, &[0xF0, 0xF0, 0xF0]);
+    set_pixel(&mut second, WIDTH, color, 2, 1, &[0x31, 0x50, 0x70]);
 
     let config = Config {
         max_spool_bytes: 0,
@@ -1236,6 +1242,8 @@ fn a_color_appearing_after_the_settlement_is_mapped_to_its_nearest() {
     };
     let (bytes, report) = encode_with(WIDTH, HEIGHT, config, &[first, second]).unwrap();
     assert_eq!(report.palette, PaletteKind::ExactFromPrefix { colors: 1 });
+    assert_eq!(report.approximated_pixels, 1);
+    assert_eq!(report.rebuilds, 0, "テーブルを据え直している");
 
     // 据えたテーブルの非透過色は1つしかなく、後から現れた色もそこへ写る
     let decoded = decode_with_gif(&bytes);

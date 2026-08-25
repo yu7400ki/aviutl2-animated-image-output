@@ -8,6 +8,7 @@ mod layout;
 mod lzw;
 mod normalize;
 mod quantize;
+mod rebuild;
 mod spool;
 mod table;
 
