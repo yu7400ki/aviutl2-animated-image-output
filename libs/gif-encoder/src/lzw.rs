@@ -445,8 +445,8 @@ mod tests {
         let lengths = block_lengths(&stream);
         assert!(lengths.len() > 1, "サブブロックが1つしかない");
         let (last, full) = lengths.split_last().unwrap();
-        assert!(full.iter().all(|&len| len == MAX_SUB_BLOCK), "{lengths:?}");
-        assert!(*last <= MAX_SUB_BLOCK, "{lengths:?}");
+        assert!(full.iter().all(|&len| len == 255), "{lengths:?}");
+        assert!(*last <= 255, "{lengths:?}");
     }
 
     /// ちょうど255バイトで終わる出力も、余分な空のサブブロックを作らない
@@ -455,15 +455,15 @@ mod tests {
         let mut stream = Vec::new();
         {
             let mut compressor = Compressor::new(&mut stream, 7);
-            for _ in 0..MAX_SUB_BLOCK {
+            for _ in 0..255 {
                 compressor.emit(0xFF).unwrap();
             }
             assert_eq!(compressor.bit_count, 0, "端数のビットが残っている");
             compressor.finish().unwrap();
         }
 
-        assert_eq!(block_lengths(&stream), [MAX_SUB_BLOCK]);
-        assert_eq!(stream.len(), 1 + MAX_SUB_BLOCK + 1);
+        assert_eq!(block_lengths(&stream), [255]);
+        assert_eq!(stream.len(), 1 + 255 + 1);
     }
 
     /// 辞書は空きが残る大きさで、鍵の走査が一周しない
