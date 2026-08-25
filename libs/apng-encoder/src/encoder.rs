@@ -5,9 +5,9 @@ use crate::chunk::{
 };
 use crate::codec::{Candidate, Codec};
 use crate::delta::Delta;
-use crate::diff;
 use crate::error::Error;
 use crate::layout::{ColorType, Layout, Output};
+use crate::over;
 use crate::palette::Palette;
 use crate::spool::{Spool, Spooled};
 use anim_core::{FrameDelay, Rect, append_pixels, crop, paste};
@@ -683,7 +683,7 @@ impl<W: Write> Parts<'_, W> {
     fn compress_over(&mut self, canvas: &[u8], frame: &Spooled) -> Option<Candidate> {
         let out_bpp = Output::Rgba8.bytes_per_pixel();
         let mut over = self.codec.take();
-        let packed = diff::pack_over_cropped(
+        let packed = over::pack_over_cropped(
             canvas,
             &frame.data,
             self.layout.stride,
@@ -925,7 +925,7 @@ impl<W: Write> Parts<'_, W> {
             &self.delta.canvas
         };
         let mut over = self.codec.take();
-        let packed = diff::pack_over(base, data, self.layout.stride, rect, &mut over);
+        let packed = over::pack_over(base, data, self.layout.stride, rect, &mut over);
         if !packed {
             self.codec.give(over);
             return (BLEND_OP_SOURCE, source);
