@@ -1170,6 +1170,48 @@ fn unchanged_input_keeps_the_color_on_screen() {
     }
 }
 
+/// 量子化の経路でも、矩形の中の未変更画素は透過インデックスに潰れる
+///
+/// キャンバスが持つのは写した後の色なので、入力の画素と比べても一致しない。
+/// 潰す相手を取り違えると絵は変わらないまま、LZWのランだけが伸びなくなる。
+#[test]
+fn unchanged_pixels_inside_a_quantized_rect_are_written_as_transparent() {
+    const WIDTH: u32 = 64;
+    const HEIGHT: u32 = 8;
+    let color = ColorType::Rgb8;
+
+    let first: Vec<u8> = (0..WIDTH * HEIGHT)
+        .flat_map(|i| [(i % WIDTH * 4) as u8, (i / WIDTH * 32) as u8, 0])
+        .collect();
+    let mut second = first.clone();
+    set_pixel(&mut second, WIDTH, color, 2, 0, &[0, 0, 200]);
+    set_pixel(&mut second, WIDTH, color, 60, 0, &[8, 0, 200]);
+
+    let (bytes, report) = encode(WIDTH, HEIGHT, color, &[first, second], 0).unwrap();
+    assert!(
+        matches!(report.palette, PaletteKind::Quantized { .. }),
+        "{:?}",
+        report.palette
+    );
+
+    let decoded = decode_with_gif(&bytes);
+    let frame = &decoded.frames[1];
+    assert_eq!(frame.rect(), (2, 0, 59, 1));
+
+    let transparent: Vec<usize> = frame
+        .rgba
+        .chunks_exact(4)
+        .enumerate()
+        .filter(|(_, pixel)| pixel[3] == 0)
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(
+        transparent,
+        (1..58).collect::<Vec<usize>>(),
+        "変わっていない画素が潰れていない"
+    );
+}
+
 /// 量子化で同じ色へ落ちた画素は、入力が変わっていても差分矩形に入らない
 ///
 /// 同じ6-6-6のビンに入る2色は必ず同じ箱へ落ちるため、その間の書き換えは
