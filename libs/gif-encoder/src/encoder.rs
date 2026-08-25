@@ -2,8 +2,9 @@
 
 use crate::block::{self, DISPOSAL_DO_NOT_DISPOSE};
 use crate::error::Error;
-use crate::frame::{self, Canvas};
+use crate::frame::{Canvas, Screen};
 use crate::layout::{ColorType, Layout};
+use crate::lzw;
 use crate::normalize;
 use crate::spool::{Spool, Spooled};
 use crate::table::{Palette, QUANTIZED_COLORS};
@@ -110,12 +111,20 @@ pub struct Report {
 ///
 /// 廃棄方法は次のフレームを見るまで決まらず、グラフィック制御拡張は画像記述子の
 /// 前に置く必要があるため、書けるようになるまで1つぶんを保持する。
+///
+/// 透過インデックスと最小符号長は、添字を作ったときのカラーテーブルから取って
+/// 一緒に運ぶ。添字はそのテーブルを引くものなので、書き出す時点のテーブルから
+/// 引き直すと組み合わせが崩れうる。
 struct Pending {
     rect: Rect,
     /// 1/100秒へ丸めた遅延
     delay: u16,
-    /// LZWで圧縮する添字の並び
-    indices: Vec<u8>,
+    /// 添字を引いたテーブルの透過インデックス
+    transparent: Option<u8>,
+    /// 添字を引いたテーブルのLZW最小符号長
+    min_code_size: u8,
+    /// LZWで圧縮した画像データ
+    body: Vec<u8>,
 }
 
 /// エンコーダが進む段階
@@ -132,7 +141,7 @@ enum Stage {
 
 /// 書き出しの段階が持つ状態
 ///
-/// 面が2つに分かれる。[`Self::previous`] は「この画素は変わったか」を決め、
+/// 面が分かれる。[`Self::previous`] は「この画素は変わったか」を決め、
 /// [`Self::canvas`] はデコーダが見ている色を持つ。差分矩形と透過ランは後者で
 /// 求める。量子化を通すと別々の入力色が同じ色へ落ちることがあり、それは
 /// 出力上は未変更だからで、比べる面を分けないとこの一致を見落とす。
@@ -145,6 +154,8 @@ struct Streaming {
     canvas: Canvas,
     /// 投入されたフレームを写した描画後の色
     rendered: Vec<u8>,
+    /// 圧縮する添字を組み立てる作業領域
+    indices: Vec<u8>,
     /// 書き出しを待っているフレーム
     pending: Option<Pending>,
 }
@@ -276,7 +287,7 @@ impl<W: Write> Encoder<W> {
         if let Stage::Streaming(streaming) = stage {
             if let Some(pending) = streaming.pending.take() {
                 // 次のフレームが無く、廃棄方法が変えられるキャンバスの続きも無い
-                parts.write_pending(&streaming.palette, pending, DISPOSAL_DO_NOT_DISPOSE)?;
+                parts.write_pending(pending, DISPOSAL_DO_NOT_DISPOSE)?;
             }
             approximated_pixels = streaming.palette.approximated();
             black_fallback = streaming.palette.black_fallback();
@@ -434,6 +445,7 @@ impl<W: Write> Parts<'_, W> {
             previous: Vec::new(),
             canvas: Canvas::new(*self.layout),
             rendered: Vec::new(),
+            indices: Vec::new(),
             pending: None,
         };
         self.replay(&settled.frames, &mut streaming)?;
@@ -479,7 +491,9 @@ impl<W: Write> Parts<'_, W> {
 
     /// 保留中のフレームを書き出し、投入されたフレームを保留にする
     ///
-    /// 矩形も透過ランも、入力ではなく写した後の色の面で求める。
+    /// 矩形も透過ランも、入力ではなく写した後の色の面で求める。廃棄方法は
+    /// 保留中のフレームのもので、投入されたフレームが載る画面を決めるため、
+    /// 先に決めてからその画面で矩形と添字を求める。
     fn write_frame(
         &mut self,
         streaming: &mut Streaming,
@@ -491,41 +505,39 @@ impl<W: Write> Parts<'_, W> {
             previous,
             canvas,
             rendered,
+            indices,
             pending,
         } = streaming;
         canvas.render(previous, pixels, palette, rendered);
 
-        // 廃棄方法は保留中のフレームのもので、投入されたフレームが載るキャンバスを
-        // 決める。決めてからそのキャンバスで矩形と添字を求める
-        if let Some(pending) = pending.take() {
-            let disposal =
-                frame::choose_disposal(canvas, rendered).ok_or(Error::UnsupportedTransparency)?;
-            self.write_pending(palette, pending, disposal)?;
+        let delay = self.hundredths(delay);
+        match pending.take() {
+            None => {
+                let laid = lay_out(canvas.screen(), rendered, palette, indices, delay);
+                canvas.start(rendered);
+                *pending = Some(laid);
+            }
+            Some(waiting) => {
+                let disposal = DISPOSAL_DO_NOT_DISPOSE;
+                if !canvas.screen().expressible(rendered) {
+                    return Err(Error::UnsupportedTransparency);
+                }
+                let laid = lay_out(canvas.screen(), rendered, palette, indices, delay);
+                let disposed = waiting.rect;
+                self.write_pending(waiting, disposal)?;
+                canvas.advance(disposed, rendered, laid.rect);
+                *pending = Some(laid);
+            }
         }
 
-        let rect = canvas.rect_of(rendered);
-        let mut indices = Vec::new();
-        canvas.append_indices(rendered, rect, palette, &mut indices);
-
-        *pending = Some(Pending {
-            rect,
-            delay: self.hundredths(delay),
-            indices,
-        });
-        canvas.advance(rendered, rect);
         previous.clear();
         previous.extend_from_slice(pixels);
         Ok(())
     }
 
     /// 保留していたフレームを `disposal` で書き出す
-    fn write_pending(
-        &mut self,
-        palette: &Palette,
-        pending: Pending,
-        disposal: u8,
-    ) -> Result<(), Error> {
-        block::graphic_control(self.writer, disposal, pending.delay, palette.transparent())?;
+    fn write_pending(&mut self, pending: Pending, disposal: u8) -> Result<(), Error> {
+        block::graphic_control(self.writer, disposal, pending.delay, pending.transparent)?;
         block::image_descriptor(
             self.writer,
             pending.rect.x as u16,
@@ -533,11 +545,7 @@ impl<W: Write> Parts<'_, W> {
             pending.rect.width as u16,
             pending.rect.height as u16,
         )?;
-        block::image_data(
-            self.writer,
-            palette.table().min_code_size(),
-            &pending.indices,
-        )?;
+        block::image_body(self.writer, pending.min_code_size, &pending.body)?;
         Ok(())
     }
 
@@ -546,6 +554,34 @@ impl<W: Write> Parts<'_, W> {
         let (rounded, clamped) = hundredths(delay);
         *self.delay_clamped |= clamped;
         rounded
+    }
+}
+
+/// `screen` の上で `frame` を符号化し、書き出しを待つフレームにする
+///
+/// 圧縮まで済ませる。廃棄方法の候補は圧縮後の大きさで比べるため、採った候補の
+/// 圧縮結果をそのまま書き出しへ回す。
+fn lay_out(
+    screen: Screen<'_>,
+    frame: &[u8],
+    palette: &mut Palette,
+    indices: &mut Vec<u8>,
+    delay: u16,
+) -> Pending {
+    let rect = screen.rect_of(frame);
+    indices.clear();
+    screen.append_indices(frame, rect, palette, indices);
+
+    let min_code_size = palette.table().min_code_size();
+    let mut body = Vec::new();
+    lzw::compress(&mut body, indices, min_code_size).expect("Vecへの書き出しは失敗しない");
+
+    Pending {
+        rect,
+        delay,
+        transparent: palette.transparent(),
+        min_code_size,
+        body,
     }
 }
 

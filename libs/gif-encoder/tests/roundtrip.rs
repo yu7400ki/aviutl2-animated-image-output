@@ -148,17 +148,16 @@ fn decode_with_gif(bytes: &[u8]) -> Decoded {
 ///
 /// 透過インデックスに当たった画素はキャンバスを書き換えない。デコーダは
 /// その画素をアルファ0で返すので、アルファを持つ画素だけを写す。
+///
+/// 廃棄はフレームを表示した後に効く。Background は仕様上「背景色で塗り直す」
+/// だが、現代のデコーダは透過で抜くため、そちらに合わせる。
 fn compose(decoded: &Decoded) -> Vec<Vec<u8>> {
     let stride = usize::from(decoded.width) * 4;
     let mut canvas = vec![0u8; stride * usize::from(decoded.height)];
     let mut screens = Vec::new();
 
     for frame in &decoded.frames {
-        assert_eq!(
-            frame.dispose,
-            gif::DisposalMethod::Keep,
-            "扱えない廃棄方法が出た"
-        );
+        let before = canvas.clone();
         for y in 0..usize::from(frame.height) {
             for x in 0..usize::from(frame.width) {
                 let at = (y * usize::from(frame.width) + x) * 4;
@@ -171,6 +170,18 @@ fn compose(decoded: &Decoded) -> Vec<Vec<u8>> {
             }
         }
         screens.push(canvas.clone());
+
+        match frame.dispose {
+            gif::DisposalMethod::Keep => {}
+            gif::DisposalMethod::Background => {
+                for y in 0..usize::from(frame.height) {
+                    let row = (y + usize::from(frame.top)) * stride + usize::from(frame.left) * 4;
+                    canvas[row..row + usize::from(frame.width) * 4].fill(0);
+                }
+            }
+            gif::DisposalMethod::Previous => canvas = before,
+            gif::DisposalMethod::Any => panic!("扱えない廃棄方法が出た"),
+        }
     }
     screens
 }

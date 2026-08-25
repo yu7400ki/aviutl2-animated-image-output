@@ -1,6 +1,5 @@
 //! ブロックの書き出し
 
-use crate::lzw;
 use std::io::{self, Write};
 
 /// データストリームの先頭に置く識別子とバージョン
@@ -109,14 +108,16 @@ pub(crate) fn image_descriptor<W: Write>(
     writer.write_all(&[0])
 }
 
-/// 添字の並びをLZWで圧縮して画像データを書く
-pub(crate) fn image_data<W: Write>(
+/// 圧縮済みの画像データを書く
+///
+/// `body` は [`crate::lzw::compress`] が書いたサブブロックの列とブロック終端。
+pub(crate) fn image_body<W: Write>(
     writer: &mut W,
     min_code_size: u8,
-    indices: &[u8],
+    body: &[u8],
 ) -> io::Result<()> {
     writer.write_all(&[min_code_size])?;
-    lzw::compress(writer, indices, min_code_size)
+    writer.write_all(body)
 }
 
 /// 終端を書く
@@ -127,6 +128,7 @@ pub(crate) fn trailer<W: Write>(writer: &mut W) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lzw;
 
     fn written(write: impl FnOnce(&mut Vec<u8>) -> io::Result<()>) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -193,7 +195,10 @@ mod tests {
 
     #[test]
     fn the_image_data_opens_with_the_minimum_code_size() {
-        let bytes = written(|out| image_data(out, 2, &[0]));
+        let mut body = Vec::new();
+        lzw::compress(&mut body, &[0], 2).unwrap();
+
+        let bytes = written(|out| image_body(out, 2, &body));
         assert_eq!(bytes[0], 2);
         assert_eq!(&bytes[1..], [0x02, 0b0100_0100, 0b0000_0001, 0x00]);
     }
