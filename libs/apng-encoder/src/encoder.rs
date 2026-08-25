@@ -8,7 +8,7 @@ use crate::delta::Delta;
 use crate::diff;
 use crate::error::Error;
 use crate::layout::{ColorType, Layout, Output};
-use crate::palette::{ColorsExt, Palette};
+use crate::palette::Palette;
 use crate::spool::{Spool, Spooled};
 use anim_core::{FrameDelay, Rect, append_pixels, crop, paste};
 use std::io::Write;
@@ -715,7 +715,7 @@ impl<W: Write> Parts<'_, W> {
         };
 
         let color_count = colors.count();
-        let palette = (output == Output::Indexed8).then(|| colors.into_palette());
+        let palette = (output == Output::Indexed8).then(|| Palette::from_colors(colors));
         *self.reduction = Some(match decision {
             Decision::Abandoned => ColorReduction::Abandoned,
             Decision::Compared(Output::Rgb8) => ColorReduction::AlphaDropped,

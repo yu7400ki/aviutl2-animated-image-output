@@ -10,8 +10,12 @@ fn luminance(color: u32) -> u32 {
     r * 2 + g * 5 + b
 }
 
-/// 数えた色をパレットへ落とす
-pub(crate) trait ColorsExt {
+/// PLTEとtRNSへ落とせるパレット
+pub(crate) struct Palette {
+    indexed: Indexed,
+}
+
+impl Palette {
     /// 数えた色を並べてパレットにする
     ///
     /// 明るさの順に置く。隣り合う画素の色が近いほど添字も数として近くなるため、
@@ -19,23 +23,12 @@ pub(crate) trait ColorsExt {
     ///
     /// # Panics
     /// 色数が上限を超えているとき。
-    fn into_palette(self) -> Palette;
-}
-
-impl ColorsExt for Colors {
-    fn into_palette(self) -> Palette {
+    pub(crate) fn from_colors(colors: Colors) -> Self {
         Palette {
-            indexed: self.into_indexed(luminance),
+            indexed: colors.into_indexed(luminance),
         }
     }
-}
 
-/// PLTEとtRNSへ落とせるパレット
-pub(crate) struct Palette {
-    indexed: Indexed,
-}
-
-impl Palette {
     /// PLTEチャンクのデータ部
     ///
     /// 添字順に3バイトのR,G,Bを並べたもの。
@@ -95,7 +88,7 @@ mod tests {
     fn palette_of(pixels: &[u8], bpp: usize) -> Palette {
         let mut colors = Colors::new();
         colors.observe(pixels, bpp);
-        colors.into_palette()
+        Palette::from_colors(colors)
     }
 
     /// 1画素だけの入力は1エントリのパレットになる
@@ -135,7 +128,7 @@ mod tests {
         let mut colors = Colors::new();
         colors.observe(&distinct_rgb(MAX_COLORS), 3);
         assert!(!colors.exceeded());
-        assert_eq!(colors.into_palette().plte().len() / 3, MAX_COLORS);
+        assert_eq!(Palette::from_colors(colors).plte().len() / 3, MAX_COLORS);
 
         let mut colors = Colors::new();
         colors.observe(&distinct_rgb(MAX_COLORS + 1), 3);

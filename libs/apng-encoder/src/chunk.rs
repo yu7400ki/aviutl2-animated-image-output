@@ -1,6 +1,6 @@
 //! PNGチャンクの書き出しと、APNGのフレームを並べる連番の管理
 
-use crate::delay::FrameDelayExt;
+use crate::delay::delay_parts;
 use crate::error::Error;
 use anim_core::{FrameDelay, Rect};
 use std::io::Write;
@@ -85,7 +85,7 @@ impl<W: Write> ChunkWriter<W> {
         dispose: u8,
         blend: u8,
     ) -> Result<(), Error> {
-        let (delay_num, delay_den) = delay.to_parts();
+        let (delay_num, delay_den) = delay_parts(delay);
 
         let mut fctl = [0u8; 26];
         fctl[0..4].copy_from_slice(&self.sequence.to_be_bytes());

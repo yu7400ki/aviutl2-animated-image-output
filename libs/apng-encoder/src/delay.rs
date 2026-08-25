@@ -5,26 +5,19 @@ use anim_core::FrameDelay;
 /// fcTLのdelay_num・delay_denが取りうる最大値
 const MAX: u64 = u16::MAX as u64;
 
-/// [`FrameDelay`] をfcTLの分数へ直す
-pub trait FrameDelayExt {
-    /// fcTLへ書ける16bit分数 (分子, 分母) へ変換する
-    ///
-    /// 約分してもu16に収まらない場合は、秒数の誤差が最小になる分数で近似する。
-    /// 分子が0でない限り近似後の分子も0にはならない。
-    fn to_parts(&self) -> (u16, u16);
-}
+/// `delay` をfcTLへ書ける16bit分数 (分子, 分母) へ変換する
+///
+/// 約分してもu16に収まらない場合は、秒数の誤差が最小になる分数で近似する。
+/// 分子が0でない限り近似後の分子も0にはならない。
+pub fn delay_parts(delay: FrameDelay) -> (u16, u16) {
+    let (numerator, denominator) = (delay.numerator() as u64, delay.denominator() as u64);
+    let g = gcd(numerator, denominator);
+    let (num, den) = (numerator / g, denominator / g);
 
-impl FrameDelayExt for FrameDelay {
-    fn to_parts(&self) -> (u16, u16) {
-        let (numerator, denominator) = (self.numerator() as u64, self.denominator() as u64);
-        let g = gcd(numerator, denominator);
-        let (num, den) = (numerator / g, denominator / g);
-
-        if num <= MAX && den <= MAX {
-            return (num as u16, den as u16);
-        }
-        approximate(num, den)
+    if num <= MAX && den <= MAX {
+        return (num as u16, den as u16);
     }
+    approximate(num, den)
 }
 
 fn gcd(a: u64, b: u64) -> u64 {
@@ -91,7 +84,7 @@ mod tests {
     use super::*;
 
     fn parts(num: u32, den: u32) -> (u16, u16) {
-        FrameDelay::new(num, den).unwrap().to_parts()
+        delay_parts(FrameDelay::new(num, den).unwrap())
     }
 
     #[test]

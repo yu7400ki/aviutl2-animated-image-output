@@ -164,18 +164,21 @@ register_logger!();
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apng_encoder::FrameDelayExt;
+    use apng_encoder::delay_parts;
 
     #[test]
     fn frame_rate_becomes_a_delay_in_seconds() {
         // 29.97fps
         assert_eq!(
-            frame_delay(1001, 30000).unwrap().to_parts(),
-            FrameDelay::new(1001, 30000).unwrap().to_parts()
+            delay_parts(frame_delay(1001, 30000).unwrap()),
+            delay_parts(FrameDelay::new(1001, 30000).unwrap())
         );
         // レートがu16を超えても切り詰めない
-        assert_eq!(frame_delay(1001, 120000).unwrap().to_parts(), (342, 40999));
-        assert_eq!(frame_delay(1, 60).unwrap().to_parts(), (1, 60));
+        assert_eq!(
+            delay_parts(frame_delay(1001, 120000).unwrap()),
+            (342, 40999)
+        );
+        assert_eq!(delay_parts(frame_delay(1, 60).unwrap()), (1, 60));
     }
 
     #[test]
