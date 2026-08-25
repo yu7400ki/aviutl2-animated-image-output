@@ -190,14 +190,26 @@ impl Indexed {
         }
     }
 
+    /// 画素の色の添字。この対応に無ければ `None`
+    ///
+    /// `pixel` は1画素 `bpp` バイトが並んでいること。`bpp` は3か4であること。
+    /// 対応に無い色を写せない呼び出し元が、写す時点でそれを知るために使う。
+    pub fn index_of(&self, pixel: &[u8], bpp: usize) -> Option<u8> {
+        match bpp {
+            3 => self.lookup(pack::<3>(pixel)),
+            4 => self.lookup(pack::<4>(pixel)),
+            other => panic!("1画素あたり3バイトか4バイトのみ扱える: {other}"),
+        }
+    }
+
     fn map<const BPP: usize>(&self, pixels: &[u8], out: &mut Vec<u8>) {
         for pixel in pixels.chunks_exact(BPP) {
-            out.push(self.index_of(pack::<BPP>(pixel)).expect("対応に無い色"));
+            out.push(self.lookup(pack::<BPP>(pixel)).expect("対応に無い色"));
         }
     }
 
     /// 色の添字。この対応に無ければ `None`
-    fn index_of(&self, color: u32) -> Option<u8> {
+    fn lookup(&self, color: u32) -> Option<u8> {
         let mut slot = slot_of(color);
         loop {
             let value = self.table.values[slot];
@@ -243,15 +255,15 @@ mod tests {
     #[test]
     fn a_color_outside_the_table_is_reported_as_missing() {
         let palette = indexed_of(&[1, 2, 3, 4, 5, 6], 3);
-        assert_eq!(palette.index_of(pack::<3>(&[1, 2, 3])), Some(0));
-        assert_eq!(palette.index_of(pack::<3>(&[4, 5, 6])), Some(1));
+        assert_eq!(palette.lookup(pack::<3>(&[1, 2, 3])), Some(0));
+        assert_eq!(palette.lookup(pack::<3>(&[4, 5, 6])), Some(1));
         for color in 0..8192u32 {
-            assert_eq!(palette.index_of(color), None, "{color:#010X}");
+            assert_eq!(palette.lookup(color), None, "{color:#010X}");
         }
 
         let full = indexed_of(&distinct_rgb(MAX_COLORS), 3);
         for color in 0..8192u32 {
-            assert_eq!(full.index_of(color), None, "{color:#010X}");
+            assert_eq!(full.lookup(color), None, "{color:#010X}");
         }
     }
 
@@ -309,6 +321,20 @@ mod tests {
         for (index, pixel) in indices.iter().zip(pixels.chunks_exact(3)) {
             assert_eq!(indexed.colors()[*index as usize], pack::<3>(pixel));
         }
+    }
+
+    /// 画素から添字を引ける。対応に無い色は `None`
+    ///
+    /// 1画素あたりのバイト数が違っても、同じ色は同じ添字へ落ちる。
+    #[test]
+    fn a_pixel_is_looked_up_by_its_bytes() {
+        let indexed = indexed_of(&rgba(&[[1, 2, 3, 0xFF], [4, 5, 6, 0xFF]]), 4);
+
+        assert_eq!(indexed.index_of(&[1, 2, 3, 0xFF], 4), Some(0));
+        assert_eq!(indexed.index_of(&[1, 2, 3], 3), Some(0));
+        assert_eq!(indexed.index_of(&[4, 5, 6], 3), Some(1));
+        assert_eq!(indexed.index_of(&[1, 2, 3, 0x80], 4), None);
+        assert_eq!(indexed.index_of(&[7, 8, 9], 3), None);
     }
 
     /// 鍵の昇順に添字を振り、鍵が等しい色は見つけた順に残る
