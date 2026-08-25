@@ -1889,3 +1889,89 @@ fn the_residual_reaches_the_whole_lookahead_window() {
         "窓の中で現れる色がテーブルに載っていない"
     );
 }
+
+/// 矩形を塗る
+fn fill_block(frame: &mut [u8], at: (u32, u32), size: (u32, u32), pixel: &[u8]) {
+    for y in at.1..at.1 + size.1 {
+        for x in at.0..at.0 + size.0 {
+            set_pixel(frame, SCENE_WIDTH, ColorType::Rgba8, x, y, pixel);
+        }
+    }
+}
+
+/// 保留中のフレームの矩形を広げる符号化と、テーブルの据え直しが重なる素材
+///
+/// 保留中のフレームの外で不透明な物が消えるので矩形を広げることになり、同じ
+/// フレームで場面転換が起きてテーブルを据え直す。
+fn a_widened_rect_across_a_rebuild(frames: usize) -> Vec<Vec<u8>> {
+    /// 消える物の色
+    const OBJECT: [u8; 4] = [0x00, 0xFF, 0x00, 0xFF];
+    /// 保留中のフレームが塗る色
+    const PAINT: [u8; 4] = [0xFF, 0x00, 0xFF, 0xFF];
+
+    let transparent = solid(SCENE_WIDTH, SCENE_HEIGHT, ColorType::Rgba8, &[0, 0, 0, 0]);
+    (0..frames)
+        .map(|index| {
+            let mut frame = transparent.clone();
+            // 塗る色を先頭フレームの和集合へ入れておく
+            fill_block(&mut frame, (48, 8), (4, 4), &PAINT);
+            if index < 2 {
+                fill_block(&mut frame, (32, 32), (8, 8), &OBJECT);
+            }
+            if index >= 1 {
+                fill_block(&mut frame, (0, 0), (4, 4), &PAINT);
+            }
+            if index >= 2 {
+                // 6-6-6 のビンを255個埋め、据え直しで維持をすべて解かせる
+                for slot in 0..255u32 {
+                    let color = [(slot % 16 * 16) as u8, (slot / 16 * 16) as u8, 0x40, 0xFF];
+                    let at = (slot % SCENE_WIDTH, 56 + slot / SCENE_WIDTH);
+                    set_pixel(
+                        &mut frame,
+                        SCENE_WIDTH,
+                        ColorType::Rgba8,
+                        at.0,
+                        at.1,
+                        &color,
+                    );
+                }
+            }
+            frame
+        })
+        .collect()
+}
+
+/// 広げた矩形は、保留中のフレームを符号化したテーブルで符号化し直す
+///
+/// 据え直しを跨ぐと、保留中のフレームが載せた色は新しいテーブルに無い。現在の
+/// テーブルで符号化し直すと、その色が最近傍へずれて画面から消える。
+#[test]
+fn a_widened_rect_keeps_the_table_that_encoded_the_pending_frame() {
+    const FRAMES: usize = 8;
+    const PAINT: [u8; 4] = [0xFF, 0x00, 0xFF, 0xFF];
+
+    let frames = a_widened_rect_across_a_rebuild(FRAMES);
+    let config = Config {
+        color_type: ColorType::Rgba8,
+        ..settle_on_the_first_frame()
+    };
+    let (bytes, report) = encode_with(SCENE_WIDTH, SCENE_HEIGHT, config, &frames).unwrap();
+    assert_eq!(report.rebuilds, 1, "テーブルを据え直していない");
+
+    let widened = rects(&bytes)[1];
+    assert!(
+        widened.2 > 4 && widened.3 > 4,
+        "保留中のフレームの矩形が広がっていない: {widened:?}"
+    );
+
+    let screen = &compose(&decode_with_gif(&bytes))[1];
+    for y in 0..4 {
+        for x in 0..4 {
+            assert_eq!(
+                pixel_at(screen, x, y),
+                PAINT,
+                "広げた矩形の中で色がずれている"
+            );
+        }
+    }
+}
