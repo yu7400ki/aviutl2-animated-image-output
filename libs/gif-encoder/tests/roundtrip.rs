@@ -865,6 +865,58 @@ fn the_smaller_of_the_two_clearing_candidates_wins() {
     );
 }
 
+/// 抜いた矩形の中に、投入されたフレームが同じ色のまま残す不透明画素がある素材
+///
+/// その画素は抜かれた画面では書き直しの対象になる。抜いた画面を作らずに
+/// 保留中のフレームを描いた後の画面と比べると「未変更」と読めてしまい、
+/// 透過インデックスを書いて画面から消える。
+fn a_kept_color_inside_the_cleared_rect() -> Vec<Vec<u8>> {
+    const WIDTH: u32 = 8;
+    let color = ColorType::Rgba8;
+    let base = [0x10, 0x20, 0x30, 0xFF];
+    let painted = [0x40, 0x50, 0x60, 0xFF];
+
+    let first = solid(WIDTH, 2, color, &base);
+    let mut second = first.clone();
+    for x in 1..5 {
+        set_pixel(&mut second, WIDTH, color, x, 0, &painted);
+    }
+
+    // 塗った画素のうち x=1 だけを残し、矩形の外の x=6 を透過にして矩形を広げさせる
+    let mut third = second.clone();
+    for x in 2..5 {
+        set_pixel(&mut third, WIDTH, color, x, 0, &base);
+    }
+    set_pixel(&mut third, WIDTH, color, 6, 0, &[0, 0, 0, 0]);
+
+    vec![first, second, third]
+}
+
+/// 抜いた矩形の中の画素は、色が変わっていなくても書き直される
+#[test]
+fn a_color_kept_across_a_cleared_rect_is_written_again() {
+    let frames = a_kept_color_inside_the_cleared_rect();
+    let (bytes, _) = round_trip(8, 2, ColorType::Rgba8, &frames);
+
+    assert_eq!(
+        disposals(&bytes),
+        [
+            gif::DisposalMethod::Keep,
+            gif::DisposalMethod::Background,
+            gif::DisposalMethod::Keep,
+        ]
+    );
+    assert_eq!(rects(&bytes)[1], (1, 0, 6, 1), "抜く矩形が広がっていない");
+
+    // 抜いた矩形の左端は投入されたフレームでも同じ色だが、抜かれた以上は書き直す
+    let decoded = decode_with_gif(&bytes);
+    let last = &decoded.frames[2];
+    assert!(
+        last.left <= 1 && u32::from(last.left) + u32::from(last.width) > 1,
+        "書き直す矩形が抜いた画素を覆っていない"
+    );
+}
+
 /// 毎フレーム変わるティッカーの隣で、離れた静止物が消える素材
 ///
 /// 静止物は保留中のフレームの矩形の外にあり、そのフレームを描く直前にも
