@@ -775,6 +775,31 @@ fn frames_beyond_the_spool_limit_survive_both_decoders() {
     }
 }
 
+/// 上限が最後のフレームで効いても、そのフレームは書き出しの経路を通る
+#[test]
+fn a_limit_reached_on_the_last_frame_still_writes_it() {
+    const WIDTH: u32 = 8;
+    const HEIGHT: u32 = 4;
+    let frames = moving_sprite(WIDTH, HEIGHT, 2);
+    let (whole, _) = round_trip(WIDTH, HEIGHT, ColorType::Rgb8, &frames);
+
+    let config = Config {
+        max_spool_bytes: 0,
+        ..Config::default()
+    };
+    let (bytes, report) = encode_with(WIDTH, HEIGHT, config, &frames).unwrap();
+    assert!(
+        matches!(report.palette, PaletteKind::ExactFromPrefix { .. }),
+        "上限が効いていない: {:?}",
+        report.palette
+    );
+    assert_eq!(
+        compose(&decode_with_gif(&bytes)),
+        compose(&decode_with_gif(&whole)),
+        "溜めきった出力と合成結果が違う"
+    );
+}
+
 /// 上限に達した経路では、先頭区間から据えたことがレポートに出る
 #[test]
 fn a_table_settled_from_a_prefix_is_reported() {
