@@ -115,9 +115,8 @@ impl Screen<'_> {
 /// 「不透明 → 透過」の遷移を含むフレームだけが使う。どちらの画面もキャンバスから
 /// 画素を抜き、抜いた画素は投入されたフレームが書き直すことになる。
 ///
-/// 表現できるかどうかは [`Self::background`] だけで決まる。[`Self::previous`] が
-/// 抜く画素は保留中のフレームが不透明にした画素で、必ずその矩形の中にあるため、
-/// 矩形を丸ごと抜く前者でも抜ける。後者の値打ちは書き直す範囲の狭さだけ。
+/// [`Self::previous`] が抜く画素は [`Self::background`] でも抜けるため、
+/// 表現できるかどうかは後者だけで決まる。
 pub(crate) struct Disposed<'a> {
     /// 矩形を透過へ抜いた画面
     ///
@@ -370,6 +369,7 @@ fn for_each_row(rect: Rect, layout: &Layout, mut row: impl FnMut(usize, usize)) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block::DISPOSAL_RESTORE_TO_PREVIOUS;
     use anim_core::Colors;
 
     const WIDTH: u32 = 4;
@@ -456,6 +456,45 @@ mod tests {
         draw(&mut canvas, rect, &third);
         assert_eq!(canvas.before, second);
         assert_eq!(canvas.after, third);
+    }
+
+    /// 矩形を透過へ抜く廃棄では、戻す先もその矩形を抜いた画面になる
+    #[test]
+    fn a_background_disposal_clears_the_earlier_plane() {
+        let first = opaque(0x10);
+        let second = opaque(0x20);
+
+        let mut canvas = Canvas::new(layout(ColorType::Rgba8));
+        let rect = start(&mut canvas, &first);
+        let cleared = canvas.dispose(rect).background().rect_of(&second);
+        canvas.advance(DISPOSAL_RESTORE_TO_BACKGROUND, rect, &second, cleared);
+
+        assert_eq!(
+            canvas.before,
+            vec![0; first.len()],
+            "抜いた画素が戻す先に残っている"
+        );
+        assert_eq!(canvas.after, second);
+    }
+
+    /// 描く直前へ戻す廃棄では、戻す先はそのまま残る
+    #[test]
+    fn a_previous_disposal_keeps_the_earlier_plane() {
+        let first = opaque(0x10);
+        let mut second = first.clone();
+        second[4] = 0x7F;
+
+        let mut canvas = Canvas::new(layout(ColorType::Rgba8));
+        let rect = start(&mut canvas, &first);
+        let rect = draw(&mut canvas, rect, &second);
+        assert_eq!(canvas.before, first, "描く直前の画面が違う");
+
+        let restored = canvas.dispose(rect).previous().rect_of(&first);
+        assert_eq!(restored, UNCHANGED, "戻した画面が投入されたフレームと違う");
+        canvas.advance(DISPOSAL_RESTORE_TO_PREVIOUS, rect, &first, restored);
+
+        assert_eq!(canvas.before, first, "戻す先が書き換わっている");
+        assert_eq!(canvas.after, first);
     }
 
     /// 透過を持てない入力では、戻す先の面を持たない

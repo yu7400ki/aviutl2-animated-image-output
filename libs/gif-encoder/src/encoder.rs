@@ -656,9 +656,8 @@ fn choose_disposal(
         return Err(Error::UnsupportedTransparency);
     }
 
-    // 矩形を丸ごと抜く候補はその中しか抜けない。外に抜きたい画素が残るなら、
-    // 保留中のフレームを広げた矩形で符号化し直す。広げた分は描く直前の画面と
-    // 一致する画素なので透過ランに潰れ、描いた後の画面は変わらない
+    // 広げた分は描く直前の画面と一致する画素なので透過ランに潰れ、
+    // 描いた後の画面は変わらない
     let widened = canvas.widen(pending.rect, rendered);
     if widened != pending.rect {
         *pending = encode_on(
@@ -684,8 +683,6 @@ fn choose_disposal(
         return Ok((DISPOSAL_RESTORE_TO_BACKGROUND, cleared));
     }
 
-    // 画素数は矩形の広さの目安にしかならず、透過ランがどれだけ伸びるかを
-    // 写さないため、符号化して圧縮後の大きさで比べる
     let restored = lay_out(previous, rendered, palette, indices, delay);
     let taken = restored.body.len() < cleared.body.len();
     pacing.record(taken);
