@@ -2,6 +2,8 @@
 
 mod alpha;
 mod diff;
+mod region;
 
 pub use alpha::has_transparency;
 pub use diff::{Rect, dirty_rect};
+pub use region::{append_pixels, crop, paste};

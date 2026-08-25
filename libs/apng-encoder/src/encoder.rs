@@ -10,9 +10,8 @@ use crate::diff;
 use crate::error::Error;
 use crate::layout::{ColorType, Layout, Output};
 use crate::palette::Palette;
-use crate::region;
 use crate::spool::{Spool, Spooled};
-use anim_core::Rect;
+use anim_core::{Rect, append_pixels, crop, paste};
 use std::io::Write;
 use std::ops::RangeInclusive;
 
@@ -653,7 +652,7 @@ impl<W: Write> Parts<'_, W> {
             let over = (index > 0)
                 .then(|| self.compress_over(&canvas, frame))
                 .flatten();
-            region::paste(
+            paste(
                 &mut canvas,
                 &frame.data,
                 frame.rect,
@@ -787,7 +786,7 @@ impl<W: Write> Parts<'_, W> {
         canvas.resize(self.layout.frame_len, 0);
         self.delta.reset();
         for (index, frame) in frames.iter().enumerate() {
-            region::paste(
+            paste(
                 &mut canvas,
                 &frame.data,
                 frame.rect,
@@ -987,7 +986,7 @@ impl<W: Write> Parts<'_, W> {
                 .compress(&data[head..head + len], region_stride, out_bpp)
         } else {
             let mut cropped = self.codec.take();
-            region::crop(data, rect, stride, in_bpp, out_bpp, &mut cropped);
+            crop(data, rect, stride, in_bpp, out_bpp, &mut cropped);
             let candidate = self.codec.compress(&cropped, region_stride, out_bpp);
             self.codec.give(cropped);
             candidate
@@ -1026,7 +1025,7 @@ impl<W: Write> Parts<'_, W> {
         let in_bpp = self.layout.bytes_per_pixel;
         match palette {
             Some(palette) => palette.append_indices(pixels, in_bpp, out),
-            None => region::append_pixels(pixels, in_bpp, output.bytes_per_pixel(), out),
+            None => append_pixels(pixels, in_bpp, output.bytes_per_pixel(), out),
         }
     }
 }

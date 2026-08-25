@@ -10,7 +10,6 @@ mod error;
 mod filter;
 mod layout;
 mod palette;
-mod region;
 mod spool;
 mod zlib;
 

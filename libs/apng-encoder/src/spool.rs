@@ -2,9 +2,7 @@
 
 use crate::delay::FrameDelay;
 use crate::palette::Colors;
-use crate::region;
-use anim_core::Rect;
-use anim_core::has_transparency;
+use anim_core::{Rect, crop, has_transparency};
 
 /// 溜めたフレーム1つ
 pub(crate) struct Spooled {
@@ -97,7 +95,7 @@ impl Spool {
         bpp: usize,
     ) {
         let mut region = Vec::new();
-        region::crop(data, rect, stride, bpp, bpp, &mut region);
+        crop(data, rect, stride, bpp, bpp, &mut region);
 
         if bpp == 4 && !self.transparent {
             self.transparent = has_transparency(&region);

@@ -1,12 +1,12 @@
 //! 矩形領域の切り出しと貼り戻し、出力の画素表現への詰め替え
 
-use anim_core::Rect;
+use crate::diff::Rect;
 
 /// 画素列を出力の画素表現へ直しながら `out` へ追記する
 ///
 /// `in_bpp` と `out_bpp` が等しければそのまま複製し、`out_bpp` が小さければ
 /// 各画素の先頭 `out_bpp` バイトだけを残す。
-pub(crate) fn append_pixels(pixels: &[u8], in_bpp: usize, out_bpp: usize, out: &mut Vec<u8>) {
+pub fn append_pixels(pixels: &[u8], in_bpp: usize, out_bpp: usize, out: &mut Vec<u8>) {
     if in_bpp == out_bpp {
         out.extend_from_slice(pixels);
         return;
@@ -21,7 +21,7 @@ pub(crate) fn append_pixels(pixels: &[u8], in_bpp: usize, out_bpp: usize, out: &
 /// `rect` の領域を連続バッファとして `out` へ追記する
 ///
 /// `data` は `stride` バイトの行が隙間なく並んでいること。
-pub(crate) fn crop(
+pub fn crop(
     data: &[u8],
     rect: Rect,
     stride: usize,
@@ -42,7 +42,7 @@ pub(crate) fn crop(
 ///
 /// [`crop`] の逆で、`data` は `stride` バイトの行が隙間なく並んでいること。
 /// `region` は画素表現を変えずに切り出したものであること。
-pub(crate) fn paste(data: &mut [u8], region: &[u8], rect: Rect, stride: usize, bpp: usize) {
+pub fn paste(data: &mut [u8], region: &[u8], rect: Rect, stride: usize, bpp: usize) {
     let row_len = rect.width as usize * bpp;
     debug_assert_eq!(region.len(), row_len * rect.height as usize);
     let head = rect.y as usize * stride + rect.x as usize * bpp;
