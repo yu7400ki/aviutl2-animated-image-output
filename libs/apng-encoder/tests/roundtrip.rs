@@ -1112,11 +1112,12 @@ fn an_over_rect_after_a_disposal_is_layered_on_the_restored_canvas() {
     assert_composites_to(&bytes, BLEND_WIDTH, ColorType::Rgba8, &input);
 }
 
-/// 出力の色種別が決まるまで溜めたフレームはSOURCEで書く
+/// 溜めた区間でも、不透明でない画素へ変わった矩形はSOURCEで書く
 ///
-/// 溜めている間はどの表現で書き出すかが決まらず、候補を圧縮して比べられない。
+/// 貼り直した矩形にも重ねる候補は立つが、半透明の画素はキャンバスと混ざって元の値に
+/// 戻らないため、その矩形だけは潰せない。
 #[test]
-fn frames_spooled_for_the_color_type_are_written_with_source() {
+fn a_translucent_change_in_the_spool_falls_back_to_source() {
     let base = blend_frame(1);
     let mut translucent = base.clone();
     set_rgba(&mut translucent, 3, 3, [0x11, 0x22, 0x33, 0x80]);
@@ -1221,6 +1222,36 @@ fn frames_spooled_for_the_color_type_are_disposed_to_previous() {
         ]
     );
     assert_reduced_roundtrip(&bytes, &input, png::ColorType::Rgba);
+}
+
+/// 溜めるのをやめた区間も、貼り直して捨てる判断と重ね方を選ぶ
+///
+/// 上限に達したときの出力は入力の色種別のままなのでアルファを持つ。そこまでに溜めた
+/// 矩形を貼り直せば、その区間も溜めなかった場合と同じ判断を受けられる。
+#[test]
+fn an_abandoned_spool_still_chooses_its_dispose_and_blend() {
+    let base = blend_frame(1);
+    let changed = with_opaque_corners(&base);
+    // 4フレーム目は全画面の差分になり、溜めきれずに解析が打ち切られる
+    let input = vec![base.clone(), changed, base, blend_frame(2)];
+    // 先頭3フレームは収まり、4フレーム目で溢れる上限
+    let limit = BLEND_PIXELS * 4 * 3;
+
+    let config = reduce_config(ColorType::Rgba8, limit);
+    assert_eq!(
+        reduction_of(BLEND_WIDTH, BLEND_HEIGHT, config, &input),
+        Some(ColorReduction::Abandoned)
+    );
+
+    let (bytes, peak) = encode_with(BLEND_WIDTH, BLEND_HEIGHT, config, &input);
+    assert!(peak <= limit, "{limit} バイトの上限に対して {peak} バイト");
+    assert_eq!(output_color_type(&bytes), png::ColorType::Rgba);
+
+    let (_, decoded) = decode(&bytes);
+    // 2フレーム目は変化した画素がわずかで、3フレーム目が内容を戻す
+    assert_eq!(blend_ops(&decoded)[1], png::BlendOp::Over);
+    assert_eq!(dispose_ops(&decoded)[1], png::DisposeOp::Previous);
+    assert_composites_to(&bytes, BLEND_WIDTH, ColorType::Rgba8, &input);
 }
 
 /// 捨てたフレームにしか無い内容は、復元されたキャンバスとの差分として残る
