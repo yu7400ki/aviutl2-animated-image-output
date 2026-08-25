@@ -1399,6 +1399,24 @@ mod tests {
         assert!(pacing.should_try());
     }
 
+    /// 連敗が閾値に届くまでは候補を立てるのをやめない
+    ///
+    /// 少ない負けで見切ると勝ち負けの揺れを拾い、まだ採られる素材でも候補が
+    /// 立たなくなる。休みに入るのは閾値に届いたときだけで、1回の負けでは入らない。
+    #[test]
+    fn the_pacing_keeps_trying_below_the_streak() {
+        let mut pacing = BlendPacing::new();
+        pacing.record(false);
+        assert_eq!(pacing.resting, 0, "1回の負けで休みに入っている");
+
+        for loss in 2..BLEND_LOSS_STREAK {
+            assert!(pacing.should_try(), "連敗 {loss} 回目");
+            pacing.record(false);
+            assert_eq!(pacing.resting, 0, "連敗 {loss} 回で休みに入っている");
+        }
+        assert!(pacing.should_try(), "閾値に届く前に休みに入っている");
+    }
+
     /// 書き出しへ移ったエンコーダが持つ間合い
     fn pacing_of<W: Write>(encoder: &Encoder<W>) -> &BlendPacing {
         match &encoder.stage {

@@ -378,6 +378,40 @@ mod tests {
         assert_eq!(indices.len(), MAX_COLORS);
     }
 
+    /// 表の末尾で衝突した色は、先頭へ回り込んだ位置に入る
+    ///
+    /// [`slot_of`] は色に [`HASH_MULTIPLIER`] を掛けた上位 [`TABLE_BITS`] ビットを
+    /// 取るため、この2色はどちらも表の最後の位置を指す。2色目は末尾が埋まっている
+    /// ぶん、表の端を越えて先頭から空きを探すことになる。
+    #[test]
+    fn colors_colliding_at_the_last_slot_wrap_to_the_front() {
+        /// 表の最後の位置へ写る色 (詰めると `0x0000_03DB`)
+        const FIRST: [u8; 4] = [0xDB, 0x03, 0x00, 0x00];
+        /// 同じ位置へ写るもう1つの色 (詰めると `0x0000_07B6`)
+        const SECOND: [u8; 4] = [0xB6, 0x07, 0x00, 0x00];
+
+        assert_eq!(slot_of(pack::<4>(&FIRST)), TABLE_MASK, "末尾へ写らない色");
+        assert_eq!(slot_of(pack::<4>(&SECOND)), TABLE_MASK, "末尾へ写らない色");
+
+        let pixels = rgba(&[FIRST, SECOND]);
+        let mut colors = Colors::new();
+        colors.observe(&pixels, 4);
+        let slots: Vec<usize> = colors.entries.iter().map(|entry| entry.slot).collect();
+        assert_eq!(slots, [TABLE_MASK, 0], "2色目が先頭へ回り込んでいない");
+
+        let palette = colors.into_palette();
+        let plte = palette.plte();
+        assert_eq!(plte.len() / 3, 2);
+
+        let mut indices = Vec::new();
+        palette.append_indices(&pixels, 4, &mut indices);
+        assert_ne!(indices[0], indices[1]);
+        for (index, pixel) in indices.iter().zip(pixels.chunks_exact(4)) {
+            let at = *index as usize;
+            assert_eq!(&plte[at * 3..at * 3 + 3], &pixel[..3]);
+        }
+    }
+
     /// 添字は既にある内容の後ろへ足される
     #[test]
     fn indices_are_appended_after_the_existing_content() {

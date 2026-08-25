@@ -2369,6 +2369,61 @@ fn an_abandoned_analysis_is_reported() {
     );
 }
 
+/// 上限を明示しない設定は、現実的な長さの素材を溜めきる
+///
+/// 色の和集合がパレットに収まる間は候補が残るため、最後のフレームまで溜め続ける。
+/// [`DEFAULT_MAX_SPOOL_BYTES`] がこの区間を抱えきれなければ解析は打ち切られ、
+/// パレットへ落とせないまま入力の色種別で出る。
+#[test]
+fn the_default_spool_limit_holds_a_realistic_clip() {
+    const WIDTH: u32 = 320;
+    const HEIGHT: u32 = 240;
+    const COUNT: usize = 8;
+    /// 1フレームぶんの入力バイト数 (RGBA8)
+    const FRAME_LEN: usize = WIDTH as usize * HEIGHT as usize * 4;
+
+    // 色の集合は変えず並びだけをずらすので、全画素が変化してパレットにも収まる
+    let input: Vec<Vec<u8>> = (0..COUNT)
+        .map(|offset| {
+            (0..FRAME_LEN / 4)
+                .flat_map(|pixel| {
+                    let color = (pixel + offset) % MAX_PALETTE_COLORS;
+                    [color as u8, 0x40, 0x80, 0xFF]
+                })
+                .collect()
+        })
+        .collect();
+
+    let config = Config {
+        reduce_color: true,
+        ..config(ColorType::Rgba8)
+    };
+    let delay = FrameDelay::new(1001, 30000).unwrap();
+    let mut encoder = Encoder::new(Vec::new(), WIDTH, HEIGHT, COUNT as u32, config).unwrap();
+    for data in &input {
+        encoder.add_frame(data, delay).unwrap();
+    }
+    let reduction = encoder.color_reduction();
+    let peak = encoder.peak_spool_bytes();
+    let bytes = encoder.finish().unwrap();
+
+    // 打ち切らずに溜めきれば、抱えた量は全フレームの画素を下回らない
+    assert!(
+        peak >= FRAME_LEN * COUNT,
+        "{} バイトの画素に対して抱えたのは {peak} バイト",
+        FRAME_LEN * COUNT
+    );
+    assert_eq!(
+        reduction,
+        Some(ColorReduction::Palette {
+            colors: MAX_PALETTE_COLORS as u16
+        })
+    );
+
+    let expected: Vec<Vec<u8>> = input.iter().map(|frame| without_alpha(frame)).collect();
+    assert_composites_to(&bytes, WIDTH, ColorType::Rgb8, &expected);
+}
+
 /// 落とす設定でなければ結果も無い
 #[test]
 fn nothing_is_reported_without_the_setting() {
