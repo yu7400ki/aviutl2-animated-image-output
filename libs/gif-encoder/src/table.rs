@@ -1,6 +1,7 @@
-//! カラーテーブル
+//! カラーテーブルと、色から添字を引く対応
 
-use anim_core::MAX_COLORS;
+use crate::normalize::TRANSPARENT;
+use anim_core::{Colors, Indexed, MAX_COLORS};
 
 /// カラーテーブルが持てる最小のエントリ数
 ///
@@ -53,6 +54,61 @@ impl ColorTable {
     /// このテーブルを引く添字のLZW最小符号長
     pub(crate) fn min_code_size(&self) -> u8 {
         (self.len().trailing_zeros() as u8).max(MIN_CODE_SIZE)
+    }
+}
+
+/// 据えたカラーテーブルと、そこへ色を写す対応
+pub(crate) struct Palette {
+    /// 和集合の色から添字を引く対応
+    indexed: Indexed,
+    /// 書き出すカラーテーブル
+    table: ColorTable,
+    /// このテーブルの透過インデックス
+    transparent: Option<u8>,
+}
+
+impl Palette {
+    /// 色の和集合をカラーテーブルへ据える
+    ///
+    /// 透過標識が和集合にあるなら、そのエントリがそのまま透過インデックスになる。
+    /// 素材自身の透過画素と未変更画素のランはどちらも「キャンバスを書き換えない」
+    /// という同じ意味なので、スロットを分けない。
+    ///
+    /// # Panics
+    /// 色数が [`MAX_COLORS`] を超えているとき。
+    pub(crate) fn from_colors(colors: Colors) -> Self {
+        // GIFは添字の局所性に無関心なので、見つけた順のまま添字を振る
+        let indexed = colors.into_indexed(|_| ());
+        let transparent = indexed
+            .colors()
+            .iter()
+            .position(|&color| color == TRANSPARENT)
+            .map(|index| index as u8);
+        let table = ColorTable::new(indexed.colors());
+
+        Palette {
+            indexed,
+            table,
+            transparent,
+        }
+    }
+
+    /// 書き出すカラーテーブル
+    pub(crate) fn table(&self) -> &ColorTable {
+        &self.table
+    }
+
+    /// キャンバスを書き換えない添字。持たないテーブルでは `None`
+    pub(crate) fn transparent(&self) -> Option<u8> {
+        self.transparent
+    }
+
+    /// 画素列を添字へ写して `out` へ追記する
+    ///
+    /// `pixels` は1画素 `bpp` バイトが隙間なく並び、その色がすべてこのテーブルに
+    /// 載っていること。
+    pub(crate) fn append_indices(&self, pixels: &[u8], bpp: usize, out: &mut Vec<u8>) {
+        self.indexed.append_indices(pixels, bpp, out);
     }
 }
 

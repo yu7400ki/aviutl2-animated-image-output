@@ -1,6 +1,7 @@
 //! キャンバスの大きさと、入力フレームのバイト並び
 
 use crate::error::Error;
+use anim_core::Rect;
 
 /// 論理画面と画像記述子が持てる寸法の上限
 const MAX_DIMENSION: u32 = u16::MAX as u32;
@@ -33,6 +34,8 @@ pub(crate) struct Layout {
     pub(crate) color_type: ColorType,
     /// 入力の1画素あたりのバイト数
     pub(crate) bytes_per_pixel: usize,
+    /// 入力の1行のバイト数
+    pub(crate) stride: usize,
     /// 入力の1フレームのバイト数
     pub(crate) frame_len: usize,
 }
@@ -49,9 +52,11 @@ impl Layout {
         }
 
         let bytes_per_pixel = color_type.bytes_per_pixel();
-        let frame_len = (width as usize)
+        let stride = (width as usize)
+            .checked_mul(bytes_per_pixel)
+            .ok_or(Error::ImageTooLarge { width, height })?;
+        let frame_len = stride
             .checked_mul(height as usize)
-            .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
             .ok_or(Error::ImageTooLarge { width, height })?;
 
         Ok(Layout {
@@ -59,8 +64,19 @@ impl Layout {
             height: height as u16,
             color_type,
             bytes_per_pixel,
+            stride,
             frame_len,
         })
+    }
+
+    /// 論理画面全体を覆う矩形
+    pub(crate) fn whole(&self) -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            width: u32::from(self.width),
+            height: u32::from(self.height),
+        }
     }
 }
 
@@ -85,6 +101,21 @@ mod tests {
     fn the_largest_screen_is_accepted() {
         let layout = Layout::new(65535, 65535, ColorType::Rgba8).unwrap();
         assert_eq!((layout.width, layout.height), (65535, 65535));
+        assert_eq!(layout.stride, 65535 * 4);
         assert_eq!(layout.frame_len, 65535 * 65535 * 4);
+    }
+
+    #[test]
+    fn the_whole_rect_covers_the_logical_screen() {
+        let layout = Layout::new(7, 5, ColorType::Rgb8).unwrap();
+        assert_eq!(
+            layout.whole(),
+            Rect {
+                x: 0,
+                y: 0,
+                width: 7,
+                height: 5
+            }
+        );
     }
 }

@@ -1,10 +1,11 @@
-//! 出力したGIFをデコードし、正規化した入力と画素単位で一致することを確認する
+//! 出力したGIFをデコードし、フレームごとの合成結果が正規化した入力と画素単位で
+//! 一致することを確認する
 //!
 //! LZWの誤りは一部のデコーダだけが読めるファイルを作るため、`gif` クレートと
 //! ffmpeg の2つでデコードする。ffmpeg が見つからない環境では、そちらだけを
 //! 飛ばして `gif` クレートの結果で判定する。
 
-use gif_encoder::{ColorType, Config, Encoder, Error, FrameDelay};
+use gif_encoder::{ColorType, Config, Encoder, Error, FrameDelay, PaletteKind, Report};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -23,28 +24,29 @@ fn noise(len: usize, seed: u32) -> Vec<u8> {
         .collect()
 }
 
-fn delay() -> FrameDelay {
-    FrameDelay::new(1001, 30000).unwrap()
+/// 投入する順に異なる遅延
+///
+/// 分母を100にすると丸めが恒等になり、期待する1/100秒がそのまま添字から決まる。
+fn delay_of(index: usize) -> FrameDelay {
+    FrameDelay::new(index as u32 + 2, 100).unwrap()
 }
 
-fn encode(width: u32, height: u32, color_type: ColorType, data: &[u8]) -> Vec<u8> {
-    encode_with_plays(width, height, color_type, data, 0)
-}
-
-fn encode_with_plays(
+fn encode(
     width: u32,
     height: u32,
     color_type: ColorType,
-    data: &[u8],
+    frames: &[Vec<u8>],
     num_plays: u32,
-) -> Vec<u8> {
+) -> Result<(Vec<u8>, Report), Error> {
     let config = Config {
         color_type,
         num_plays,
     };
-    let mut encoder = Encoder::new(Vec::new(), width, height, 1, config).unwrap();
-    encoder.add_frame(data, delay()).unwrap();
-    encoder.finish().unwrap()
+    let mut encoder = Encoder::new(Vec::new(), width, height, frames.len() as u32, config)?;
+    for (index, data) in frames.iter().enumerate() {
+        encoder.add_frame(data, delay_of(index))?;
+    }
+    encoder.finish()
 }
 
 /// 入力を正規化し、RGBA8へ展開する
@@ -85,7 +87,15 @@ struct DecodedFrame {
     width: u16,
     height: u16,
     delay: u16,
+    dispose: gif::DisposalMethod,
     transparent: Option<u8>,
+}
+
+impl DecodedFrame {
+    /// 画像記述子が示す矩形
+    fn rect(&self) -> (u16, u16, u16, u16) {
+        (self.left, self.top, self.width, self.height)
+    }
 }
 
 fn decode_with_gif(bytes: &[u8]) -> Decoded {
@@ -107,6 +117,7 @@ fn decode_with_gif(bytes: &[u8]) -> Decoded {
             width: frame.width,
             height: frame.height,
             delay: frame.delay,
+            dispose: frame.dispose,
             transparent: frame.transparent,
         });
     }
@@ -120,7 +131,38 @@ fn decode_with_gif(bytes: &[u8]) -> Decoded {
     }
 }
 
-/// ffmpeg でデコードした生RGBA。ffmpeg が無ければ `None`
+/// デコードしたフレームを廃棄方法に従って合成し、フレームごとの画面を返す
+///
+/// 透過インデックスに当たった画素はキャンバスを書き換えない。デコーダは
+/// その画素をアルファ0で返すので、アルファを持つ画素だけを写す。
+fn compose(decoded: &Decoded) -> Vec<Vec<u8>> {
+    let stride = usize::from(decoded.width) * 4;
+    let mut canvas = vec![0u8; stride * usize::from(decoded.height)];
+    let mut screens = Vec::new();
+
+    for frame in &decoded.frames {
+        assert_eq!(
+            frame.dispose,
+            gif::DisposalMethod::Keep,
+            "扱えない廃棄方法が出た"
+        );
+        for y in 0..usize::from(frame.height) {
+            for x in 0..usize::from(frame.width) {
+                let at = (y * usize::from(frame.width) + x) * 4;
+                let pixel = &frame.rgba[at..at + 4];
+                if pixel[3] == 0 {
+                    continue;
+                }
+                let to = (y + usize::from(frame.top)) * stride + (x + usize::from(frame.left)) * 4;
+                canvas[to..to + 4].copy_from_slice(pixel);
+            }
+        }
+        screens.push(canvas.clone());
+    }
+    screens
+}
+
+/// ffmpeg で合成済みのフレームへデコードした生RGBA。ffmpeg が無ければ `None`
 fn decode_with_ffmpeg(bytes: &[u8]) -> Option<Vec<u8>> {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let path: PathBuf = std::env::temp_dir().join(format!(
@@ -183,10 +225,18 @@ fn restore_transparent_marker(rgba: &mut [u8]) {
     }
 }
 
-/// 出力を2つのデコーダへ通し、正規化した入力と画素単位で突き合わせる
-fn round_trip(width: u32, height: u32, color_type: ColorType, data: &[u8]) -> Vec<u8> {
-    let bytes = encode(width, height, color_type, data);
-    let expected = expected_rgba(data, color_type);
+/// 出力を2つのデコーダへ通し、フレームごとの合成結果を正規化した入力と突き合わせる
+fn round_trip(
+    width: u32,
+    height: u32,
+    color_type: ColorType,
+    frames: &[Vec<u8>],
+) -> (Vec<u8>, Report) {
+    let (bytes, report) = encode(width, height, color_type, frames, 0).unwrap();
+    let expected: Vec<Vec<u8>> = frames
+        .iter()
+        .map(|data| expected_rgba(data, color_type))
+        .collect();
 
     let decoded = decode_with_gif(&bytes);
     assert_eq!(
@@ -194,24 +244,36 @@ fn round_trip(width: u32, height: u32, color_type: ColorType, data: &[u8]) -> Ve
         (width, height),
         "論理画面の寸法が違う"
     );
-    assert_eq!(decoded.frames.len(), 1, "フレーム数が違う");
-    let frame = &decoded.frames[0];
-    assert_eq!((frame.left, frame.top), (0, 0), "矩形の位置が全画面でない");
-    assert_eq!(
-        (u32::from(frame.width), u32::from(frame.height)),
-        (width, height),
-        "矩形の大きさが全画面でない"
-    );
-    assert_eq!(frame.delay, 3, "遅延が1/100秒へ丸められていない");
-    assert_transparency(&frame.rgba, &expected, "`gif` クレート");
-    assert_eq!(frame.rgba, expected, "`gif` クレートのデコード結果が違う");
-
-    if let Some(raw) = decode_with_ffmpeg(&bytes) {
-        assert_transparency(&raw, &expected, "ffmpeg");
-        assert_eq!(raw, expected, "ffmpeg のデコード結果が違う");
+    assert_eq!(decoded.frames.len(), frames.len(), "フレーム数が違う");
+    for (index, frame) in decoded.frames.iter().enumerate() {
+        assert_eq!(
+            frame.delay,
+            index as u16 + 2,
+            "{index} 番目のフレームの遅延が違う"
+        );
     }
 
-    bytes
+    for (index, (actual, expected)) in compose(&decoded).iter().zip(&expected).enumerate() {
+        let decoder = format!("`gif` クレートの {index} 番目");
+        assert_transparency(actual, expected, &decoder);
+        assert_eq!(actual, expected, "{decoder} の合成結果が違う");
+    }
+
+    if let Some(raw) = decode_with_ffmpeg(&bytes) {
+        let frame_len = width as usize * height as usize * 4;
+        assert_eq!(
+            raw.len(),
+            frame_len * frames.len(),
+            "ffmpeg が返したフレーム数が違う"
+        );
+        for (index, (actual, expected)) in raw.chunks_exact(frame_len).zip(&expected).enumerate() {
+            let decoder = format!("ffmpeg の {index} 番目");
+            assert_transparency(actual, expected, &decoder);
+            assert_eq!(actual, expected.as_slice(), "{decoder} の合成結果が違う");
+        }
+    }
+
+    (bytes, report)
 }
 
 /// 透過画素の位置が正規化した入力と一致する
@@ -230,23 +292,45 @@ fn assert_transparency(actual: &[u8], expected: &[u8], decoder: &str) {
     assert_eq!(
         positions(actual),
         positions(expected),
-        "{decoder} のデコード結果で透過画素の位置が違う"
+        "{decoder} で透過画素の位置が違う"
     );
+}
+
+/// 一様な色で埋めたフレーム
+fn solid(width: u32, height: u32, color_type: ColorType, pixel: &[u8]) -> Vec<u8> {
+    assert_eq!(pixel.len(), color_type.bytes_per_pixel());
+    pixel.repeat(width as usize * height as usize)
+}
+
+/// 指定した画素を書き換える
+fn set_pixel(frame: &mut [u8], width: u32, color_type: ColorType, x: u32, y: u32, pixel: &[u8]) {
+    let bpp = color_type.bytes_per_pixel();
+    let at = (y as usize * width as usize + x as usize) * bpp;
+    frame[at..at + bpp].copy_from_slice(pixel);
+}
+
+/// 各フレームの画像記述子が示す矩形
+fn rects(bytes: &[u8]) -> Vec<(u16, u16, u16, u16)> {
+    decode_with_gif(bytes)
+        .frames
+        .iter()
+        .map(DecodedFrame::rect)
+        .collect()
 }
 
 /// 1画素だけの画像
 #[test]
 fn a_single_pixel_frame_survives_both_decoders() {
-    round_trip(1, 1, ColorType::Rgb8, &[0x12, 0x34, 0x56]);
-    round_trip(1, 1, ColorType::Rgba8, &[0x12, 0x34, 0x56, 0xFF]);
-    round_trip(1, 1, ColorType::Rgba8, &[0x12, 0x34, 0x56, 0x00]);
+    round_trip(1, 1, ColorType::Rgb8, &[vec![0x12, 0x34, 0x56]]);
+    round_trip(1, 1, ColorType::Rgba8, &[vec![0x12, 0x34, 0x56, 0xFF]]);
+    round_trip(1, 1, ColorType::Rgba8, &[vec![0x12, 0x34, 0x56, 0x00]]);
 }
 
 /// 全画素が同じ色
 #[test]
 fn a_uniform_frame_survives_both_decoders() {
     let data: Vec<u8> = [0x20, 0x40, 0x60].repeat(64 * 64);
-    round_trip(64, 64, ColorType::Rgb8, &data);
+    round_trip(64, 64, ColorType::Rgb8, &[data]);
 }
 
 /// カラーテーブルが2の冪へ埋められる色数
@@ -259,7 +343,7 @@ fn frames_with_padded_color_tables_survive_both_decoders() {
                 [value, value.wrapping_mul(7), value.wrapping_mul(13)]
             })
             .collect();
-        round_trip(32, 32, ColorType::Rgb8, &data);
+        round_trip(32, 32, ColorType::Rgb8, &[data]);
     }
 }
 
@@ -267,7 +351,8 @@ fn frames_with_padded_color_tables_survive_both_decoders() {
 #[test]
 fn a_frame_with_exactly_256_opaque_colors_survives_both_decoders() {
     let data: Vec<u8> = (0..16 * 16).flat_map(|i| [i as u8, 0, 0, 0xFF]).collect();
-    let bytes = round_trip(16, 16, ColorType::Rgba8, &data);
+    let (bytes, report) = round_trip(16, 16, ColorType::Rgba8, &[data]);
+    assert_eq!(report.palette, PaletteKind::Exact { colors: 256 });
 
     // 透過標識が和集合に無いため、透過インデックスは置かない
     let decoded = decode_with_gif(&bytes);
@@ -289,7 +374,7 @@ fn a_frame_with_transparent_pixels_survives_both_decoders() {
             }
         })
         .collect();
-    let bytes = round_trip(51, 20, ColorType::Rgba8, &data);
+    let (bytes, _) = round_trip(51, 20, ColorType::Rgba8, &[data]);
 
     let decoded = decode_with_gif(&bytes);
     let transparent = decoded.frames[0]
@@ -309,13 +394,17 @@ fn a_frame_with_transparent_pixels_survives_both_decoders() {
     );
 }
 
-/// 閾値未満のアルファは完全透過へ潰れる
+/// 閾値未満のアルファは完全透過へ潰れ、潰した画素数がレポートに載る
 #[test]
 fn partial_alpha_is_binarized_before_encoding() {
     let data: Vec<u8> = (0..64 * 8)
         .flat_map(|i| [(i % 200) as u8, 0x10, 0x20, (i % 256) as u8])
         .collect();
-    round_trip(64, 8, ColorType::Rgba8, &data);
+    let squashed = data.chunks_exact(4).filter(|p| p[3] < 128).count() as u64;
+    assert!(squashed > 0, "潰れる画素が無い素材になっている");
+
+    let (_, report) = round_trip(64, 8, ColorType::Rgba8, &[data]);
+    assert_eq!(report.binarized_pixels, squashed);
 }
 
 /// 縦横が異なる矩形
@@ -325,7 +414,7 @@ fn a_non_square_frame_survives_both_decoders() {
         .iter()
         .map(|&byte| byte & 0x0F)
         .collect::<Vec<u8>>();
-    round_trip(17, 5, ColorType::Rgb8, &data);
+    round_trip(17, 5, ColorType::Rgb8, &[data]);
 }
 
 /// LZWの辞書が4096で埋まる長さのフレーム
@@ -338,20 +427,165 @@ fn a_frame_that_fills_the_lzw_dictionary_survives_both_decoders() {
         .iter()
         .flat_map(|&index| [index, index.wrapping_mul(3), index.wrapping_mul(5)])
         .collect();
-    round_trip(512, 512, ColorType::Rgb8, &data);
+    round_trip(512, 512, ColorType::Rgb8, &[data]);
+}
+
+/// 複数フレームがグローバルカラーテーブル1枚で可逆に出る
+#[test]
+fn multiple_frames_share_one_exact_color_table() {
+    const WIDTH: u32 = 24;
+    const HEIGHT: u32 = 16;
+
+    let frames: Vec<Vec<u8>> = (0..6)
+        .map(|seed| {
+            noise((WIDTH * HEIGHT) as usize * 3, seed + 1)
+                .iter()
+                .map(|&byte| byte & 0x03)
+                .collect()
+        })
+        .collect();
+
+    let (_, report) = round_trip(WIDTH, HEIGHT, ColorType::Rgb8, &frames);
+    let PaletteKind::Exact { colors } = report.palette;
+    assert!(colors <= 64, "和集合が {colors} 色まで広がっている");
+}
+
+/// 動く画素の差分矩形だけが書かれ、先頭フレームは全画面になる
+#[test]
+fn later_frames_are_written_as_difference_rects() {
+    const WIDTH: u32 = 8;
+    const HEIGHT: u32 = 6;
+    let color = ColorType::Rgb8;
+
+    let background = solid(WIDTH, HEIGHT, color, &[0x10, 0x20, 0x30]);
+    let mut frames = vec![background.clone()];
+    for (x, y) in [(3u32, 2u32), (5, 4), (0, 0), (7, 5)] {
+        let mut frame = background.clone();
+        set_pixel(&mut frame, WIDTH, color, x, y, &[0xF0, 0xE0, 0xD0]);
+        frames.push(frame);
+    }
+
+    let (bytes, _) = round_trip(WIDTH, HEIGHT, color, &frames);
+    assert_eq!(
+        rects(&bytes),
+        [
+            (0, 0, WIDTH as u16, HEIGHT as u16),
+            (3, 2, 1, 1),
+            (3, 2, 3, 3),
+            (0, 0, 6, 5),
+            (0, 0, 8, 6),
+        ]
+    );
+}
+
+/// 差分の無いフレームは1画素の矩形になり、フレーム数と遅延はそのまま保たれる
+#[test]
+fn identical_frames_are_written_as_a_unit_rect() {
+    const WIDTH: u32 = 5;
+    const HEIGHT: u32 = 4;
+    let color = ColorType::Rgb8;
+
+    let frame = solid(WIDTH, HEIGHT, color, &[0x40, 0x50, 0x60]);
+    let frames = vec![frame.clone(), frame.clone(), frame.clone(), frame];
+
+    let (bytes, _) = round_trip(WIDTH, HEIGHT, color, &frames);
+    assert_eq!(
+        rects(&bytes),
+        [
+            (0, 0, WIDTH as u16, HEIGHT as u16),
+            (0, 0, 1, 1),
+            (0, 0, 1, 1),
+            (0, 0, 1, 1),
+        ]
+    );
+}
+
+/// 瞬き (A→B→A) で戻った画素が、キャンバスの取り違えで潰れないこと
+///
+/// 常に変わり続ける画素を端に置いて矩形を広げ、瞬く画素を矩形の中へ入れる。
+#[test]
+fn a_blinking_pixel_returns_to_its_first_color() {
+    const WIDTH: u32 = 6;
+    const HEIGHT: u32 = 3;
+    let color = ColorType::Rgb8;
+
+    let background = solid(WIDTH, HEIGHT, color, &[0x11, 0x22, 0x33]);
+    let blink = [[0xA0u8, 0xB0, 0xC0], [0x0A, 0x0B, 0x0C]];
+    let frames: Vec<Vec<u8>> = (0..6)
+        .map(|index| {
+            let mut frame = background.clone();
+            set_pixel(&mut frame, WIDTH, color, 1, 1, &blink[index % 2]);
+            set_pixel(
+                &mut frame,
+                WIDTH,
+                color,
+                WIDTH - 1,
+                HEIGHT - 1,
+                &[index as u8, 0x77, 0x88],
+            );
+            frame
+        })
+        .collect();
+
+    round_trip(WIDTH, HEIGHT, color, &frames);
+}
+
+/// 透過画素が増えていく素材は、キャンバスを残したまま表現できる
+#[test]
+fn frames_that_only_add_paint_survive_both_decoders() {
+    const WIDTH: u32 = 8;
+    const HEIGHT: u32 = 4;
+    let color = ColorType::Rgba8;
+
+    let mut frame = solid(WIDTH, HEIGHT, color, &[0, 0, 0, 0]);
+    let mut frames = vec![frame.clone()];
+    for index in 0..(WIDTH * HEIGHT) {
+        let (x, y) = (index % WIDTH, index / WIDTH);
+        set_pixel(
+            &mut frame,
+            WIDTH,
+            color,
+            x,
+            y,
+            &[index as u8, 0x30, 0x60, 0xFF],
+        );
+        frames.push(frame.clone());
+    }
+
+    round_trip(WIDTH, HEIGHT, color, &frames);
+}
+
+/// 不透明な画素が透過になる遷移は、まだ表現できない
+///
+/// 透過インデックスはキャンバスを書き換えないため、キャンバスを残す廃棄方法では
+/// 抜けない。
+#[test]
+fn an_opaque_pixel_turning_transparent_is_rejected() {
+    const WIDTH: u32 = 4;
+    const HEIGHT: u32 = 2;
+    let color = ColorType::Rgba8;
+
+    let first = solid(WIDTH, HEIGHT, color, &[0x20, 0x40, 0x60, 0xFF]);
+    let mut second = first.clone();
+    set_pixel(&mut second, WIDTH, color, 1, 1, &[0, 0, 0, 0]);
+
+    assert!(matches!(
+        encode(WIDTH, HEIGHT, color, &[first, second], 0),
+        Err(Error::UnsupportedTransparency)
+    ));
 }
 
 /// 設定した再生回数がループ数の欄へ落ちる
 #[test]
 fn the_number_of_plays_reaches_the_decoder() {
-    let data = [0x10, 0x20, 0x30];
+    let frames = vec![vec![0x10, 0x20, 0x30]];
     for (num_plays, repeat) in [
         (0, gif::Repeat::Infinite),
         (2, gif::Repeat::Finite(1)),
         (10, gif::Repeat::Finite(9)),
         (u32::MAX, gif::Repeat::Finite(u16::MAX)),
     ] {
-        let bytes = encode_with_plays(1, 1, ColorType::Rgb8, &data, num_plays);
+        let (bytes, _) = encode(1, 1, ColorType::Rgb8, &frames, num_plays).unwrap();
         assert_eq!(
             decode_with_gif(&bytes).repeat,
             repeat,
@@ -360,12 +594,47 @@ fn the_number_of_plays_reaches_the_decoder() {
     }
 
     // 1回だけ再生するときはアプリケーション拡張を書かない
-    let bytes = encode_with_plays(1, 1, ColorType::Rgb8, &data, 1);
+    let (bytes, _) = encode(1, 1, ColorType::Rgb8, &frames, 1).unwrap();
     assert!(
         !bytes.windows(11).any(|window| window == b"NETSCAPE2.0"),
         "1回再生でアプリケーション拡張が出た"
     );
     assert_eq!(decode_with_gif(&bytes).frames.len(), 1);
+}
+
+/// 1/100秒で表せない遅延は丸められ、下限に届かない遅延は切り上げられる
+#[test]
+fn delays_are_rounded_and_raised_to_the_lower_bound() {
+    let config = Config::default();
+    let frames = [vec![0x10, 0x20, 0x30], vec![0x40, 0x50, 0x60]];
+
+    let mut encoder = Encoder::new(Vec::new(), 1, 1, 2, config).unwrap();
+    for data in &frames {
+        encoder
+            .add_frame(data, FrameDelay::new(1001, 30000).unwrap())
+            .unwrap();
+    }
+    let (bytes, report) = encoder.finish().unwrap();
+    assert!(!report.delay_clamped);
+    let decoded = decode_with_gif(&bytes);
+    assert_eq!(
+        decoded.frames.iter().map(|f| f.delay).collect::<Vec<_>>(),
+        [3, 3]
+    );
+
+    let mut encoder = Encoder::new(Vec::new(), 1, 1, 2, config).unwrap();
+    for data in &frames {
+        encoder
+            .add_frame(data, FrameDelay::new(1, 100).unwrap())
+            .unwrap();
+    }
+    let (bytes, report) = encoder.finish().unwrap();
+    assert!(report.delay_clamped, "切り上げがレポートに載っていない");
+    let decoded = decode_with_gif(&bytes);
+    assert_eq!(
+        decoded.frames.iter().map(|f| f.delay).collect::<Vec<_>>(),
+        [2, 2]
+    );
 }
 
 #[test]
@@ -384,35 +653,33 @@ fn zero_and_oversized_dimensions_are_rejected() {
 }
 
 #[test]
-fn a_frame_count_other_than_one_is_rejected() {
-    let config = Config::default();
+fn a_frame_count_of_zero_is_rejected() {
     assert!(matches!(
-        Encoder::new(Vec::new(), 1, 1, 0, config),
+        Encoder::new(Vec::new(), 1, 1, 0, Config::default()),
         Err(Error::InvalidFrameCount)
     ));
-    for num_frames in [2, 3, 100] {
-        assert!(
-            matches!(
-                Encoder::new(Vec::new(), 1, 1, num_frames, config),
-                Err(Error::UnsupportedFrameCount(count)) if count == num_frames
-            ),
-            "{num_frames} フレーム"
-        );
-    }
 }
 
 #[test]
 fn more_than_256_colors_are_rejected() {
-    let config = Config {
-        color_type: ColorType::Rgba8,
-        num_plays: 0,
-    };
     let data: Vec<u8> = (0..257)
         .flat_map(|i| [i as u8, (i >> 8) as u8, 0, 0xFF])
         .collect();
-    let mut encoder = Encoder::new(Vec::new(), 257, 1, 1, config).unwrap();
     assert!(matches!(
-        encoder.add_frame(&data, delay()),
+        encode(257, 1, ColorType::Rgba8, &[data], 0),
+        Err(Error::TooManyColors)
+    ));
+}
+
+/// 和集合は全フレームで数えるため、後のフレームが上限を超えさせる
+#[test]
+fn colors_accumulated_across_frames_are_rejected() {
+    let width = 200u32;
+    let frames: Vec<Vec<u8>> = (0..2)
+        .map(|index| (0..width).flat_map(|i| [i as u8, index as u8, 0]).collect())
+        .collect();
+    assert!(matches!(
+        encode(width, 1, ColorType::Rgb8, &frames, 0),
         Err(Error::TooManyColors)
     ));
 }
@@ -420,15 +687,10 @@ fn more_than_256_colors_are_rejected() {
 /// 256色の非透過色に透過画素が加わると和集合が上限を超える
 #[test]
 fn a_transparent_pixel_beyond_256_opaque_colors_is_rejected() {
-    let config = Config {
-        color_type: ColorType::Rgba8,
-        num_plays: 0,
-    };
     let mut data: Vec<u8> = (0..256).flat_map(|i| [i as u8, 0, 0, 0xFF]).collect();
     data.extend_from_slice(&[0, 0, 0, 0]);
-    let mut encoder = Encoder::new(Vec::new(), 257, 1, 1, config).unwrap();
     assert!(matches!(
-        encoder.add_frame(&data, delay()),
+        encode(257, 1, ColorType::Rgba8, &[data], 0),
         Err(Error::TooManyColors)
     ));
 }
@@ -438,7 +700,7 @@ fn a_frame_of_the_wrong_length_is_rejected() {
     let config = Config::default();
     let mut encoder = Encoder::new(Vec::new(), 4, 4, 1, config).unwrap();
     assert!(matches!(
-        encoder.add_frame(&[0; 47], delay()),
+        encoder.add_frame(&[0; 47], delay_of(0)),
         Err(Error::FrameSizeMismatch {
             expected: 48,
             actual: 47
@@ -459,9 +721,9 @@ fn a_missing_or_extra_frame_is_rejected() {
     ));
 
     let mut encoder = Encoder::new(Vec::new(), 1, 1, 1, config).unwrap();
-    encoder.add_frame(&[1, 2, 3], delay()).unwrap();
+    encoder.add_frame(&[1, 2, 3], delay_of(0)).unwrap();
     assert!(matches!(
-        encoder.add_frame(&[1, 2, 3], delay()),
+        encoder.add_frame(&[1, 2, 3], delay_of(1)),
         Err(Error::FrameCountMismatch {
             expected: 1,
             actual: 2

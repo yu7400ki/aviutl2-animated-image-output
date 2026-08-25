@@ -9,8 +9,6 @@ pub enum Error {
     InvalidDimensions { width: u32, height: u32 },
     /// フレーム数が0
     InvalidFrameCount,
-    /// フレーム数が1でない
-    UnsupportedFrameCount(u32),
     /// 1フレームのバイト数が `usize` で表現できない
     ImageTooLarge { width: u32, height: u32 },
     /// フレーム遅延の分母が0
@@ -21,6 +19,8 @@ pub enum Error {
     FrameCountMismatch { expected: u32, actual: u32 },
     /// フレームに現れた色がカラーテーブルの上限256を超えている
     TooManyColors,
+    /// 不透明な画素が透過になる遷移がある
+    UnsupportedTransparency,
     /// 書き出し先のI/Oエラー
     Io(std::io::Error),
     /// 書き出しに失敗したエンコーダを再利用しようとした
@@ -34,9 +34,6 @@ impl fmt::Display for Error {
                 write!(f, "画像サイズが不正です: {width}x{height}")
             }
             Error::InvalidFrameCount => write!(f, "フレーム数は1以上である必要があります"),
-            Error::UnsupportedFrameCount(count) => {
-                write!(f, "フレーム数 {count} は扱えません: 1フレームのみ扱えます")
-            }
             Error::ImageTooLarge { width, height } => {
                 write!(f, "画像が大きすぎます: {width}x{height}")
             }
@@ -55,6 +52,9 @@ impl fmt::Display for Error {
             }
             Error::TooManyColors => {
                 write!(f, "色数がカラーテーブルの上限256を超えています")
+            }
+            Error::UnsupportedTransparency => {
+                write!(f, "不透明な画素が透過になるフレームは扱えません")
             }
             Error::Io(e) => write!(f, "書き出しに失敗しました: {e}"),
             Error::Poisoned => write!(f, "書き出しに失敗したエンコーダは再利用できません"),

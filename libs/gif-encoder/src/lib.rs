@@ -3,13 +3,15 @@
 mod block;
 mod encoder;
 mod error;
+mod frame;
 mod layout;
 mod lzw;
 mod normalize;
+mod spool;
 mod table;
 
 pub use anim_core::FrameDelay;
-pub use encoder::{Config, Encoder};
+pub use encoder::{Config, Encoder, PaletteKind, Report};
 pub use error::Error;
 pub use layout::ColorType;
 
