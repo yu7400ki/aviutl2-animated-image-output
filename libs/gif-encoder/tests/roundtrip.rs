@@ -74,6 +74,7 @@ struct Decoded {
     width: u16,
     height: u16,
     repeat: gif::Repeat,
+    palette: Option<Vec<u8>>,
     frames: Vec<DecodedFrame>,
 }
 
@@ -84,6 +85,7 @@ struct DecodedFrame {
     width: u16,
     height: u16,
     delay: u16,
+    transparent: Option<u8>,
 }
 
 fn decode_with_gif(bytes: &[u8]) -> Decoded {
@@ -94,6 +96,7 @@ fn decode_with_gif(bytes: &[u8]) -> Decoded {
     let width = decoder.width();
     let height = decoder.height();
     let repeat = decoder.repeat();
+    let palette = decoder.global_palette().map(<[u8]>::to_vec);
 
     let mut frames = Vec::new();
     while let Some(frame) = decoder.read_next_frame().unwrap() {
@@ -104,6 +107,7 @@ fn decode_with_gif(bytes: &[u8]) -> Decoded {
             width: frame.width,
             height: frame.height,
             delay: frame.delay,
+            transparent: frame.transparent,
         });
     }
 
@@ -111,6 +115,7 @@ fn decode_with_gif(bytes: &[u8]) -> Decoded {
         width,
         height,
         repeat,
+        palette,
         frames,
     }
 }
@@ -146,6 +151,10 @@ fn decode_with_ffmpeg(bytes: &[u8]) -> Option<Vec<u8>> {
     let output = match output {
         Ok(output) => output,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "ffmpeg が見つからない。デコーダが1つでは、一部のデコーダだけが読める出力を見つけられない"
+            );
             eprintln!("ffmpeg が見つからないため、そちらのデコードを飛ばす");
             return None;
         }
@@ -194,13 +203,35 @@ fn round_trip(width: u32, height: u32, color_type: ColorType, data: &[u8]) -> Ve
         "矩形の大きさが全画面でない"
     );
     assert_eq!(frame.delay, 3, "遅延が1/100秒へ丸められていない");
+    assert_transparency(&frame.rgba, &expected, "`gif` クレート");
     assert_eq!(frame.rgba, expected, "`gif` クレートのデコード結果が違う");
 
     if let Some(raw) = decode_with_ffmpeg(&bytes) {
+        assert_transparency(&raw, &expected, "ffmpeg");
         assert_eq!(raw, expected, "ffmpeg のデコード結果が違う");
     }
 
     bytes
+}
+
+/// 透過画素の位置が正規化した入力と一致する
+///
+/// デコーダは透過インデックスに当たった画素だけをアルファ0で返す。色ではなく
+/// 位置だけを見るので、透過インデックスが別のエントリを指す誤りは、
+/// カラーテーブルの色の一致とは独立に落ちる。
+fn assert_transparency(actual: &[u8], expected: &[u8], decoder: &str) {
+    let positions = |rgba: &[u8]| -> Vec<usize> {
+        rgba.chunks_exact(4)
+            .enumerate()
+            .filter(|(_, pixel)| pixel[3] == 0)
+            .map(|(at, _)| at)
+            .collect()
+    };
+    assert_eq!(
+        positions(actual),
+        positions(expected),
+        "{decoder} のデコード結果で透過画素の位置が違う"
+    );
 }
 
 /// 1画素だけの画像
@@ -240,22 +271,42 @@ fn a_frame_with_exactly_256_opaque_colors_survives_both_decoders() {
 
     // 透過標識が和集合に無いため、透過インデックスは置かない
     let decoded = decode_with_gif(&bytes);
+    assert_eq!(decoded.frames[0].transparent, None);
     assert!(decoded.frames[0].rgba.chunks_exact(4).all(|p| p[3] == 255));
 }
 
 /// 素材自身の透過画素が透過インデックスになる
+///
+/// 先頭画素を不透明にして、透過標識が添字0以外のエントリへ落ちる場合を踏む。
 #[test]
 fn a_frame_with_transparent_pixels_survives_both_decoders() {
     let data: Vec<u8> = (0..255 * 4)
         .flat_map(|i| {
-            if i % 3 == 0 {
+            if i % 3 == 1 {
                 [9, 9, 9, 0]
             } else {
                 [(i % 255) as u8, 0x80, 0x40, 0xFF]
             }
         })
         .collect();
-    round_trip(51, 20, ColorType::Rgba8, &data);
+    let bytes = round_trip(51, 20, ColorType::Rgba8, &data);
+
+    let decoded = decode_with_gif(&bytes);
+    let transparent = decoded.frames[0]
+        .transparent
+        .expect("透過インデックスが無い");
+    assert_ne!(
+        transparent, 0,
+        "透過標識が添字0へ落ちている素材になっている"
+    );
+
+    let palette = decoded.palette.expect("グローバルカラーテーブルが無い");
+    let at = usize::from(transparent) * 3;
+    assert_eq!(
+        &palette[at..at + 3],
+        [0, 0, 0],
+        "透過インデックスが標識のエントリを指していない"
+    );
 }
 
 /// 閾値未満のアルファは完全透過へ潰れる
