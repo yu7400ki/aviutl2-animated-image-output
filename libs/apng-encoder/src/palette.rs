@@ -61,8 +61,7 @@ impl Palette {
 
     /// 画素列を添字へ写して `out` へ追記する
     ///
-    /// `pixels` は1画素 `bpp` バイトが隙間なく並び、その色がすべてこのパレットに
-    /// 含まれていること。`bpp` は3か4であること。
+    /// 引数の条件は [`Indexed::append_indices`] と同じ。
     pub(crate) fn append_indices(&self, pixels: &[u8], bpp: usize, out: &mut Vec<u8>) {
         self.indexed.append_indices(pixels, bpp, out);
     }

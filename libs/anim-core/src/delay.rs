@@ -5,8 +5,8 @@ use crate::error::Error;
 /// フレームの表示時間 (秒)
 ///
 /// `numerator / denominator` 秒を表す。動画のフレームレートから作る場合は
-/// 分子にスケール、分母にレートを渡す。書き出す単位への丸めは持たないため、
-/// フォーマットごとの分数へ直すのは受け取った側の役目になる。
+/// 分子にスケール、分母にレートを渡す。値は与えられた分数のまま保つので、
+/// 書き出す単位への変換は受け取った側で行う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameDelay {
     numerator: u32,
@@ -30,12 +30,12 @@ impl FrameDelay {
         })
     }
 
-    /// 表示時間の分子 (秒)
+    /// `numerator / denominator` 秒の分子
     pub fn numerator(&self) -> u32 {
         self.numerator
     }
 
-    /// 表示時間の分母 (秒)
+    /// `numerator / denominator` 秒の分母
     pub fn denominator(&self) -> u32 {
         self.denominator
     }

@@ -1,6 +1,6 @@
 //! 色の和集合の集計と、色から添字を引く表
 
-/// パレットに収められる色数の上限
+/// 数え上げられる色数の上限
 pub const MAX_COLORS: usize = 256;
 
 /// 表の添字に使うビット数
@@ -40,7 +40,7 @@ struct Entry {
 
 /// 色から添字を引く表
 ///
-/// [`Self::values`] が0の位置は空で、それ以外はパレットの添字に1を足した値が入る。
+/// [`Self::values`] が0の位置は空で、それ以外は添字に1を足した値が入る。
 /// 同じ位置の [`Self::keys`] にその色が入る。
 struct Table {
     keys: Box<[u32]>,
@@ -236,12 +236,12 @@ mod tests {
         colors.into_indexed(|_| ())
     }
 
-    /// パレットに無い色を引いても、走査は表の空きで止まる
+    /// 対応に無い色を引いても、走査は表の空きで止まる
     ///
     /// 止まらなければ戻り値ではなく無限ループになるため、上限いっぱいまで
     /// 埋めた表でも一周しないことを踏む。
     #[test]
-    fn a_color_outside_the_palette_is_reported_as_missing() {
+    fn a_color_outside_the_table_is_reported_as_missing() {
         let palette = indexed_of(&[1, 2, 3, 4, 5, 6], 3);
         assert_eq!(palette.index_of(pack::<3>(&[1, 2, 3])), Some(0));
         assert_eq!(palette.index_of(pack::<3>(&[4, 5, 6])), Some(1));
@@ -284,6 +284,30 @@ mod tests {
         assert_ne!(indices[0], indices[1]);
         for (index, pixel) in indices.iter().zip(pixels.chunks_exact(4)) {
             assert_eq!(indexed.colors()[*index as usize], pack::<4>(pixel));
+        }
+    }
+
+    /// 並べ替えた後の添字でも、色は一対一に引ける
+    ///
+    /// 並べ替えは表に振り直した添字を通してしか反映されない。恒等でない鍵で
+    /// 上限いっぱいまで埋め、振り直しを踏んだ経路が元の色へ戻ることを確かめる。
+    #[test]
+    fn a_reordered_table_still_maps_every_color_to_its_index() {
+        let pixels = distinct_rgb(MAX_COLORS);
+        let mut colors = Colors::new();
+        colors.observe(&pixels, 3);
+        let indexed = colors.into_indexed(std::cmp::Reverse);
+
+        let mut indices = Vec::new();
+        indexed.append_indices(&pixels, 3, &mut indices);
+        assert_eq!(indices.len(), MAX_COLORS);
+        assert_eq!(
+            indices[0],
+            (MAX_COLORS - 1) as u8,
+            "並べ替えが恒等になっている"
+        );
+        for (index, pixel) in indices.iter().zip(pixels.chunks_exact(3)) {
+            assert_eq!(indexed.colors()[*index as usize], pack::<3>(pixel));
         }
     }
 

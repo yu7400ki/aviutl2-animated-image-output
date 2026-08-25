@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-/// 共有する部品が返すエラー
+/// 引数が受け付けられる値の範囲から外れている
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     /// フレーム遅延の分母が0
