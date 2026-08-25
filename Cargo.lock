@@ -18,9 +18,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "anim_core"
+version = "0.1.0"
+
+[[package]]
 name = "apng_encoder"
 version = "0.1.0"
 dependencies = [
+ "anim_core",
  "crc32fast",
  "flate2",
  "png",

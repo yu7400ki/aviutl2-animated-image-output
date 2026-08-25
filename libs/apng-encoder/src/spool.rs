@@ -1,10 +1,10 @@
 //! 出力の色種別が決まるまでフレームを溜めておく領域
 
-use crate::alpha;
 use crate::delay::FrameDelay;
 use crate::diff::Rect;
 use crate::palette::Colors;
 use crate::region;
+use anim_core::has_transparency;
 
 /// 溜めたフレーム1つ
 pub(crate) struct Spooled {
@@ -100,7 +100,7 @@ impl Spool {
         region::crop(data, rect, stride, bpp, bpp, &mut region);
 
         if bpp == 4 && !self.transparent {
-            self.transparent = alpha::has_transparency(&region);
+            self.transparent = has_transparency(&region);
         }
         self.colors.observe(&region, bpp);
 

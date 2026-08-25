@@ -6,7 +6,7 @@ const ALPHA_MASK: u64 = 0xFF00_0000_FF00_0000;
 /// RGBA8の画素列に不透明でない画素が1つでもあるか調べる
 ///
 /// `pixels` は1画素4バイトのR,G,B,Aが隙間なく並んでいること。
-pub(crate) fn has_transparency(pixels: &[u8]) -> bool {
+pub fn has_transparency(pixels: &[u8]) -> bool {
     // 論理積は255を保つので、全画素が不透明なときに限り累積値のアルファが255で残る
     let mut acc = u64::MAX;
     let mut pairs = pixels.chunks_exact(8);

@@ -1,6 +1,5 @@
 //! APNG (Animated PNG) エンコーダ
 
-mod alpha;
 mod chunk;
 mod codec;
 mod delay;
