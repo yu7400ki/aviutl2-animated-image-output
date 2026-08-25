@@ -4,14 +4,13 @@ use crate::chunk::{
     BLEND_OP_OVER, BLEND_OP_SOURCE, ChunkWriter, DISPOSE_OP_NONE, DISPOSE_OP_PREVIOUS,
 };
 use crate::codec::{Candidate, Codec};
-use crate::delay::FrameDelay;
 use crate::delta::Delta;
 use crate::diff;
 use crate::error::Error;
 use crate::layout::{ColorType, Layout, Output};
 use crate::palette::Palette;
 use crate::spool::{Spool, Spooled};
-use anim_core::{Rect, append_pixels, crop, paste};
+use anim_core::{FrameDelay, Rect, append_pixels, crop, paste};
 use std::io::Write;
 use std::ops::RangeInclusive;
 

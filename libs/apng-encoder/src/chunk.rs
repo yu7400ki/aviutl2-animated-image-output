@@ -1,8 +1,8 @@
 //! PNGチャンクの書き出しと、APNGのフレームを並べる連番の管理
 
-use crate::delay::FrameDelay;
+use crate::delay::FrameDelayExt;
 use crate::error::Error;
-use anim_core::Rect;
+use anim_core::{FrameDelay, Rect};
 use std::io::Write;
 
 /// PNGシグネチャ

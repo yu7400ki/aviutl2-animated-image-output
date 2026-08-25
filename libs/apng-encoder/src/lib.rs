@@ -13,7 +13,8 @@ mod palette;
 mod spool;
 mod zlib;
 
-pub use delay::FrameDelay;
+pub use anim_core::FrameDelay;
+pub use delay::FrameDelayExt;
 pub use encoder::{COMPRESSION_LEVELS, ColorReduction, Config, DEFAULT_MAX_SPOOL_BYTES, Encoder};
 pub use error::Error;
 pub use layout::ColorType;

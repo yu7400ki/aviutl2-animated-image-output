@@ -164,6 +164,7 @@ register_logger!();
 #[cfg(test)]
 mod tests {
     use super::*;
+    use apng_encoder::FrameDelayExt;
 
     #[test]
     fn frame_rate_becomes_a_delay_in_seconds() {

@@ -1,44 +1,24 @@
-//! フレーム遅延と、fcTLが要求する16bit分数への変換
+//! フレーム遅延をfcTLが要求する16bit分数へ直す
 
-use crate::error::Error;
+use anim_core::FrameDelay;
 
 /// fcTLのdelay_num・delay_denが取りうる最大値
 const MAX: u64 = u16::MAX as u64;
 
-/// フレームの表示時間 (秒)
-///
-/// `numerator / denominator` 秒を表す。動画のフレームレートから作る場合は
-/// 分子にスケール、分母にレートを渡す。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FrameDelay {
-    numerator: u32,
-    denominator: u32,
-}
-
-impl FrameDelay {
-    /// `numerator / denominator` 秒の遅延を作る
-    ///
-    /// 分子0は「可能な限り速く」を意味する。
-    ///
-    /// # Errors
-    /// 分母が0のとき [`Error::InvalidFrameDelay`]。
-    pub fn new(numerator: u32, denominator: u32) -> Result<Self, Error> {
-        if denominator == 0 {
-            return Err(Error::InvalidFrameDelay);
-        }
-        Ok(FrameDelay {
-            numerator,
-            denominator,
-        })
-    }
-
+/// [`FrameDelay`] をfcTLの分数へ直す
+pub trait FrameDelayExt {
     /// fcTLへ書ける16bit分数 (分子, 分母) へ変換する
     ///
     /// 約分してもu16に収まらない場合は、秒数の誤差が最小になる分数で近似する。
     /// 分子が0でない限り近似後の分子も0にはならない。
-    pub fn to_parts(&self) -> (u16, u16) {
-        let g = gcd(self.numerator as u64, self.denominator as u64);
-        let (num, den) = (self.numerator as u64 / g, self.denominator as u64 / g);
+    fn to_parts(&self) -> (u16, u16);
+}
+
+impl FrameDelayExt for FrameDelay {
+    fn to_parts(&self) -> (u16, u16) {
+        let (numerator, denominator) = (self.numerator() as u64, self.denominator() as u64);
+        let g = gcd(numerator, denominator);
+        let (num, den) = (numerator / g, denominator / g);
 
         if num <= MAX && den <= MAX {
             return (num as u16, den as u16);
@@ -112,14 +92,6 @@ mod tests {
 
     fn parts(num: u32, den: u32) -> (u16, u16) {
         FrameDelay::new(num, den).unwrap().to_parts()
-    }
-
-    #[test]
-    fn zero_denominator_is_rejected() {
-        assert!(matches!(
-            FrameDelay::new(1, 0),
-            Err(Error::InvalidFrameDelay)
-        ));
     }
 
     #[test]
