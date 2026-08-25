@@ -2285,6 +2285,35 @@ fn the_comparison_stays_on_the_leading_frames_when_the_colors_jump_late() {
     assert_composites_to(&bytes, FILTER_WIDTH, ColorType::Rgb8, &expected);
 }
 
+/// 比べる窓を超えたフレームは、どれだけ重くても比較に入らない
+///
+/// 色数が跳ねる位置が窓より後ろだと、溜めた枚数が窓を超えたまま比較へ入る。窓で
+/// 区切らないと、跳ねた1枚が窓の中の何十枚ぶんもの重さで結果を裏返す。
+#[test]
+fn frames_past_the_leading_ones_do_not_enter_the_comparison() {
+    // 先頭は4色しか使わないため、色数が跳ねるのは比べ始める枚数より後になる
+    let base = flat_frame(ColorType::Rgba8, 0);
+    let mut input = vec![base];
+    for index in 0..COLOR_PROBE_FRAMES + 1 {
+        // 窓の中を1画素だけの差分で埋め、跳ねたフレームとの重さの差を大きくする
+        let mut frame = input.last().expect("フレームがある").clone();
+        let at = index as usize * 4;
+        frame[at..at + 3].copy_from_slice(&[0xC0, 0x40, 0x60]);
+        input.push(frame);
+    }
+    input.push(dithered_frame(ColorType::Rgba8, 0));
+
+    let config = Config {
+        reduce_color: true,
+        ..config(ColorType::Rgba8)
+    };
+    let (bytes, _) = encode_with(FILTER_WIDTH, FILTER_HEIGHT, config, &input);
+
+    assert_eq!(output_color_type(&bytes), png::ColorType::Rgb);
+    let expected: Vec<Vec<u8>> = input.iter().map(|frame| without_alpha(frame)).collect();
+    assert_composites_to(&bytes, FILTER_WIDTH, ColorType::Rgb8, &expected);
+}
+
 /// アルファを落とすと決まっても、残りのフレームが不透明とは限らないため溜め続ける
 ///
 /// そこで確定すると、後から現れた透過を落としたまま書き出してしまう。
