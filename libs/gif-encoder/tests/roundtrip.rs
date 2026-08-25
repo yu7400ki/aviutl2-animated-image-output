@@ -500,6 +500,112 @@ fn identical_frames_are_written_as_a_unit_rect() {
     );
 }
 
+/// 差分矩形の中で変わっていない画素は透過インデックスで埋まる
+///
+/// 離れた2画素を変えると、外接矩形はその間の変わっていない画素を含む。
+#[test]
+fn unchanged_pixels_inside_the_rect_are_written_as_transparent() {
+    const WIDTH: u32 = 8;
+    const HEIGHT: u32 = 6;
+    let color = ColorType::Rgb8;
+
+    let first = solid(WIDTH, HEIGHT, color, &[0x10, 0x20, 0x30]);
+    let mut second = first.clone();
+    set_pixel(&mut second, WIDTH, color, 1, 1, &[0xF0, 0xE0, 0xD0]);
+    set_pixel(&mut second, WIDTH, color, 5, 4, &[0xD0, 0xE0, 0xF0]);
+
+    let (bytes, _) = round_trip(WIDTH, HEIGHT, color, &[first, second]);
+    let decoded = decode_with_gif(&bytes);
+    assert_eq!(decoded.frames[1].rect(), (1, 1, 5, 4));
+
+    // 矩形の中で透過になった画素は、変えた2画素を除いた全部
+    let opaque: Vec<usize> = decoded.frames[1]
+        .rgba
+        .chunks_exact(4)
+        .enumerate()
+        .filter(|(_, pixel)| pixel[3] != 0)
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(
+        opaque,
+        [0, 5 * 3 + 4],
+        "透過ランが変わった画素まで覆っている"
+    );
+}
+
+/// 和集合がちょうど256色の経路では、透過ランを諦めて差分矩形だけで書く
+#[test]
+fn a_full_opaque_union_writes_every_pixel_of_the_rect() {
+    const WIDTH: u32 = 16;
+    const HEIGHT: u32 = 16;
+    let color = ColorType::Rgb8;
+
+    let first: Vec<u8> = (0..WIDTH * HEIGHT)
+        .flat_map(|i| [i as u8, 0x40, 0x80])
+        .collect();
+    let second: Vec<u8> = (0..WIDTH * HEIGHT)
+        .flat_map(|i| [(255 - i) as u8, 0x40, 0x80])
+        .collect();
+    // 差分の無いフレームを挟み、透過インデックスを持たないまま1画素を書く経路を踏む
+    let frames = vec![first.clone(), first, second];
+
+    let (bytes, report) = round_trip(WIDTH, HEIGHT, color, &frames);
+    assert_eq!(report.palette, PaletteKind::Exact { colors: 256 });
+
+    let decoded = decode_with_gif(&bytes);
+    assert_eq!(decoded.frames[1].rect(), (0, 0, 1, 1));
+    for (index, frame) in decoded.frames.iter().enumerate() {
+        assert_eq!(
+            frame.transparent, None,
+            "{index} 番目に透過インデックスが出た"
+        );
+        assert!(
+            frame.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255),
+            "{index} 番目に透過画素が出た"
+        );
+    }
+}
+
+/// 素材自身の透過画素と未変更画素のランは同じエントリを使う
+#[test]
+fn the_marker_entry_carries_both_kinds_of_transparency() {
+    const WIDTH: u32 = 6;
+    const HEIGHT: u32 = 4;
+    let color = ColorType::Rgba8;
+
+    let mut first = solid(WIDTH, HEIGHT, color, &[0x20, 0x40, 0x60, 0xFF]);
+    set_pixel(&mut first, WIDTH, color, 0, 0, &[0, 0, 0, 0]);
+    let mut second = first.clone();
+    set_pixel(&mut second, WIDTH, color, 1, 1, &[0x11, 0x22, 0x33, 0xFF]);
+    set_pixel(&mut second, WIDTH, color, 4, 3, &[0x44, 0x55, 0x66, 0xFF]);
+
+    let (bytes, _) = round_trip(WIDTH, HEIGHT, color, &[first, second]);
+    let decoded = decode_with_gif(&bytes);
+
+    // 標識のエントリが両方のフレームの透過インデックスになっている
+    let palette = decoded.palette.expect("グローバルカラーテーブルが無い");
+    let marker = palette
+        .chunks_exact(3)
+        .position(|entry| entry == [0, 0, 0])
+        .expect("標識のエントリが無い");
+    for (index, frame) in decoded.frames.iter().enumerate() {
+        assert_eq!(
+            frame.transparent,
+            Some(marker as u8),
+            "{index} 番目の透過インデックスが標識を指していない"
+        );
+    }
+
+    // 2枚目の矩形は変わっていない画素で埋まり、透過で書かれている
+    assert_eq!(decoded.frames[1].rect(), (1, 1, 4, 3));
+    let opaque = decoded.frames[1]
+        .rgba
+        .chunks_exact(4)
+        .filter(|pixel| pixel[3] != 0)
+        .count();
+    assert_eq!(opaque, 2, "透過ランが変わった画素まで覆っている");
+}
+
 /// 瞬き (A→B→A) で戻った画素が、キャンバスの取り違えで潰れないこと
 ///
 /// 常に変わり続ける画素を端に置いて矩形を広げ、瞬く画素を矩形の中へ入れる。

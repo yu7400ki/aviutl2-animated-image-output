@@ -72,19 +72,25 @@ impl Palette {
     ///
     /// 透過標識が和集合にあるなら、そのエントリがそのまま透過インデックスになる。
     /// 素材自身の透過画素と未変更画素のランはどちらも「キャンバスを書き換えない」
-    /// という同じ意味なので、スロットを分けない。
+    /// という同じ意味なので、スロットを分けない。標識が無いときだけ透過ラン用の
+    /// スロットを1つ足すが、和集合が [`MAX_COLORS`] を埋めているなら足せない。
+    /// 可逆性は透過ランの削減より優先するため、そのときは透過ランを諦める。
     ///
     /// # Panics
     /// 色数が [`MAX_COLORS`] を超えているとき。
     pub(crate) fn from_colors(colors: Colors) -> Self {
         // GIFは添字の局所性に無関心なので、見つけた順のまま添字を振る
         let indexed = colors.into_indexed(|_| ());
-        let transparent = indexed
-            .colors()
-            .iter()
-            .position(|&color| color == TRANSPARENT)
-            .map(|index| index as u8);
-        let table = ColorTable::new(indexed.colors());
+        let mut entries = indexed.colors().to_vec();
+        let transparent = match entries.iter().position(|&color| color == TRANSPARENT) {
+            Some(index) => Some(index as u8),
+            None if entries.len() < MAX_COLORS => {
+                entries.push(TRANSPARENT);
+                Some((entries.len() - 1) as u8)
+            }
+            None => None,
+        };
+        let table = ColorTable::new(&entries);
 
         Palette {
             indexed,
@@ -160,6 +166,63 @@ mod tests {
                 "{colors}色"
             );
         }
+    }
+
+    /// 和集合を数える
+    fn colors_of(pixels: &[u8], bpp: usize) -> Colors {
+        let mut colors = Colors::new();
+        colors.observe(pixels, bpp);
+        colors
+    }
+
+    /// 透過標識が和集合にあるなら、そのエントリがそのまま透過インデックスになる
+    #[test]
+    fn the_marker_entry_doubles_as_the_transparent_index() {
+        let pixels = [1u8, 2, 3, 0xFF, 0, 0, 0, 0, 4, 5, 6, 0xFF];
+        let palette = Palette::from_colors(colors_of(&pixels, 4));
+
+        assert_eq!(palette.transparent(), Some(1));
+        assert_eq!(palette.table().len(), 4, "透過スロットを余分に足している");
+    }
+
+    /// 標識が無く空きがあるときは、透過ラン用のスロットを1つ足す
+    #[test]
+    fn an_opaque_union_gains_a_transparent_slot() {
+        let pixels = [1u8, 2, 3, 4, 5, 6];
+        let palette = Palette::from_colors(colors_of(&pixels, 3));
+
+        assert_eq!(palette.transparent(), Some(2));
+        assert_eq!(
+            &palette.table().bytes()[6..9],
+            [0, 0, 0],
+            "透過スロットが標識のエントリになっていない"
+        );
+    }
+
+    /// 和集合が上限を埋めていると透過スロットを取れない
+    ///
+    /// 可逆性は透過ランの削減より優先するため、色を落として空けることはしない。
+    #[test]
+    fn a_full_opaque_union_keeps_every_color_and_loses_the_run() {
+        let pixels: Vec<u8> = (0..MAX_COLORS)
+            .flat_map(|i| [i as u8, (i >> 8) as u8, 0])
+            .collect();
+        let palette = Palette::from_colors(colors_of(&pixels, 3));
+
+        assert_eq!(palette.transparent(), None);
+        assert_eq!(palette.table().len(), MAX_COLORS);
+    }
+
+    /// 空きが1つだけ残っている和集合にはスロットが入る
+    #[test]
+    fn a_union_one_short_of_the_limit_still_gains_a_slot() {
+        let pixels: Vec<u8> = (0..MAX_COLORS - 1)
+            .flat_map(|i| [i as u8, (i >> 8) as u8, 0])
+            .collect();
+        let palette = Palette::from_colors(colors_of(&pixels, 3));
+
+        assert_eq!(palette.transparent(), Some((MAX_COLORS - 1) as u8));
+        assert_eq!(palette.table().len(), MAX_COLORS);
     }
 
     #[test]

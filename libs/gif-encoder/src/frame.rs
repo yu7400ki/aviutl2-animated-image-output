@@ -88,6 +88,10 @@ impl Canvas {
     }
 
     /// `rect` の添字列を `out` へ追記する
+    ///
+    /// 透過インデックスを持つテーブルでは、矩形の中でキャンバスと一致する画素を
+    /// それへ置き換える。その画素はキャンバスを書き換えないまま、LZWにとって
+    /// 同じ値の長いランになる。
     pub(crate) fn append_indices(
         &self,
         frame: &[u8],
@@ -97,6 +101,7 @@ impl Canvas {
     ) {
         let stride = self.layout.stride;
         let bpp = self.layout.bytes_per_pixel;
+        let head = out.len();
 
         if rect.width as usize * bpp == stride {
             // 全幅の矩形は `frame` の上で既に連続している
@@ -106,6 +111,23 @@ impl Canvas {
             let mut region = Vec::new();
             crop(frame, rect, stride, bpp, bpp, &mut region);
             palette.append_indices(&region, bpp, out);
+        }
+
+        // 先頭フレームには前が無く、未変更画素そのものが存在しない
+        if self.is_empty() {
+            return;
+        }
+        let Some(transparent) = palette.transparent() else {
+            return;
+        };
+        for y in 0..rect.height as usize {
+            let row = (rect.y as usize + y) * stride + rect.x as usize * bpp;
+            for x in 0..rect.width as usize {
+                let at = row + x * bpp;
+                if self.pixels[at..at + bpp] == frame[at..at + bpp] {
+                    out[head + y * rect.width as usize + x] = transparent;
+                }
+            }
         }
     }
 
@@ -237,6 +259,69 @@ mod tests {
             choose_disposal(&canvas, &zeros),
             Some(DISPOSAL_DO_NOT_DISPOSE)
         );
+    }
+
+    /// 矩形の中でキャンバスと一致する画素は透過インデックスになる
+    #[test]
+    fn unchanged_pixels_inside_the_rect_become_the_transparent_index() {
+        let first = opaque(0x10);
+        let mut next = opaque(0x10);
+        next[0] = 0x7F;
+        next[(WIDTH * HEIGHT - 1) as usize * 4] = 0x7E;
+
+        let palette = palette_of(&[&first, &next], 4);
+        let transparent = palette.transparent().expect("透過インデックスが無い");
+
+        let mut canvas = Canvas::new(layout(ColorType::Rgba8));
+        drawn(&mut canvas, &first);
+        let rect = canvas.rect_of(&next);
+        assert_eq!(rect, layout(ColorType::Rgba8).whole(), "矩形が全画面でない");
+
+        let mut indices = Vec::new();
+        canvas.append_indices(&next, rect, &palette, &mut indices);
+        let last = indices.len() - 1;
+        assert_ne!(indices[0], transparent, "変わった画素まで潰れている");
+        assert_ne!(indices[last], transparent, "変わった画素まで潰れている");
+        assert!(
+            indices[1..last].iter().all(|&index| index == transparent),
+            "変わっていない画素が潰れていない"
+        );
+    }
+
+    /// 先頭フレームには未変更画素が無く、全画素がテーブルへ写る
+    #[test]
+    fn the_first_frame_maps_every_pixel_through_the_table() {
+        let frame = opaque(0x10);
+        let palette = palette_of(&[&frame], 4);
+        let transparent = palette.transparent().expect("透過インデックスが無い");
+
+        let canvas = Canvas::new(layout(ColorType::Rgba8));
+        let rect = canvas.rect_of(&frame);
+        let mut indices = Vec::new();
+        canvas.append_indices(&frame, rect, &palette, &mut indices);
+
+        assert!(
+            indices.iter().all(|&index| index != transparent),
+            "先頭フレームの画素が潰れている"
+        );
+    }
+
+    /// 透過インデックスを持たないテーブルでは、未変更画素もそのまま写る
+    #[test]
+    fn a_table_without_a_transparent_index_keeps_every_pixel() {
+        let frame: Vec<u8> = (0..WIDTH * HEIGHT).flat_map(|i| [i as u8, 0, 0]).collect();
+        let full: Vec<u8> = (0..256)
+            .flat_map(|i| [i as u8, (i >> 8) as u8, 0])
+            .collect();
+        let palette = palette_of(&[&full], 3);
+        assert_eq!(palette.transparent(), None);
+
+        let mut canvas = Canvas::new(layout(ColorType::Rgb8));
+        drawn(&mut canvas, &frame);
+
+        let mut indices = Vec::new();
+        canvas.append_indices(&frame, UNCHANGED, &palette, &mut indices);
+        assert_eq!(indices, [0]);
     }
 
     /// 素材自身の透過画素は透過インデックスへ写る
