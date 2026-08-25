@@ -149,8 +149,7 @@ fn decode_with_gif(bytes: &[u8]) -> Decoded {
 /// 透過インデックスに当たった画素はキャンバスを書き換えない。デコーダは
 /// その画素をアルファ0で返すので、アルファを持つ画素だけを写す。
 ///
-/// 廃棄はフレームを表示した後に効く。Background は仕様上「背景色で塗り直す」
-/// だが、現代のデコーダは透過で抜くため、そちらに合わせる。
+/// 廃棄はフレームを表示した後に効き、Background は矩形を透過へ抜く。
 fn compose(decoded: &Decoded) -> Vec<Vec<u8>> {
     let stride = usize::from(decoded.width) * 4;
     let mut canvas = vec![0u8; stride * usize::from(decoded.height)];

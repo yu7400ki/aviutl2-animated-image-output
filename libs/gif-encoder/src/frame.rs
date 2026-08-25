@@ -119,9 +119,6 @@ impl Screen<'_> {
 /// 表現できるかどうかは後者だけで決まる。
 pub(crate) struct Disposed<'a> {
     /// 矩形を透過へ抜いた画面
-    ///
-    /// Restore to Background は仕様上「背景色で塗り直す」だが、現代のデコーダは
-    /// 例外なく透過で抜く。この事実上の挙動を前提に画面を模擬する。
     background: Screen<'a>,
     /// 保留中のフレームを描く直前へ戻した画面
     previous: Screen<'a>,
@@ -149,10 +146,7 @@ impl<'a> Disposed<'a> {
 /// 投入されたフレームが載る画面を作る。
 pub(crate) struct Canvas {
     layout: Layout,
-    /// 保留中のフレームを描く直前の画面
-    ///
-    /// 透過を持てない RGB8 の入力では廃棄方法が Do Not Dispose に固定され、
-    /// 戻す先が要らないため空のまま。
+    /// 保留中のフレームを描く直前の画面。透過を持てない入力では空
     before: Vec<u8>,
     /// 保留中のフレームを描いた後の画面
     after: Vec<u8>,
@@ -190,6 +184,11 @@ impl Canvas {
 
     /// 保留中のフレームを描く直前へ戻した画面
     pub(crate) fn restored(&self) -> Screen<'_> {
+        debug_assert_eq!(
+            self.layout.color_type,
+            ColorType::Rgba8,
+            "透過を持てない面には戻す先が無い"
+        );
         self.screen(&self.before)
     }
 
