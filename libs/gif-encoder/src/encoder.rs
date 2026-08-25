@@ -186,7 +186,7 @@ impl<W: Write> Encoder<W> {
         Ok(Encoder {
             writer,
             layout: Layout::new(width, height, config.color_type)?,
-            stage: Stage::Deciding(Spool::new(config.max_spool_bytes)),
+            stage: Stage::Deciding(Spool::new(config.max_spool_bytes, num_frames)),
             num_frames,
             num_plays: config.num_plays,
             frames_accepted: 0,

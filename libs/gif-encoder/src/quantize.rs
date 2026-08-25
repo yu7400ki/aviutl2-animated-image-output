@@ -89,17 +89,17 @@ impl Histogram {
         }
     }
 
-    /// 画素列の色を積む
+    /// 画素列の色を、1画素あたり `weight` の重みで積む
     ///
     /// `pixels` は1画素 `bpp` バイトが隙間なく並んでいること。`bpp` は3か4であること。
     ///
     /// 透過標識は積まない。RGBが (0,0,0) なので、積むと透過の面積だけ黒が重くなり、
     /// 分割が黒の周りに箱を割いて非透過色の表現力を削る。
-    pub(crate) fn observe(&mut self, pixels: &[u8], bpp: usize) {
+    pub(crate) fn observe(&mut self, pixels: &[u8], bpp: usize, weight: u64) {
         match bpp {
             3 => {
                 for pixel in pixels.chunks_exact(3) {
-                    self.add(pixel[0], pixel[1], pixel[2], 1);
+                    self.add(pixel[0], pixel[1], pixel[2], weight);
                 }
             }
             4 => {
@@ -108,7 +108,7 @@ impl Histogram {
                     if color == TRANSPARENT {
                         continue;
                     }
-                    self.add(pixel[0], pixel[1], pixel[2], 1);
+                    self.add(pixel[0], pixel[1], pixel[2], weight);
                 }
             }
             other => panic!("1画素あたり3バイトか4バイトのみ扱える: {other}"),
@@ -609,7 +609,7 @@ mod tests {
     #[test]
     fn the_transparent_marker_is_not_counted() {
         let mut histogram = Histogram::new();
-        histogram.observe(&[0, 0, 0, 0, 0, 0, 0, 0, 10, 20, 30, 255], 4);
+        histogram.observe(&[0, 0, 0, 0, 0, 0, 0, 0, 10, 20, 30, 255], 4, 1);
 
         // 標識を積んでいれば黒が重みを持ち、平均は黒へ寄る
         assert_eq!(histogram.quantize(1), vec![pack([10, 20, 30])]);
@@ -619,7 +619,7 @@ mod tests {
     #[test]
     fn black_is_counted_when_the_input_has_no_alpha() {
         let mut histogram = Histogram::new();
-        histogram.observe(&[0, 0, 0, 40, 40, 40], 3);
+        histogram.observe(&[0, 0, 0, 40, 40, 40], 3, 1);
 
         assert_eq!(histogram.quantize(1), vec![pack([20, 20, 20])]);
     }
