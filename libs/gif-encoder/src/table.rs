@@ -4,6 +4,13 @@ use crate::normalize::TRANSPARENT;
 use crate::quantize::Nearest;
 use anim_core::{Colors, Indexed, MAX_COLORS};
 
+/// 写す先が1つも残らないテーブルへ足す色
+///
+/// カラーテーブルは2エントリ未満を書けず、埋め草はどのみち黒になる。
+/// その埋め草を写す先にすれば、透過だけの区間から据えたテーブルでも
+/// 不透明な画素を写せる。
+const OPAQUE_BLACK: u32 = 0xFF00_0000;
+
 /// 量子化したテーブルに載せる非透過色の上限
 ///
 /// 量子化の経路では1色多く載せるより透過ランを取る方が常に得なので、
@@ -76,6 +83,8 @@ pub(crate) struct Palette {
     transparent: Option<u8>,
     /// 完全一致が外れた色を写す先
     nearest: Nearest,
+    /// 完全一致が無く最近傍へ写した画素数
+    approximated: u64,
 }
 
 impl Palette {
@@ -91,17 +100,11 @@ impl Palette {
     /// 色数が [`MAX_COLORS`] を超えているとき。
     pub(crate) fn from_colors(colors: Colors) -> Self {
         // GIFは添字の局所性に無関心なので、見つけた順のまま添字を振る
-        let indexed = colors.into_indexed(|_| ());
-        let mut entries = indexed.colors().to_vec();
-        let transparent = match entries.iter().position(|&color| color == TRANSPARENT) {
-            Some(index) => Some(index as u8),
-            None if entries.len() < MAX_COLORS => {
-                entries.push(TRANSPARENT);
-                Some((entries.len() - 1) as u8)
-            }
-            None => None,
-        };
-        Palette::new(indexed, entries, transparent)
+        let mut entries = colors.into_indexed(|_| ()).colors().to_vec();
+        if !entries.contains(&TRANSPARENT) && entries.len() < MAX_COLORS {
+            entries.push(TRANSPARENT);
+        }
+        Palette::new(entries)
     }
 
     /// 量子化した色をカラーテーブルへ据える
@@ -116,9 +119,22 @@ impl Palette {
         assert!(!colors.is_empty(), "量子化した色が1つも無い");
         assert!(colors.len() <= QUANTIZED_COLORS, "透過スロットが取れない");
 
-        let bytes: Vec<u8> = colors
+        let mut entries = colors.to_vec();
+        entries.push(TRANSPARENT);
+        Palette::new(entries)
+    }
+
+    /// 添字順に並べた色からテーブルと引く対応を作る
+    ///
+    /// 引く対応はテーブルのエントリそのものから作る。書き出す色がすべて完全一致で
+    /// 引けるので、写した後の色を写し直しても最近傍へ落ちない。
+    fn new(mut entries: Vec<u32>) -> Self {
+        if entries.iter().all(|&color| color == TRANSPARENT) {
+            entries.push(OPAQUE_BLACK);
+        }
+
+        let bytes: Vec<u8> = entries
             .iter()
-            .chain(std::iter::once(&TRANSPARENT))
             .flat_map(|color| color.to_le_bytes())
             .collect();
         let mut observed = Colors::new();
@@ -131,19 +147,27 @@ impl Palette {
             .iter()
             .position(|&color| color == TRANSPARENT)
             .map(|index| index as u8);
-        Palette::new(indexed, entries, transparent)
-    }
-
-    fn new(indexed: Indexed, entries: Vec<u32>, transparent: Option<u8>) -> Self {
         let table = ColorTable::new(&entries);
         let nearest = Nearest::new(&entries);
+
         Palette {
             indexed,
             entries,
             table,
             transparent,
             nearest,
+            approximated: 0,
         }
+    }
+
+    /// 透過でないエントリの数
+    pub(crate) fn colors(&self) -> u16 {
+        (self.entries.len() - usize::from(self.transparent.is_some())) as u16
+    }
+
+    /// 完全一致が無く最近傍へ写した画素数
+    pub(crate) fn approximated(&self) -> u64 {
+        self.approximated
     }
 
     /// 添字が指す色
@@ -176,7 +200,14 @@ impl Palette {
     pub(crate) fn index_of(&mut self, pixel: &[u8], bpp: usize) -> u8 {
         match self.indexed.index_of(pixel, bpp) {
             Some(index) => index,
-            None => self.nearest.index_of(pack(pixel, bpp)),
+            None => {
+                let color = pack(pixel, bpp);
+                // 標識がここへ落ちるのは透過を表現できないテーブルのときだけで、
+                // その画素は廃棄方法の判定が先に弾く
+                debug_assert!(color != TRANSPARENT, "透過標識を色として近似している");
+                self.approximated += 1;
+                self.nearest.index_of(color)
+            }
         }
     }
 }

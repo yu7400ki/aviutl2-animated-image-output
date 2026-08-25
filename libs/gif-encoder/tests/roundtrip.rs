@@ -261,6 +261,12 @@ fn round_trip_within(
     tolerance: u8,
 ) -> (Vec<u8>, Report) {
     let (bytes, report) = encode(width, height, color_type, frames, 0).unwrap();
+    if matches!(report.palette, PaletteKind::Exact { .. }) {
+        assert_eq!(
+            report.approximated_pixels, 0,
+            "可逆の経路で近似した画素がある"
+        );
+    }
     let expected: Vec<Vec<u8>> = frames
         .iter()
         .map(|data| expected_rgba(data, color_type))
@@ -894,6 +900,39 @@ fn a_table_quantized_from_a_prefix_is_reported() {
     );
 }
 
+/// 透過だけの先頭区間から据えたテーブルでも、後から現れた不透明色を写せる
+///
+/// 和集合が透過標識だけだと写す先の候補が1つも残らない。カラーテーブルは
+/// 2エントリ未満を書けないため、埋め草の黒がその候補になる。
+#[test]
+fn an_opaque_pixel_after_a_fully_transparent_prefix_is_mapped_to_the_padding() {
+    const WIDTH: u32 = 4;
+    const HEIGHT: u32 = 2;
+    let color = ColorType::Rgba8;
+
+    let first = solid(WIDTH, HEIGHT, color, &[0, 0, 0, 0]);
+    let mut second = first.clone();
+    set_pixel(&mut second, WIDTH, color, 1, 1, &[0x10, 0x20, 0x30, 0xFF]);
+
+    let config = Config {
+        color_type: color,
+        max_spool_bytes: 0,
+        ..Config::default()
+    };
+    let (bytes, report) = encode_with(WIDTH, HEIGHT, config, &[first, second]).unwrap();
+    assert_eq!(report.palette, PaletteKind::ExactFromPrefix { colors: 1 });
+    assert_eq!(report.approximated_pixels, 1);
+
+    let decoded = decode_with_gif(&bytes);
+    let screen = &compose(&decoded)[1];
+    let at = ((WIDTH + 1) * 4) as usize;
+    assert_eq!(
+        screen[at..at + 4],
+        [0, 0, 0, 0xFF],
+        "不透明な黒へ写っていない"
+    );
+}
+
 /// 先頭区間から据えたテーブルに無い色が後から現れたら、最近傍へ写す
 #[test]
 fn a_color_appearing_after_the_settlement_is_mapped_to_its_nearest() {
@@ -1099,6 +1138,10 @@ fn more_than_256_colors_go_through_quantization() {
 
     // 257個のビンを255の箱へ割るので、隣り合う2組だけが1つの箱へまとまる
     assert_eq!(report.palette, PaletteKind::Quantized { colors: 255 });
+    assert!(
+        report.approximated_pixels > 0,
+        "量子化したのに近似した画素が数えられていない"
+    );
 }
 
 /// 色豊かな背景の上を1画素が動くフレーム列
@@ -1139,6 +1182,10 @@ fn a_quantized_animation_survives_both_decoders() {
         matches!(report.palette, PaletteKind::Quantized { .. }),
         "{:?}",
         report.palette
+    );
+    assert!(
+        report.approximated_pixels > 0,
+        "量子化したのに近似した画素が数えられていない"
     );
 }
 
