@@ -1795,7 +1795,9 @@ fn blinking_scene(frames: usize, change_at: usize, blink_back_at: usize) -> Vec<
 /// 瞬き (A→B→A) で戻った色は、場面転換で据え直したテーブルにも残る
 ///
 /// 戻ってくるフレームは据え直したときの先読みの窓より後ろにあるので、残差から
-/// この色は得られない。維持したエントリだけがこの色を保てる。
+/// この色は得られない。維持したエントリだけがこの色を保てる。窓が
+/// `BLINK_BACK_AT - CHANGE_AT` フレームまで伸びると、残差からも得られるように
+/// なってこの性質を固定できなくなる。
 #[test]
 fn a_color_that_blinks_back_survives_a_rebuild() {
     const FRAMES: usize = 14;
@@ -1964,14 +1966,23 @@ fn a_widened_rect_keeps_the_table_that_encoded_the_pending_frame() {
         "保留中のフレームの矩形が広がっていない: {widened:?}"
     );
 
-    let screen = &compose(&decode_with_gif(&bytes))[1];
-    for y in 0..4 {
-        for x in 0..4 {
-            assert_eq!(
-                pixel_at(screen, x, y),
-                PAINT,
-                "広げた矩形の中で色がずれている"
-            );
+    // 広げた矩形は廃棄方法が矩形を抜くフレームなので、続くフレームの画面は
+    // 抜いた先の扱いがデコーダで割れる。突き合わせるのはこのフレームだけ
+    let frame_len = (SCENE_WIDTH * SCENE_HEIGHT) as usize * 4;
+    let mut screens = vec![compose(&decode_with_gif(&bytes))[1].clone()];
+    if let Some(raw) = decode_with_ffmpeg(&bytes) {
+        screens.push(raw[frame_len..frame_len * 2].to_vec());
+    }
+
+    for screen in &screens {
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(
+                    pixel_at(screen, x, y),
+                    PAINT,
+                    "広げた矩形の中で色がずれている"
+                );
+            }
         }
     }
 }
