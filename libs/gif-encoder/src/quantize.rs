@@ -34,7 +34,7 @@ impl Moment for u64 {
 
 impl Moment for u128 {
     fn widen(self) -> i128 {
-        self as i128
+        i128::try_from(self).expect("二乗和が符号付きの範囲を超えた")
     }
 }
 
@@ -173,9 +173,6 @@ pub(crate) struct Histogram {
     green: Box<[u64]>,
     blue: Box<[u64]>,
     /// 実値の二乗和
-    ///
-    /// 1画素あたり最大 195,075 積まれるうえ、滞在時間ぶんの重みが掛かるため、
-    /// 他の4面より2桁ほど早く u64 を使い切る。
     squared: Box<[u128]>,
 }
 
@@ -311,8 +308,7 @@ impl Histogram {
 
     /// 箱の中の画素が平均色から離れている量 (二乗誤差の総和)
     ///
-    /// `m2 - (dr^2 + dg^2 + db^2) / wt`。`dr` は積んだ画素数に比例するので、
-    /// その二乗は u64 に収まらない。割る前の分子を i128 で持つ。
+    /// `m2 - (dr^2 + dg^2 + db^2) / wt`。
     fn variance(&self, cube: Cube) -> f64 {
         let weight = volume(cube, &self.weight);
         if weight <= 0 {

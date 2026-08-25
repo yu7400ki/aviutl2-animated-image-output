@@ -85,6 +85,8 @@ pub(crate) struct Palette {
     nearest: Nearest,
     /// 完全一致が無く最近傍へ写した画素数
     approximated: u64,
+    /// 写す先として [`OPAQUE_BLACK`] を足したか
+    black_fallback: bool,
 }
 
 impl Palette {
@@ -129,7 +131,8 @@ impl Palette {
     /// 引く対応はテーブルのエントリそのものから作る。書き出す色がすべて完全一致で
     /// 引けるので、写した後の色を写し直しても最近傍へ落ちない。
     fn new(mut entries: Vec<u32>) -> Self {
-        if entries.iter().all(|&color| color == TRANSPARENT) {
+        let black_fallback = entries.iter().all(|&color| color == TRANSPARENT);
+        if black_fallback {
             entries.push(OPAQUE_BLACK);
         }
 
@@ -157,6 +160,7 @@ impl Palette {
             transparent,
             nearest,
             approximated: 0,
+            black_fallback,
         }
     }
 
@@ -168,6 +172,11 @@ impl Palette {
     /// 完全一致が無く最近傍へ写した画素数
     pub(crate) fn approximated(&self) -> u64 {
         self.approximated
+    }
+
+    /// 非透過色が1つも無く、写す先として黒を足したか
+    pub(crate) fn black_fallback(&self) -> bool {
+        self.black_fallback
     }
 
     /// 添字が指す色
@@ -202,8 +211,10 @@ impl Palette {
             Some(index) => index,
             None => {
                 let color = pack(pixel, bpp);
-                // 標識がここへ落ちるのは透過を表現できないテーブルのときだけで、
-                // その画素は廃棄方法の判定が先に弾く
+                // 標識がここへ落ちるのは透過を表現できないテーブルのときだけ。
+                // 先頭フレームの矩形は論理画面全体なので、素材に透過があれば
+                // 標識は和集合に入る。以降のフレームで現れた標識は、廃棄方法の
+                // 判定が先に弾く
                 debug_assert!(color != TRANSPARENT, "透過標識を色として近似している");
                 self.approximated += 1;
                 self.nearest.index_of(color)

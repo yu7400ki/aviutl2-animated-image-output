@@ -272,6 +272,14 @@ fn round_trip_within(
         .map(|data| expected_rgba(data, color_type))
         .collect();
 
+    // 溜めきれる素材では和集合が全フレームを覆うので、写す先の黒を足すのは
+    // 素材のどこにも不透明な画素が無いときに限る
+    let opaque = expected
+        .iter()
+        .flat_map(|frame| frame.chunks_exact(4))
+        .any(|pixel| pixel[3] != 0);
+    assert_eq!(report.black_fallback, !opaque, "写す先の黒の足し方が違う");
+
     let decoded = decode_with_gif(&bytes);
     assert_eq!(
         (u32::from(decoded.width), u32::from(decoded.height)),
@@ -922,6 +930,7 @@ fn an_opaque_pixel_after_a_fully_transparent_prefix_is_mapped_to_the_padding() {
     let (bytes, report) = encode_with(WIDTH, HEIGHT, config, &[first, second]).unwrap();
     assert_eq!(report.palette, PaletteKind::ExactFromPrefix { colors: 1 });
     assert_eq!(report.approximated_pixels, 1);
+    assert!(report.black_fallback, "写す先の黒を足したことが出ていない");
 
     let decoded = decode_with_gif(&bytes);
     let screen = &compose(&decoded)[1];

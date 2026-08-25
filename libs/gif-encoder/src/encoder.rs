@@ -92,6 +92,12 @@ pub struct Report {
     /// 先頭区間から据えたテーブルに無い色が後から現れたときと、量子化した色へ
     /// 写したときに増える。数えるのは写した画素で、持ち越した画素は数えない。
     pub approximated_pixels: u64,
+    /// 据えたテーブルに非透過色が1つも無く、写す先として黒を足したか
+    ///
+    /// 溜めた区間の画素がすべて透過だったときに起きる。以降のフレームの不透明な
+    /// 画素は色に関わらずこの黒へ写るため、[`Report::approximated_pixels`] が
+    /// 数える回数の大小に関わらず、素材の色は画面に残らない。
+    pub black_fallback: bool,
     /// 閾値未満のアルファを完全透過へ潰した画素数
     pub binarized_pixels: u64,
     /// 遅延を下限で切り上げたか
@@ -266,12 +272,14 @@ impl<W: Write> Encoder<W> {
 
         let (stage, mut parts) = self.split();
         let mut approximated_pixels = 0;
+        let mut black_fallback = false;
         if let Stage::Streaming(streaming) = stage {
             if let Some(pending) = streaming.pending.take() {
                 // 次のフレームが無く、廃棄方法が変えられるキャンバスの続きも無い
                 parts.write_pending(&streaming.palette, pending, DISPOSAL_DO_NOT_DISPOSE)?;
             }
             approximated_pixels = streaming.palette.approximated();
+            black_fallback = streaming.palette.black_fallback();
         }
 
         block::trailer(&mut self.writer)?;
@@ -282,6 +290,7 @@ impl<W: Write> Encoder<W> {
                 .palette_kind
                 .expect("全フレームを投入した時点で色は決まっている"),
             approximated_pixels,
+            black_fallback,
             binarized_pixels: self.binarized_pixels,
             delay_clamped: self.delay_clamped,
             peak_spool_bytes: self.peak_spool_bytes,
