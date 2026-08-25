@@ -93,6 +93,49 @@ impl Canvas {
             .all(|(canvas, pixel)| !is_transparent(pixel) || is_transparent(canvas))
     }
 
+    /// 投入されたフレームを描画後の色の面へ写して `out` へ入れる
+    ///
+    /// 入力が前フレームと変わった画素だけ現在のパレットで写し、変わっていない
+    /// 画素は前の描画後の色を持ち越す。持ち越した画素は画面上の色をそのまま
+    /// 保つため、パレットが変わっても静止した領域は揺れない。
+    ///
+    /// `previous` は直前に投入されたフレームの正規化した入力。先頭フレームでは空。
+    ///
+    /// # Errors
+    /// 写す先がテーブルに無い色があるとき [`Error::TooManyColors`]。
+    pub(crate) fn render(
+        &self,
+        previous: &[u8],
+        frame: &[u8],
+        palette: &Palette,
+        out: &mut Vec<u8>,
+    ) -> Result<(), Error> {
+        let bpp = self.layout.bytes_per_pixel;
+        out.clear();
+        out.reserve(self.layout.frame_len);
+
+        // 先頭フレームには前が無く、持ち越せる色も無い
+        let carried = (!previous.is_empty()).then_some((previous, self.pixels.as_slice()));
+        for (at, pixel) in frame.chunks_exact(bpp).enumerate() {
+            let at = at * bpp;
+            if let Some((previous, drawn)) = carried
+                && previous[at..at + bpp] == *pixel
+            {
+                out.extend_from_slice(&drawn[at..at + bpp]);
+                continue;
+            }
+            // 透過標識は色として写さない。2値透過に中間が無いため、標識のまま
+            // 残して廃棄方法の判定へ渡す
+            if bpp == 4 && is_transparent(pixel) {
+                out.extend_from_slice(pixel);
+                continue;
+            }
+            let index = palette.index_of(pixel, bpp).ok_or(Error::TooManyColors)?;
+            out.extend_from_slice(&palette.color_at(index).to_le_bytes()[..bpp]);
+        }
+        Ok(())
+    }
+
     /// `rect` の添字列を `out` へ追記する
     ///
     /// 透過インデックスを持つテーブルでは、矩形の中でキャンバスと一致する画素を
@@ -350,6 +393,53 @@ mod tests {
 
         assert_eq!(indices[0], transparent);
         assert!(indices[1..].iter().all(|&index| index != transparent));
+    }
+
+    /// 入力が変わっていない画素は、前の描画後の色を持ち越す
+    ///
+    /// 持ち越しはパレットを通らないため、写した先がテーブルに無くても写る。
+    #[test]
+    fn unchanged_pixels_carry_the_color_they_were_drawn_with() {
+        let first = opaque(0x10);
+        let mut second = opaque(0x10);
+        second[0] = 0x7F;
+
+        let palette = palette_of(&[&first, &second], 4);
+        let mut canvas = Canvas::new(layout(ColorType::Rgba8));
+        let mut rendered = Vec::new();
+        canvas.render(&[], &first, &palette, &mut rendered).unwrap();
+        assert_eq!(rendered, first, "先頭フレームが写っていない");
+        drawn(&mut canvas, &rendered);
+
+        canvas
+            .render(&first, &second, &palette, &mut rendered)
+            .unwrap();
+        assert_eq!(rendered, second);
+    }
+
+    /// 透過標識は色として写さず、標識のまま残る
+    ///
+    /// テーブルが透過ラン用に足したスロットは色を持たないため、標識を写す先が
+    /// 無い。残した標識は廃棄方法の判定へ渡る。
+    #[test]
+    fn the_transparent_marker_passes_through_unmapped() {
+        let first = opaque(0x10);
+        let mut second = opaque(0x10);
+        second[..4].fill(0);
+
+        let palette = palette_of(&[&first], 4);
+        assert_eq!(palette.index_of(&[0, 0, 0, 0], 4), None);
+
+        let mut canvas = Canvas::new(layout(ColorType::Rgba8));
+        let mut rendered = Vec::new();
+        canvas.render(&[], &first, &palette, &mut rendered).unwrap();
+        drawn(&mut canvas, &rendered);
+
+        canvas
+            .render(&first, &second, &palette, &mut rendered)
+            .unwrap();
+        assert_eq!(rendered[..4], [0, 0, 0, 0]);
+        assert_eq!(choose_disposal(&canvas, &rendered), None);
     }
 
     /// 全幅でない矩形は行をまたいで切り出される

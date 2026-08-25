@@ -109,11 +109,20 @@ enum Stage {
 }
 
 /// 書き出しの段階が持つ状態
+///
+/// 面が2つに分かれる。[`Self::previous`] は「この画素は変わったか」を決め、
+/// [`Self::canvas`] はデコーダが見ている色を持つ。差分矩形と透過ランは後者で
+/// 求める。量子化を通すと別々の入力色が同じ色へ落ちることがあり、それは
+/// 出力上は未変更だからで、比べる面を分けないとこの一致を見落とす。
 struct Streaming {
     /// 据えたグローバルカラーテーブル
     palette: Palette,
+    /// 直前に投入されたフレームの正規化した入力
+    previous: Vec<u8>,
     /// 描画後の色の面
     canvas: Canvas,
+    /// 投入されたフレームを写した描画後の色
+    rendered: Vec<u8>,
     /// 書き出しを待っているフレーム
     pending: Option<Pending>,
 }
@@ -385,7 +394,9 @@ impl<W: Write> Parts<'_, W> {
 
         let mut streaming = Streaming {
             palette,
+            previous: Vec::new(),
             canvas: Canvas::new(*self.layout),
+            rendered: Vec::new(),
             pending: None,
         };
         self.replay(&frames, &mut streaming)?;
@@ -430,32 +441,43 @@ impl<W: Write> Parts<'_, W> {
     }
 
     /// 保留中のフレームを書き出し、投入されたフレームを保留にする
+    ///
+    /// 矩形も透過ランも、入力ではなく写した後の色の面で求める。
     fn write_frame(
         &mut self,
         streaming: &mut Streaming,
         pixels: &[u8],
         delay: FrameDelay,
     ) -> Result<(), Error> {
+        let Streaming {
+            palette,
+            previous,
+            canvas,
+            rendered,
+            pending,
+        } = streaming;
+        canvas.render(previous, pixels, palette, rendered)?;
+
         // 廃棄方法は保留中のフレームのもので、投入されたフレームが載るキャンバスを
         // 決める。決めてからそのキャンバスで矩形と添字を求める
-        if let Some(pending) = streaming.pending.take() {
-            let disposal = frame::choose_disposal(&streaming.canvas, pixels)
-                .ok_or(Error::UnsupportedTransparency)?;
-            self.write_pending(&streaming.palette, pending, disposal)?;
+        if let Some(pending) = pending.take() {
+            let disposal =
+                frame::choose_disposal(canvas, rendered).ok_or(Error::UnsupportedTransparency)?;
+            self.write_pending(palette, pending, disposal)?;
         }
 
-        let rect = streaming.canvas.rect_of(pixels);
+        let rect = canvas.rect_of(rendered);
         let mut indices = Vec::new();
-        streaming
-            .canvas
-            .append_indices(pixels, rect, &streaming.palette, &mut indices)?;
+        canvas.append_indices(rendered, rect, palette, &mut indices)?;
 
-        streaming.pending = Some(Pending {
+        *pending = Some(Pending {
             rect,
             delay: self.hundredths(delay),
             indices,
         });
-        streaming.canvas.advance(pixels, rect);
+        canvas.advance(rendered, rect);
+        previous.clear();
+        previous.extend_from_slice(pixels);
         Ok(())
     }
 

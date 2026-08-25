@@ -61,6 +61,8 @@ impl ColorTable {
 pub(crate) struct Palette {
     /// 和集合の色から添字を引く対応
     indexed: Indexed,
+    /// 添字順に並べたテーブルの色
+    entries: Vec<u32>,
     /// 書き出すカラーテーブル
     table: ColorTable,
     /// このテーブルの透過インデックス
@@ -94,9 +96,18 @@ impl Palette {
 
         Palette {
             indexed,
+            entries,
             table,
             transparent,
         }
+    }
+
+    /// 添字が指す色
+    ///
+    /// # Panics
+    /// このテーブルに無い添字のとき。
+    pub(crate) fn color_at(&self, index: u8) -> u32 {
+        self.entries[index as usize]
     }
 
     /// 書き出すカラーテーブル
