@@ -9,20 +9,17 @@ const ALPHA_THRESHOLD: u8 = 128;
 /// 完全透過の標識 (`R | G<<8 | B<<16 | A<<24` で詰めた値)
 pub(crate) const TRANSPARENT: u32 = 0;
 
-/// RGBA8の画素列の透過を2値へ正規化し、完全透過へ潰した画素数を返す
+/// RGBA8の画素列の透過を2値へ正規化する
 ///
 /// `pixels` は1画素4バイトが隙間なく並んでいること。
-pub(crate) fn binarize(pixels: &mut [u8]) -> u64 {
-    let mut squashed = 0;
+pub(crate) fn binarize(pixels: &mut [u8]) {
     for pixel in pixels.chunks_exact_mut(4) {
         if pixel[3] < ALPHA_THRESHOLD {
             pixel.fill(0);
-            squashed += 1;
         } else {
             pixel[3] = u8::MAX;
         }
     }
-    squashed
 }
 
 #[cfg(test)]
@@ -37,7 +34,7 @@ mod tests {
             70, 80, 90, 128, // 閾値
             1, 2, 3, 255, // 不透明
         ];
-        assert_eq!(binarize(&mut pixels), 2);
+        binarize(&mut pixels);
         assert_eq!(
             pixels,
             vec![0, 0, 0, 0, 0, 0, 0, 0, 70, 80, 90, 255, 1, 2, 3, 255]
