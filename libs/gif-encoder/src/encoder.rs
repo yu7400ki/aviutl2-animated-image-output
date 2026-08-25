@@ -1,6 +1,6 @@
 //! GIFのストリーミング書き出し
 
-use crate::block::{self, DISPOSAL_DO_NOT_DISPOSE};
+use crate::block::{self, DISPOSAL_DO_NOT_DISPOSE, DISPOSAL_RESTORE_TO_BACKGROUND};
 use crate::error::Error;
 use crate::frame::{Canvas, Screen};
 use crate::layout::{ColorType, Layout};
@@ -513,19 +513,16 @@ impl<W: Write> Parts<'_, W> {
         let delay = self.hundredths(delay);
         match pending.take() {
             None => {
-                let laid = lay_out(canvas.screen(), rendered, palette, indices, delay);
+                let laid = lay_out(canvas.kept(), rendered, palette, indices, delay);
                 canvas.start(rendered);
                 *pending = Some(laid);
             }
             Some(waiting) => {
-                let disposal = DISPOSAL_DO_NOT_DISPOSE;
-                if !canvas.screen().expressible(rendered) {
-                    return Err(Error::UnsupportedTransparency);
-                }
-                let laid = lay_out(canvas.screen(), rendered, palette, indices, delay);
+                let (disposal, laid) =
+                    choose_disposal(canvas, palette, indices, &waiting, rendered, delay)?;
                 let disposed = waiting.rect;
                 self.write_pending(waiting, disposal)?;
-                canvas.advance(disposed, rendered, laid.rect);
+                canvas.advance(disposal, disposed, rendered, laid.rect);
                 *pending = Some(laid);
             }
         }
@@ -555,6 +552,41 @@ impl<W: Write> Parts<'_, W> {
         *self.delay_clamped |= clamped;
         rounded
     }
+}
+
+/// 保留中のフレームの廃棄方法と、投入されたフレームの符号化を決める
+///
+/// 廃棄方法は保留中のフレーム自身のバイト列を変えず、投入されたフレームが載る
+/// 画面だけを変える。「不透明 → 透過」の遷移を含まないフレームはキャンバスを
+/// そのまま残し、含むフレームだけが保留中の矩形を透過へ抜いた画面を使う。
+///
+/// # Errors
+/// どの廃棄方法でも遷移を表現できないとき [`Error::UnsupportedTransparency`]。
+fn choose_disposal(
+    canvas: &mut Canvas,
+    palette: &mut Palette,
+    indices: &mut Vec<u8>,
+    pending: &Pending,
+    rendered: &[u8],
+    delay: u16,
+) -> Result<(u8, Pending), Error> {
+    if canvas.kept().expressible(rendered) {
+        let laid = lay_out(canvas.kept(), rendered, palette, indices, delay);
+        return Ok((DISPOSAL_DO_NOT_DISPOSE, laid));
+    }
+
+    // 抜いた画素を書かずに済ませるには透過インデックスが要る。持たないテーブルは
+    // 抜いた先を色で塗ることしかできず、透過の位置そのものを表現できない
+    if palette.transparent().is_none() {
+        return Err(Error::UnsupportedTransparency);
+    }
+
+    let screen = canvas.cleared(pending.rect);
+    if !screen.expressible(rendered) {
+        return Err(Error::UnsupportedTransparency);
+    }
+    let laid = lay_out(screen, rendered, palette, indices, delay);
+    Ok((DISPOSAL_RESTORE_TO_BACKGROUND, laid))
 }
 
 /// `screen` の上で `frame` を符号化し、書き出しを待つフレームにする

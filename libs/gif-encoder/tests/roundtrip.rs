@@ -271,7 +271,23 @@ fn round_trip_within(
     frames: &[Vec<u8>],
     tolerance: u8,
 ) -> (Vec<u8>, Report) {
-    let (bytes, report) = encode(width, height, color_type, frames, 0).unwrap();
+    let config = Config {
+        color_type,
+        ..Config::default()
+    };
+    round_trip_config(width, height, config, frames, tolerance)
+}
+
+/// 設定を指定して往復させる
+fn round_trip_config(
+    width: u32,
+    height: u32,
+    config: Config,
+    frames: &[Vec<u8>],
+    tolerance: u8,
+) -> (Vec<u8>, Report) {
+    let color_type = config.color_type;
+    let (bytes, report) = encode_with(width, height, config, frames).unwrap();
     if matches!(report.palette, PaletteKind::Exact { .. }) {
         assert_eq!(
             report.approximated_pixels, 0,
@@ -407,6 +423,15 @@ fn rects(bytes: &[u8]) -> Vec<(u16, u16, u16, u16)> {
         .frames
         .iter()
         .map(DecodedFrame::rect)
+        .collect()
+}
+
+/// 各フレームのグラフィック制御拡張が示す廃棄方法
+fn disposals(bytes: &[u8]) -> Vec<gif::DisposalMethod> {
+    decode_with_gif(bytes)
+        .frames
+        .iter()
+        .map(|frame| frame.dispose)
         .collect()
 }
 
@@ -755,22 +780,73 @@ fn frames_that_only_add_paint_survive_both_decoders() {
     round_trip(WIDTH, HEIGHT, color, &frames);
 }
 
-/// 不透明な画素が透過になる遷移は、まだ表現できない
+/// 不透明な画素が透過になる遷移は、保留中の矩形を透過へ抜いて表現する
 ///
 /// 透過インデックスはキャンバスを書き換えないため、キャンバスを残す廃棄方法では
-/// 抜けない。
+/// 抜けない。抜きたい画素が保留中のフレームの矩形の中にあるので、その矩形を
+/// 丸ごと抜く廃棄方法で足りる。
 #[test]
-fn an_opaque_pixel_turning_transparent_is_rejected() {
+fn an_opaque_pixel_turning_transparent_clears_the_pending_rect() {
     const WIDTH: u32 = 4;
     const HEIGHT: u32 = 2;
     let color = ColorType::Rgba8;
 
     let first = solid(WIDTH, HEIGHT, color, &[0x20, 0x40, 0x60, 0xFF]);
     let mut second = first.clone();
-    set_pixel(&mut second, WIDTH, color, 1, 1, &[0, 0, 0, 0]);
+    set_pixel(&mut second, WIDTH, color, 1, 1, &[0x21, 0x41, 0x61, 0xFF]);
+    let mut third = second.clone();
+    set_pixel(&mut third, WIDTH, color, 1, 1, &[0, 0, 0, 0]);
 
+    let (bytes, _) = round_trip(WIDTH, HEIGHT, color, &[first, second, third]);
+    assert_eq!(
+        disposals(&bytes),
+        [
+            gif::DisposalMethod::Keep,
+            gif::DisposalMethod::Background,
+            gif::DisposalMethod::Keep,
+        ]
+    );
+    assert_eq!(rects(&bytes)[1], (1, 1, 1, 1), "抜く矩形が広すぎる");
+}
+
+/// 透過を持たない素材はキャンバスを残したまま流れる
+///
+/// 候補 2 と 3 が立つのは「不透明 → 透過」の遷移を含むフレームだけで、
+/// 不透明な素材の出力は候補が増えても変わらない。
+#[test]
+fn an_opaque_animation_keeps_every_frame() {
+    const WIDTH: u32 = 8;
+    const HEIGHT: u32 = 4;
+    let frames = moving_sprite(WIDTH, HEIGHT, 6);
+
+    let (bytes, _) = round_trip(WIDTH, HEIGHT, ColorType::Rgb8, &frames);
+    assert!(
+        disposals(&bytes)
+            .iter()
+            .all(|&disposal| disposal == gif::DisposalMethod::Keep),
+        "不透明な素材でキャンバスを抜いている"
+    );
+}
+
+/// 透過インデックスを持たないテーブルでは、後から現れた透過画素を弾く
+///
+/// 和集合がちょうど256色を埋めた先頭区間から据えると透過スロットが取れない。
+/// 廃棄方法は画面から画素を抜けるが、抜いた位置を書かずに済ませる添字が無く、
+/// 透過の位置そのものを表現できない。
+#[test]
+fn a_transparent_pixel_without_a_transparent_index_is_rejected() {
+    let color = ColorType::Rgba8;
+    let first: Vec<u8> = (0..256).flat_map(|i| [i as u8, 0, 0, 0xFF]).collect();
+    let mut second = first.clone();
+    set_pixel(&mut second, 16, color, 1, 1, &[0, 0, 0, 0]);
+
+    let config = Config {
+        color_type: color,
+        max_spool_bytes: 0,
+        ..Config::default()
+    };
     assert!(matches!(
-        encode(WIDTH, HEIGHT, color, &[first, second], 0),
+        encode_with(16, 16, config, &[first, second]),
         Err(Error::UnsupportedTransparency)
     ));
 }
@@ -1009,12 +1085,12 @@ fn a_257th_color_after_a_full_prefix_is_mapped_to_its_nearest() {
     assert_eq!(screen[at..at + 4], [0x01, 0x40, 0x80, 0xFF]);
 }
 
-/// 全画素不透明の先頭区間の後に透過画素が現れたら、遷移として弾く
+/// 全画素不透明の先頭区間の後に透過画素が現れても、廃棄方法で表現する
 ///
-/// テーブルには透過ラン用のスロットが載っているため、弾く理由は色ではなく
-/// 「不透明 → 透過」がキャンバスを残す廃棄方法で表現できないこと。
+/// テーブルには透過ラン用のスロットが載っているため、標識を書く先はある。
+/// 先頭フレームの矩形は論理画面全体なので、それを抜けば遷移が表現できる。
 #[test]
-fn a_transparent_pixel_after_an_opaque_prefix_is_a_transition() {
+fn a_transparent_pixel_after_an_opaque_prefix_clears_the_screen() {
     const WIDTH: u32 = 4;
     const HEIGHT: u32 = 2;
     let color = ColorType::Rgba8;
@@ -1028,17 +1104,19 @@ fn a_transparent_pixel_after_an_opaque_prefix_is_a_transition() {
         max_spool_bytes: 0,
         ..Config::default()
     };
-    assert!(matches!(
-        encode_with(WIDTH, HEIGHT, config, &[first, second]),
-        Err(Error::UnsupportedTransparency)
-    ));
+    let (bytes, report) = round_trip_config(WIDTH, HEIGHT, config, &[first, second], 0);
+    assert_eq!(report.palette, PaletteKind::ExactFromPrefix { colors: 1 });
+    assert_eq!(
+        disposals(&bytes),
+        [gif::DisposalMethod::Background, gif::DisposalMethod::Keep]
+    );
 }
 
 /// 溜めた区間の最後のフレームは、続きを見るまで書き出さない
 ///
 /// 上限で決着した直後のフレームが「不透明 → 透過」の遷移を持つとき、その判定は
 /// 保留したままの最後のフレームに対して行われる。区間の中で書き出してしまうと
-/// 遷移を判定する相手が無くなり、表現できないことに気づけない。
+/// 遷移を判定する相手が無くなり、廃棄方法を選べない。
 #[test]
 fn the_last_spooled_frame_is_carried_into_streaming() {
     const WIDTH: u32 = 4;
@@ -1056,10 +1134,12 @@ fn the_last_spooled_frame_is_carried_into_streaming() {
         max_spool_bytes: 0,
         ..Config::default()
     };
-    assert!(matches!(
-        encode_with(WIDTH, HEIGHT, config, &[first, second]),
-        Err(Error::UnsupportedTransparency)
-    ));
+    let (bytes, _) = round_trip_config(WIDTH, HEIGHT, config, &[first, second], 0);
+    assert_eq!(
+        disposals(&bytes),
+        [gif::DisposalMethod::Background, gif::DisposalMethod::Keep],
+        "溜めた区間の最後のフレームが廃棄方法を選べていない"
+    );
 }
 
 /// 設定した再生回数がループ数の欄へ落ちる

@@ -26,6 +26,8 @@ const NETSCAPE: &[u8; 11] = b"NETSCAPE2.0";
 const NETSCAPE_LOOP: u8 = 1;
 /// 廃棄方法「表示した画像をそのまま残す」
 pub(crate) const DISPOSAL_DO_NOT_DISPOSE: u8 = 1;
+/// 廃棄方法「矩形を背景で塗り直す」
+pub(crate) const DISPOSAL_RESTORE_TO_BACKGROUND: u8 = 2;
 
 /// ヘッダを書く
 pub(crate) fn header<W: Write>(writer: &mut W) -> io::Result<()> {

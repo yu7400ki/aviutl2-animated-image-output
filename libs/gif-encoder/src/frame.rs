@@ -1,5 +1,6 @@
 //! 差分矩形・廃棄方法・透過ランの決定
 
+use crate::block::{DISPOSAL_DO_NOT_DISPOSE, DISPOSAL_RESTORE_TO_BACKGROUND};
 use crate::layout::{ColorType, Layout};
 use crate::normalize::TRANSPARENT;
 use crate::table::Palette;
@@ -126,6 +127,10 @@ pub(crate) struct Canvas {
     before: Vec<u8>,
     /// 保留中のフレームを描いた後の画面
     after: Vec<u8>,
+    /// 保留中のフレームの矩形を透過へ抜いた画面
+    ///
+    /// 抜く矩形はフレームごとに変わるため、[`Canvas::cleared`] が組み立て直す。
+    cleared: Vec<u8>,
     /// 先頭フレームを描いたか
     drawn: bool,
 }
@@ -143,16 +148,38 @@ impl Canvas {
         Canvas {
             after: vec![0; layout.frame_len],
             before,
+            cleared: Vec::new(),
             layout,
             drawn: false,
         }
     }
 
-    /// 廃棄方法を適用した後、投入されたフレームが載る画面
-    pub(crate) fn screen(&self) -> Screen<'_> {
+    /// 保留中のフレームをそのまま残した画面
+    pub(crate) fn kept(&self) -> Screen<'_> {
+        self.screen(&self.after)
+    }
+
+    /// 保留中のフレームの矩形を透過へ抜いた画面
+    ///
+    /// Restore to Background は仕様上「背景色で塗り直す」だが、現代のデコーダは
+    /// 例外なく透過で抜く。この事実上の挙動を前提に画面を模擬する。
+    pub(crate) fn cleared(&mut self, rect: Rect) -> Screen<'_> {
+        debug_assert_eq!(
+            self.layout.color_type,
+            ColorType::Rgba8,
+            "透過を持てない面を抜こうとしている"
+        );
+        self.cleared.clear();
+        self.cleared.extend_from_slice(&self.after);
+        fill_rect(&mut self.cleared, rect, &self.layout);
+        self.screen(&self.cleared)
+    }
+
+    /// 論理画面と同じ大きさの画素列を画面として見る
+    fn screen<'a>(&'a self, pixels: &'a [u8]) -> Screen<'a> {
         Screen {
             layout: &self.layout,
-            pixels: self.drawn.then_some(self.after.as_slice()),
+            pixels: self.drawn.then_some(pixels),
         }
     }
 
@@ -203,14 +230,22 @@ impl Canvas {
         self.drawn = true;
     }
 
-    /// 保留中のフレームを廃棄し、投入されたフレームで進める
+    /// 保留中のフレームを `disposal` で廃棄し、投入されたフレームで進める
     ///
     /// `disposed` は保留中のフレームの矩形、`rect` は投入されたフレームの矩形。
-    /// 2面はそれぞれの矩形の中でしか変わらないため、書き換えるのは中だけで足りる。
-    pub(crate) fn advance(&mut self, disposed: Rect, frame: &[u8], rect: Rect) {
+    /// 2面が変わるのはこの2つの矩形の中だけなので、書き換えるのも中だけで足りる。
+    pub(crate) fn advance(&mut self, disposal: u8, disposed: Rect, frame: &[u8], rect: Rect) {
         // 描いた後の面を潰す前に、戻す先を廃棄後の画面へ進める
         if !self.before.is_empty() {
-            copy_rect(&mut self.before, &self.after, disposed, &self.layout);
+            match disposal {
+                DISPOSAL_RESTORE_TO_BACKGROUND => {
+                    fill_rect(&mut self.before, disposed, &self.layout)
+                }
+                _ => copy_rect(&mut self.before, &self.after, disposed, &self.layout),
+            }
+        }
+        if disposal != DISPOSAL_DO_NOT_DISPOSE {
+            copy_rect(&mut self.after, frame, disposed, &self.layout);
         }
         copy_rect(&mut self.after, frame, rect, &self.layout);
     }
@@ -218,12 +253,25 @@ impl Canvas {
 
 /// `rect` の中だけを `from` から `to` へ写す
 fn copy_rect(to: &mut [u8], from: &[u8], rect: Rect, layout: &Layout) {
+    for_each_row(rect, layout, |at, row_len| {
+        to[at..at + row_len].copy_from_slice(&from[at..at + row_len])
+    });
+}
+
+/// `rect` の中だけを完全透過の標識で埋める
+fn fill_rect(plane: &mut [u8], rect: Rect, layout: &Layout) {
+    for_each_row(rect, layout, |at, row_len| {
+        plane[at..at + row_len].fill(0);
+    });
+}
+
+/// `rect` が覆う各行の先頭とバイト数を渡す
+fn for_each_row(rect: Rect, layout: &Layout, mut row: impl FnMut(usize, usize)) {
     let stride = layout.stride;
     let row_len = rect.width as usize * layout.bytes_per_pixel;
     let head = rect.y as usize * stride + rect.x as usize * layout.bytes_per_pixel;
     for y in 0..rect.height as usize {
-        let at = head + y * stride;
-        to[at..at + row_len].copy_from_slice(&from[at..at + row_len]);
+        row(head + y * stride, row_len);
     }
 }
 
@@ -256,15 +304,15 @@ mod tests {
 
     /// 先頭フレームを描き、その矩形を返す
     fn start(canvas: &mut Canvas, frame: &[u8]) -> Rect {
-        let rect = canvas.screen().rect_of(frame);
+        let rect = canvas.kept().rect_of(frame);
         canvas.start(frame);
         rect
     }
 
     /// 保留中のフレームをそのまま残して `frame` を描き、その矩形を返す
     fn draw(canvas: &mut Canvas, pending: Rect, frame: &[u8]) -> Rect {
-        let rect = canvas.screen().rect_of(frame);
-        canvas.advance(pending, frame, rect);
+        let rect = canvas.kept().rect_of(frame);
+        canvas.advance(DISPOSAL_DO_NOT_DISPOSE, pending, frame, rect);
         rect
     }
 
@@ -272,7 +320,7 @@ mod tests {
     fn the_first_frame_covers_the_logical_screen() {
         let canvas = Canvas::new(layout(ColorType::Rgba8));
         assert_eq!(
-            canvas.screen().rect_of(&opaque(0x10)),
+            canvas.kept().rect_of(&opaque(0x10)),
             layout(ColorType::Rgba8).whole()
         );
     }
@@ -282,7 +330,7 @@ mod tests {
     fn an_identical_frame_becomes_a_unit_rect() {
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
         start(&mut canvas, &opaque(0x10));
-        assert_eq!(canvas.screen().rect_of(&opaque(0x10)), UNCHANGED);
+        assert_eq!(canvas.kept().rect_of(&opaque(0x10)), UNCHANGED);
     }
 
     /// キャンバスは矩形の中だけを書き換え、外は投入されたフレームと一致したまま
@@ -333,7 +381,7 @@ mod tests {
 
         let mut next = opaque(0x10);
         next[16..20].fill(0);
-        assert!(!canvas.screen().expressible(&next));
+        assert!(!canvas.kept().expressible(&next));
     }
 
     /// 透過のまま留まる画素と、透過から不透明になる画素は表現できる
@@ -346,7 +394,7 @@ mod tests {
 
         let mut next = first.clone();
         next[16..20].copy_from_slice(&[1, 2, 3, 0xFF]);
-        assert!(canvas.screen().expressible(&next));
+        assert!(canvas.kept().expressible(&next));
     }
 
     /// RGB8の入力には透過が存在しないため、遷移の検査は要らない
@@ -357,7 +405,7 @@ mod tests {
         start(&mut canvas, &frame);
 
         let zeros = vec![0u8; frame.len()];
-        assert!(canvas.screen().expressible(&zeros));
+        assert!(canvas.kept().expressible(&zeros));
     }
 
     /// 矩形の中で画面と一致する画素は透過インデックスになる
@@ -373,12 +421,12 @@ mod tests {
 
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
         start(&mut canvas, &first);
-        let rect = canvas.screen().rect_of(&next);
+        let rect = canvas.kept().rect_of(&next);
         assert_eq!(rect, layout(ColorType::Rgba8).whole(), "矩形が全画面でない");
 
         let mut indices = Vec::new();
         canvas
-            .screen()
+            .kept()
             .append_indices(&next, rect, &mut palette, &mut indices);
         let last = indices.len() - 1;
         assert_ne!(indices[0], transparent, "変わった画素まで潰れている");
@@ -397,10 +445,10 @@ mod tests {
         let transparent = palette.transparent().expect("透過インデックスが無い");
 
         let canvas = Canvas::new(layout(ColorType::Rgba8));
-        let rect = canvas.screen().rect_of(&frame);
+        let rect = canvas.kept().rect_of(&frame);
         let mut indices = Vec::new();
         canvas
-            .screen()
+            .kept()
             .append_indices(&frame, rect, &mut palette, &mut indices);
 
         assert!(
@@ -424,7 +472,7 @@ mod tests {
 
         let mut indices = Vec::new();
         canvas
-            .screen()
+            .kept()
             .append_indices(&frame, UNCHANGED, &mut palette, &mut indices);
         assert_eq!(indices, [0]);
     }
@@ -439,10 +487,10 @@ mod tests {
         let transparent = palette.transparent().expect("透過インデックスが無い");
 
         let canvas = Canvas::new(layout(ColorType::Rgba8));
-        let rect = canvas.screen().rect_of(&first);
+        let rect = canvas.kept().rect_of(&first);
         let mut indices = Vec::new();
         canvas
-            .screen()
+            .kept()
             .append_indices(&first, rect, &mut palette, &mut indices);
 
         assert_eq!(indices[0], transparent);
@@ -487,7 +535,7 @@ mod tests {
 
         canvas.render(&first, &second, &mut palette, &mut rendered);
         assert_eq!(rendered[..4], [0, 0, 0, 0]);
-        assert!(!canvas.screen().expressible(&rendered));
+        assert!(!canvas.kept().expressible(&rendered));
     }
 
     /// 全幅でない矩形は行をまたいで切り出される
@@ -505,7 +553,7 @@ mod tests {
         };
         let mut indices = Vec::new();
         canvas
-            .screen()
+            .kept()
             .append_indices(&frame, rect, &mut palette, &mut indices);
 
         let expected: Vec<u8> = [1u8, 2, 5, 6]
