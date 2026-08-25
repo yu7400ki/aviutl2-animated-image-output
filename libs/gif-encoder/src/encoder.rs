@@ -6,7 +6,7 @@ use crate::frame::{self, Canvas};
 use crate::layout::{ColorType, Layout};
 use crate::normalize;
 use crate::spool::{Spool, Spooled};
-use crate::table::{Coverage, Palette};
+use crate::table::Palette;
 use anim_core::{FrameDelay, Rect, paste};
 use std::borrow::Cow;
 use std::io::Write;
@@ -118,10 +118,6 @@ struct Streaming {
     canvas: Canvas,
     /// 書き出しを待っているフレーム
     pending: Option<Pending>,
-    /// 先頭区間から据えたテーブルが以降のフレームの色を覆っているか見る表
-    ///
-    /// 全フレームを見て据えた場合は覆っていることが分かっているため `None`。
-    coverage: Option<Coverage>,
 }
 
 /// GIFのエンコーダ
@@ -368,7 +364,8 @@ impl<W: Write> Parts<'_, W> {
     /// 色を決めてヘッダからカラーテーブルまでを書き、溜めたフレームを流す
     ///
     /// `from_prefix` は溜めきれずに決着したことを表す。据えた色は溜めた区間の
-    /// ものでしかないため、以降のフレームの色を覆っているとは限らない。
+    /// ものでしかないため、以降のフレームの色を覆っているとは限らない。覆って
+    /// いないことは、その色を写す時点で分かる。
     fn commit(&mut self, spool: &mut Spool, from_prefix: bool) -> Result<Streaming, Error> {
         let (frames, colors) = spool.drain();
         if colors.exceeded() {
@@ -394,14 +391,8 @@ impl<W: Write> Parts<'_, W> {
             palette,
             canvas: Canvas::new(*self.layout),
             pending: None,
-            coverage: None,
         };
         self.replay(&frames, &mut streaming)?;
-
-        // 溜めた区間の色は和集合そのもので、覆っているか見る必要があるのは以降だけ
-        if from_prefix {
-            streaming.coverage = Some(Coverage::of(&streaming.palette));
-        }
         Ok(streaming)
     }
 
@@ -449,13 +440,6 @@ impl<W: Write> Parts<'_, W> {
         pixels: &[u8],
         delay: FrameDelay,
     ) -> Result<(), Error> {
-        // 添字を引けない色が混じっていれば、矩形も廃棄方法も意味を持たない
-        if let Some(coverage) = &mut streaming.coverage
-            && !coverage.covers(pixels, self.layout.bytes_per_pixel)
-        {
-            return Err(Error::TooManyColors);
-        }
-
         // 廃棄方法は保留中のフレームのもので、投入されたフレームが載るキャンバスを
         // 決める。決めてからそのキャンバスで矩形と添字を求める
         if let Some(pending) = streaming.pending.take() {
@@ -468,7 +452,7 @@ impl<W: Write> Parts<'_, W> {
         let mut indices = Vec::new();
         streaming
             .canvas
-            .append_indices(pixels, rect, &streaming.palette, &mut indices);
+            .append_indices(pixels, rect, &streaming.palette, &mut indices)?;
 
         streaming.pending = Some(Pending {
             rect,

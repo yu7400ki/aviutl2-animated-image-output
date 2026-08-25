@@ -847,6 +847,57 @@ fn a_color_appearing_after_the_settlement_is_rejected() {
     ));
 }
 
+/// 先頭区間が上限いっぱいの色で、257色目が後から現れたら弾く
+///
+/// 溜めた区間の和集合が上限を埋めていると透過スロットが取れず、矩形の中の
+/// 未変更画素も添字を引く。潰されない画素で載っていない色に当たる経路になる。
+#[test]
+fn a_257th_color_after_a_full_prefix_is_rejected() {
+    const WIDTH: u32 = 16;
+    const HEIGHT: u32 = 16;
+    let color = ColorType::Rgb8;
+
+    let first: Vec<u8> = (0..WIDTH * HEIGHT)
+        .flat_map(|i| [i as u8, 0x40, 0x80])
+        .collect();
+    let mut second = first.clone();
+    set_pixel(&mut second, WIDTH, color, 3, 2, &[0x00, 0x41, 0x80]);
+
+    let config = Config {
+        max_spool_bytes: 0,
+        ..Config::default()
+    };
+    assert!(matches!(
+        encode_with(WIDTH, HEIGHT, config, &[first, second]),
+        Err(Error::TooManyColors)
+    ));
+}
+
+/// 全画素不透明の先頭区間の後に透過画素が現れたら、遷移として弾く
+///
+/// テーブルには透過ラン用のスロットが載っているため、弾く理由は色ではなく
+/// 「不透明 → 透過」がキャンバスを残す廃棄方法で表現できないこと。
+#[test]
+fn a_transparent_pixel_after_an_opaque_prefix_is_a_transition() {
+    const WIDTH: u32 = 4;
+    const HEIGHT: u32 = 2;
+    let color = ColorType::Rgba8;
+
+    let first = solid(WIDTH, HEIGHT, color, &[0x20, 0x40, 0x60, 0xFF]);
+    let mut second = first.clone();
+    set_pixel(&mut second, WIDTH, color, 1, 1, &[0, 0, 0, 0]);
+
+    let config = Config {
+        color_type: color,
+        max_spool_bytes: 0,
+        ..Config::default()
+    };
+    assert!(matches!(
+        encode_with(WIDTH, HEIGHT, config, &[first, second]),
+        Err(Error::UnsupportedTransparency)
+    ));
+}
+
 /// 溜めた区間の最後のフレームは、続きを見るまで書き出さない
 ///
 /// 上限で決着した直後のフレームが「不透明 → 透過」の遷移を持つとき、その判定は
