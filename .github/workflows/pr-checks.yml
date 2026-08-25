@@ -54,8 +54,14 @@ jobs:
           choco install nasm -y
           echo "C:\Program Files\NASM" >> $GITHUB_PATH
 
+      - name: Install FFmpeg
+        run: choco install ffmpeg -y
+
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Check Build
         run: cargo build --locked
