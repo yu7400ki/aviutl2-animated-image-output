@@ -739,8 +739,24 @@ fn frames_beyond_the_spool_limit_survive_both_decoders() {
         let (bytes, report) = encode_with(WIDTH, HEIGHT, config, &frames).unwrap();
         let decoded = decode_with_gif(&bytes);
 
+        // 小さい上限では溜めきれず、先頭区間の色で決着する
+        let settled_early = matches!(report.palette, PaletteKind::ExactFromPrefix { .. });
+        assert_eq!(
+            settled_early,
+            limit < DEFAULT_MAX_SPOOL_BYTES,
+            "上限 {limit} の決着の仕方が違う: {:?}",
+            report.palette
+        );
+
         assert_eq!(decoded.frames.len(), frames.len(), "上限 {limit}");
         assert_eq!(compose(&decoded), composed, "上限 {limit} の合成結果が違う");
+        for (index, frame) in decoded.frames.iter().enumerate() {
+            assert_eq!(
+                frame.delay,
+                index as u16 + 2,
+                "上限 {limit} の {index} 番目"
+            );
+        }
         assert!(
             report.peak_spool_bytes >= (WIDTH * HEIGHT) as usize * 3,
             "上限 {limit} で先頭フレームが溜まっていない"
