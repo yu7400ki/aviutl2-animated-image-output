@@ -20,6 +20,105 @@ fn at(r: usize, g: usize, b: usize) -> usize {
     (r * SIDE + g) * SIDE + b
 }
 
+/// 累積モーメントに積める値
+trait Moment: Copy + Default + std::ops::AddAssign {
+    /// 包除の引き算に使う符号付きの値
+    fn widen(self) -> i128;
+}
+
+impl Moment for u64 {
+    fn widen(self) -> i128 {
+        i128::from(self)
+    }
+}
+
+impl Moment for u128 {
+    fn widen(self) -> i128 {
+        self as i128
+    }
+}
+
+/// ビンごとの値を3次元の累積和へ置き換える
+fn accumulate<T: Moment>(values: &mut [T]) {
+    let mut area = [T::default(); SIDE];
+    for r in 1..SIDE {
+        area.fill(T::default());
+        for g in 1..SIDE {
+            let mut line = T::default();
+            for b in 1..SIDE {
+                line += values[at(r, g, b)];
+                area[b] += line;
+                let mut cell = values[at(r - 1, g, b)];
+                cell += area[b];
+                values[at(r, g, b)] = cell;
+            }
+        }
+    }
+}
+
+/// 箱の中のモーメントの総和
+fn volume<T: Moment>(cube: Cube, moment: &[T]) -> i128 {
+    let value = |r: usize, g: usize, b: usize| moment[at(r, g, b)].widen();
+    value(cube.r1, cube.g1, cube.b1)
+        - value(cube.r1, cube.g1, cube.b0)
+        - value(cube.r1, cube.g0, cube.b1)
+        + value(cube.r1, cube.g0, cube.b0)
+        - value(cube.r0, cube.g1, cube.b1)
+        + value(cube.r0, cube.g1, cube.b0)
+        + value(cube.r0, cube.g0, cube.b1)
+        - value(cube.r0, cube.g0, cube.b0)
+}
+
+/// 軸を切った下側のモーメントのうち、切る位置に依らない部分
+fn bottom<T: Moment>(cube: Cube, axis: Axis, moment: &[T]) -> i128 {
+    let value = |r: usize, g: usize, b: usize| moment[at(r, g, b)].widen();
+    match axis {
+        Axis::Red => {
+            -value(cube.r0, cube.g1, cube.b1)
+                + value(cube.r0, cube.g1, cube.b0)
+                + value(cube.r0, cube.g0, cube.b1)
+                - value(cube.r0, cube.g0, cube.b0)
+        }
+        Axis::Green => {
+            -value(cube.r1, cube.g0, cube.b1)
+                + value(cube.r1, cube.g0, cube.b0)
+                + value(cube.r0, cube.g0, cube.b1)
+                - value(cube.r0, cube.g0, cube.b0)
+        }
+        Axis::Blue => {
+            -value(cube.r1, cube.g1, cube.b0)
+                + value(cube.r1, cube.g0, cube.b0)
+                + value(cube.r0, cube.g1, cube.b0)
+                - value(cube.r0, cube.g0, cube.b0)
+        }
+    }
+}
+
+/// 軸を `position` で切った下側のモーメントのうち、位置に依る部分
+fn top<T: Moment>(cube: Cube, axis: Axis, position: usize, moment: &[T]) -> i128 {
+    let value = |r: usize, g: usize, b: usize| moment[at(r, g, b)].widen();
+    match axis {
+        Axis::Red => {
+            value(position, cube.g1, cube.b1)
+                - value(position, cube.g1, cube.b0)
+                - value(position, cube.g0, cube.b1)
+                + value(position, cube.g0, cube.b0)
+        }
+        Axis::Green => {
+            value(cube.r1, position, cube.b1)
+                - value(cube.r1, position, cube.b0)
+                - value(cube.r0, position, cube.b1)
+                + value(cube.r0, position, cube.b0)
+        }
+        Axis::Blue => {
+            value(cube.r1, cube.g1, position)
+                - value(cube.r1, cube.g0, position)
+                - value(cube.r0, cube.g1, position)
+                + value(cube.r0, cube.g0, position)
+        }
+    }
+}
+
 /// 色が落ちるビンの添字
 fn bin_of(color: u32) -> usize {
     let [r, g, b, _] = color.to_le_bytes();
@@ -73,7 +172,11 @@ pub(crate) struct Histogram {
     red: Box<[u64]>,
     green: Box<[u64]>,
     blue: Box<[u64]>,
-    squared: Box<[u64]>,
+    /// 実値の二乗和
+    ///
+    /// 1画素あたり最大 195,075 積まれるうえ、滞在時間ぶんの重みが掛かるため、
+    /// 他の4面より2桁ほど早く u64 を使い切る。
+    squared: Box<[u128]>,
 }
 
 impl Histogram {
@@ -85,7 +188,7 @@ impl Histogram {
             red: zeros(),
             green: zeros(),
             blue: zeros(),
-            squared: zeros(),
+            squared: vec![0u128; CELLS].into_boxed_slice(),
         }
     }
 
@@ -127,7 +230,7 @@ impl Histogram {
         self.red[cell] += count * r;
         self.green[cell] += count * g;
         self.blue[cell] += count * b;
-        self.squared[cell] += count * (r * r + g * g + b * b);
+        self.squared[cell] += u128::from(count) * u128::from(r * r + g * g + b * b);
     }
 
     /// 色が落ちるビンに積まれた画素数
@@ -160,7 +263,7 @@ impl Histogram {
             b0: 0,
             b1: BINS,
         };
-        let mut variances = vec![0i128; target];
+        let mut variances = vec![0.0f64; target];
         let mut created = 1;
         let mut next = 0;
 
@@ -175,7 +278,7 @@ impl Histogram {
                 created += 1;
             } else {
                 // 割れなかった箱は二度と選ばない
-                variances[next] = 0;
+                variances[next] = 0.0;
             }
 
             let mut best = variances[0];
@@ -186,7 +289,7 @@ impl Histogram {
                     next = index;
                 }
             }
-            if best <= 0 {
+            if best <= 0.0 {
                 break;
             }
         }
@@ -197,113 +300,40 @@ impl Histogram {
             .collect()
     }
 
-    /// ビンごとの値を3次元の累積和へ置き換える
+    /// 5つの面をそれぞれ3次元の累積和へ置き換える
     fn accumulate(&mut self) {
-        let mut area = vec![0u64; SIDE];
-        for values in [
-            &mut self.weight,
-            &mut self.red,
-            &mut self.green,
-            &mut self.blue,
-            &mut self.squared,
-        ] {
-            for r in 1..SIDE {
-                area.fill(0);
-                for g in 1..SIDE {
-                    let mut line = 0u64;
-                    for b in 1..SIDE {
-                        line += values[at(r, g, b)];
-                        area[b] += line;
-                        values[at(r, g, b)] = values[at(r - 1, g, b)] + area[b];
-                    }
-                }
-            }
-        }
+        accumulate(&mut self.weight);
+        accumulate(&mut self.red);
+        accumulate(&mut self.green);
+        accumulate(&mut self.blue);
+        accumulate(&mut self.squared);
     }
 
-    /// 箱の中のモーメントの総和
-    fn volume(&self, cube: Cube, moment: &[u64]) -> i128 {
-        let value = |r: usize, g: usize, b: usize| i128::from(moment[at(r, g, b)]);
-        value(cube.r1, cube.g1, cube.b1)
-            - value(cube.r1, cube.g1, cube.b0)
-            - value(cube.r1, cube.g0, cube.b1)
-            + value(cube.r1, cube.g0, cube.b0)
-            - value(cube.r0, cube.g1, cube.b1)
-            + value(cube.r0, cube.g1, cube.b0)
-            + value(cube.r0, cube.g0, cube.b1)
-            - value(cube.r0, cube.g0, cube.b0)
-    }
-
-    /// 軸を切った下側のモーメントのうち、切る位置に依らない部分
-    fn bottom(&self, cube: Cube, axis: Axis, moment: &[u64]) -> i128 {
-        let value = |r: usize, g: usize, b: usize| i128::from(moment[at(r, g, b)]);
-        match axis {
-            Axis::Red => {
-                -value(cube.r0, cube.g1, cube.b1)
-                    + value(cube.r0, cube.g1, cube.b0)
-                    + value(cube.r0, cube.g0, cube.b1)
-                    - value(cube.r0, cube.g0, cube.b0)
-            }
-            Axis::Green => {
-                -value(cube.r1, cube.g0, cube.b1)
-                    + value(cube.r1, cube.g0, cube.b0)
-                    + value(cube.r0, cube.g0, cube.b1)
-                    - value(cube.r0, cube.g0, cube.b0)
-            }
-            Axis::Blue => {
-                -value(cube.r1, cube.g1, cube.b0)
-                    + value(cube.r1, cube.g0, cube.b0)
-                    + value(cube.r0, cube.g1, cube.b0)
-                    - value(cube.r0, cube.g0, cube.b0)
-            }
-        }
-    }
-
-    /// 軸を `position` で切った下側のモーメントのうち、位置に依る部分
-    fn top(&self, cube: Cube, axis: Axis, position: usize, moment: &[u64]) -> i128 {
-        let value = |r: usize, g: usize, b: usize| i128::from(moment[at(r, g, b)]);
-        match axis {
-            Axis::Red => {
-                value(position, cube.g1, cube.b1)
-                    - value(position, cube.g1, cube.b0)
-                    - value(position, cube.g0, cube.b1)
-                    + value(position, cube.g0, cube.b0)
-            }
-            Axis::Green => {
-                value(cube.r1, position, cube.b1)
-                    - value(cube.r1, position, cube.b0)
-                    - value(cube.r0, position, cube.b1)
-                    + value(cube.r0, position, cube.b0)
-            }
-            Axis::Blue => {
-                value(cube.r1, cube.g1, position)
-                    - value(cube.r1, cube.g0, position)
-                    - value(cube.r0, cube.g1, position)
-                    + value(cube.r0, cube.g0, position)
-            }
-        }
-    }
-
-    /// 箱の分散
+    /// 箱の中の画素が平均色から離れている量 (二乗誤差の総和)
     ///
-    /// `m2 * wt - (dr^2 + dg^2 + db^2)`。`dr` が画素数に比例するため、この式は
-    /// u64 では 1920x1080 の8フレームほどで溢れる。評価だけ i128 で行う。
-    fn variance(&self, cube: Cube) -> i128 {
-        let red = self.volume(cube, &self.red);
-        let green = self.volume(cube, &self.green);
-        let blue = self.volume(cube, &self.blue);
-        let weight = self.volume(cube, &self.weight);
-        self.volume(cube, &self.squared) * weight - (red * red + green * green + blue * blue)
+    /// `m2 - (dr^2 + dg^2 + db^2) / wt`。`dr` は積んだ画素数に比例するので、
+    /// その二乗は u64 に収まらない。割る前の分子を i128 で持つ。
+    fn variance(&self, cube: Cube) -> f64 {
+        let weight = volume(cube, &self.weight);
+        if weight <= 0 {
+            return 0.0;
+        }
+
+        let red = volume(cube, &self.red);
+        let green = volume(cube, &self.green);
+        let blue = volume(cube, &self.blue);
+        let deviation = red * red + green * green + blue * blue;
+        volume(cube, &self.squared) as f64 - deviation as f64 / weight as f64
     }
 
     /// もう一度割る値打ち
     ///
     /// ビンが1つしかない箱はどの軸でも切れないため、分散を見るまでもなく0。
-    fn split_gain(&self, cube: Cube) -> i128 {
+    fn split_gain(&self, cube: Cube) -> f64 {
         if cube.bins() > 1 {
             self.variance(cube)
         } else {
-            0
+            0.0
         }
     }
 
@@ -318,18 +348,18 @@ impl Histogram {
         range: (usize, usize),
         whole: Whole,
     ) -> (Option<usize>, f64) {
-        let base_red = self.bottom(cube, axis, &self.red);
-        let base_green = self.bottom(cube, axis, &self.green);
-        let base_blue = self.bottom(cube, axis, &self.blue);
-        let base_weight = self.bottom(cube, axis, &self.weight);
+        let base_red = bottom(cube, axis, &self.red);
+        let base_green = bottom(cube, axis, &self.green);
+        let base_blue = bottom(cube, axis, &self.blue);
+        let base_weight = bottom(cube, axis, &self.weight);
 
         let mut cut = None;
         let mut best = 0.0f64;
         for position in range.0..range.1 {
-            let red = base_red + self.top(cube, axis, position, &self.red);
-            let green = base_green + self.top(cube, axis, position, &self.green);
-            let blue = base_blue + self.top(cube, axis, position, &self.blue);
-            let weight = base_weight + self.top(cube, axis, position, &self.weight);
+            let red = base_red + top(cube, axis, position, &self.red);
+            let green = base_green + top(cube, axis, position, &self.green);
+            let blue = base_blue + top(cube, axis, position, &self.blue);
+            let weight = base_weight + top(cube, axis, position, &self.weight);
             if weight == 0 {
                 continue;
             }
@@ -354,10 +384,10 @@ impl Histogram {
     /// どの軸でも切れなければ偽を返し、`cube` と `rest` は変えない。
     fn cut(&self, cube: &mut Cube, rest: &mut Cube) -> bool {
         let whole = Whole {
-            red: self.volume(*cube, &self.red),
-            green: self.volume(*cube, &self.green),
-            blue: self.volume(*cube, &self.blue),
-            weight: self.volume(*cube, &self.weight),
+            red: volume(*cube, &self.red),
+            green: volume(*cube, &self.green),
+            blue: volume(*cube, &self.blue),
+            weight: volume(*cube, &self.weight),
         };
 
         let candidates = [
@@ -410,13 +440,13 @@ impl Histogram {
 
     /// 箱の中の画素の平均色。1画素も入っていない箱は `None`
     fn average(&self, cube: Cube) -> Option<u32> {
-        let weight = self.volume(cube, &self.weight);
+        let weight = volume(cube, &self.weight);
         if weight <= 0 {
             return None;
         }
 
         let mean = |moment: &[u64]| {
-            let sum = self.volume(cube, moment);
+            let sum = volume(cube, moment);
             ((sum * 2 + weight) / (weight * 2)) as u8
         };
         Some(u32::from_le_bytes([
@@ -430,9 +460,8 @@ impl Histogram {
 
 /// 最近傍で写す先の添字を、ビン単位で覚える表
 ///
-/// 覚えるのは **ビンの中心色に対する最近傍** で、そのビンに最初に落ちた色に対する
-/// 最近傍ではない。前者はビンだけの関数なので走査順に依存せず、量子化器を
-/// 決定的にした意味が写像でも保たれる。
+/// 覚えるのはビンの中心色に対する最近傍で、これはビンだけの関数なので走査順に
+/// 依存しない。量子化器を決定的にした意味が写像でも保たれる。
 pub(crate) struct Nearest {
     /// 写す先の候補 (2倍した色, 添字)
     candidates: Vec<([i32; 3], u8)>,
@@ -575,13 +604,50 @@ mod tests {
         assert_eq!(histogram.quantize(64).len(), 2);
     }
 
-    /// 分散の評価は u64 で溢れる大きさを扱う
+    /// 箱の順位付けは総二乗誤差で決まり、重みでは決まらない
     ///
-    /// 8,400,000 画素ずつの2色では `m2 * wt` が 2.68e19 に達し、u64 の上限
-    /// 1.84e19 を超える。i128 で評価しないとこの値は出てこない。
+    /// 重いが散らばりの小さい箱が、軽いが散らばりの大きい箱を追い越さないこと。
+    /// 二乗誤差に重みを掛けると順位が入れ替わり、色が重い箱へ偏る。
+    #[test]
+    fn boxes_are_ranked_by_their_total_squared_error() {
+        let mut histogram = Histogram::new();
+        observe_color(&mut histogram, [0, 0, 0], 1000);
+        observe_color(&mut histogram, [4, 0, 0], 1000);
+        observe_color(&mut histogram, [0, 4, 0], 1);
+        observe_color(&mut histogram, [0, 252, 0], 1);
+        histogram.accumulate();
+
+        let heavy = Cube {
+            r0: 0,
+            r1: BINS,
+            g0: 0,
+            g1: 1,
+            b0: 0,
+            b1: 1,
+        };
+        let light = Cube {
+            r0: 0,
+            r1: 1,
+            g0: 1,
+            g1: BINS,
+            b0: 0,
+            b1: 1,
+        };
+        assert_eq!(volume(heavy, &histogram.weight), 2000);
+        assert_eq!(volume(light, &histogram.weight), 2);
+
+        assert_eq!(histogram.variance(heavy), 8_000.0);
+        assert_eq!(histogram.variance(light), 30_752.0);
+    }
+
+    /// 分散の評価は u64 で表せない大きさを扱う
+    ///
+    /// 同じ画素数の黒と白では二乗誤差の総和が `95256 * 画素数` になる。ここで積む
+    /// 画素数では総和が 1.91e19、二乗和が 3.81e19 で、どちらも u64 の上限
+    /// 1.84e19 を超える。割る前の分子はさらに大きく 7.62e33 になる。
     #[test]
     fn the_variance_is_evaluated_beyond_the_range_of_u64() {
-        const COUNT: u64 = 8_400_000;
+        const COUNT: u64 = 200_000_000_000_000;
 
         let mut histogram = Histogram::new();
         observe_color(&mut histogram, [0, 0, 0], COUNT);
@@ -596,13 +662,18 @@ mod tests {
             b0: 0,
             b1: BINS,
         };
-        let squared = i128::from(COUNT) * (252 * 252 * 3);
-        let weight = i128::from(COUNT) * 2;
+        let expected = 95_256.0 * COUNT as f64;
+        assert!(expected > u64::MAX as f64, "u64 に収まる大きさになっている");
         assert!(
-            squared * weight > i128::from(u64::MAX),
-            "u64 で溢れる大きさになっていない"
+            volume(whole, &histogram.squared) as f64 > u64::MAX as f64,
+            "二乗和が u64 に収まる大きさになっている"
         );
-        assert_eq!(histogram.variance(whole), 13_442_526_720_000_000_000);
+
+        let variance = histogram.variance(whole);
+        assert!(
+            (variance - expected).abs() <= expected * 1e-12,
+            "{variance} が {expected} から離れている"
+        );
     }
 
     /// 透過標識は積まない
