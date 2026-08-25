@@ -68,8 +68,6 @@ pub enum PaletteKind {
     ExactFromPrefix {
         /// 据えた区間の色の和集合の大きさ
         colors: u16,
-        /// 据えた後に現れた、テーブルに無い色の数 (0なら可逆)
-        extra: u16,
     },
 }
 
@@ -375,10 +373,8 @@ impl<W: Write> Parts<'_, W> {
         let colors_count = colors.count();
         let palette = Palette::from_colors(colors);
         *self.palette_kind = Some(if from_prefix {
-            // 据えた時点では、テーブルに無い色はまだ1つも現れていない
             PaletteKind::ExactFromPrefix {
                 colors: colors_count,
-                extra: 0,
             }
         } else {
             PaletteKind::Exact {

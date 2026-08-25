@@ -812,13 +812,7 @@ fn a_table_settled_from_a_prefix_is_reported() {
         ..Config::default()
     };
     let (_, report) = encode_with(WIDTH, HEIGHT, config, &frames).unwrap();
-    assert_eq!(
-        report.palette,
-        PaletteKind::ExactFromPrefix {
-            colors: 2,
-            extra: 0
-        }
-    );
+    assert_eq!(report.palette, PaletteKind::ExactFromPrefix { colors: 2 });
 
     // 先頭フレームだけを溜めたぶんが山になる
     let region = (WIDTH * HEIGHT) as usize * 3;
