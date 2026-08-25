@@ -809,6 +809,62 @@ fn an_opaque_pixel_turning_transparent_clears_the_pending_rect() {
     assert_eq!(rects(&bytes)[1], (1, 1, 1, 1), "抜く矩形が広すぎる");
 }
 
+/// 不透明領域と透過領域にまたがるパネルが現れて消える素材
+///
+/// パネルが消えるフレームでは、パネルが不透明にした画素を抜くことになる。
+/// 抜いた先を書き直す範囲は、矩形を丸ごと抜くより描く直前へ戻す方が狭い。
+fn panel_over_an_edge() -> Vec<Vec<u8>> {
+    const WIDTH: u32 = 16;
+    let color = ColorType::Rgba8;
+
+    // 左半分は画素ごとに違う色。書き直しの高くつく相手にする
+    let mut base = solid(WIDTH, 8, color, &[0, 0, 0, 0]);
+    for y in 0..8 {
+        for x in 0..8 {
+            let value = (y * 8 + x) as u8;
+            set_pixel(&mut base, WIDTH, color, x, y, &[value, 0x40, 0x60, 0xFF]);
+        }
+    }
+
+    let mut panel = base.clone();
+    for y in 2..6 {
+        for x in 4..12 {
+            set_pixel(&mut panel, WIDTH, color, x, y, &[0x90, 0x30, 0x10, 0xFF]);
+        }
+    }
+
+    vec![
+        base.clone(),
+        panel.clone(),
+        base.clone(),
+        panel,
+        base.clone(),
+    ]
+}
+
+/// 抜く候補が2つ立ったら、圧縮後の小さい方を採る
+///
+/// 描く直前へ戻すと画面が投入されたフレームと一致し、書き直す画素が無くなる。
+/// 矩形を丸ごと抜く方は、抜いた画素を色ごと書き直すことになる。
+#[test]
+fn the_smaller_of_the_two_clearing_candidates_wins() {
+    let frames = panel_over_an_edge();
+    let (bytes, report) = round_trip(16, 8, ColorType::Rgba8, &frames);
+    assert_eq!(report.palette, PaletteKind::Exact { colors: 66 });
+
+    use gif::DisposalMethod::{Keep, Previous};
+    assert_eq!(
+        disposals(&bytes),
+        [Keep, Previous, Keep, Previous, Keep],
+        "描く直前へ戻す候補が採られていない"
+    );
+    assert_eq!(
+        rects(&bytes)[2],
+        (0, 0, 1, 1),
+        "戻した画面との差分が残っている"
+    );
+}
+
 /// 透過を持たない素材はキャンバスを残したまま流れる
 ///
 /// 候補 2 と 3 が立つのは「不透明 → 透過」の遷移を含むフレームだけで、

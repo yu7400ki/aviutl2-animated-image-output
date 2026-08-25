@@ -28,6 +28,8 @@ const NETSCAPE_LOOP: u8 = 1;
 pub(crate) const DISPOSAL_DO_NOT_DISPOSE: u8 = 1;
 /// 廃棄方法「矩形を背景で塗り直す」
 pub(crate) const DISPOSAL_RESTORE_TO_BACKGROUND: u8 = 2;
+/// 廃棄方法「描く直前のキャンバスへ戻す」
+pub(crate) const DISPOSAL_RESTORE_TO_PREVIOUS: u8 = 3;
 
 /// ヘッダを書く
 pub(crate) fn header<W: Write>(writer: &mut W) -> io::Result<()> {

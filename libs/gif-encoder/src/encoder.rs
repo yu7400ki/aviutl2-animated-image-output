@@ -1,6 +1,8 @@
 //! GIFのストリーミング書き出し
 
-use crate::block::{self, DISPOSAL_DO_NOT_DISPOSE, DISPOSAL_RESTORE_TO_BACKGROUND};
+use crate::block::{
+    self, DISPOSAL_DO_NOT_DISPOSE, DISPOSAL_RESTORE_TO_BACKGROUND, DISPOSAL_RESTORE_TO_PREVIOUS,
+};
 use crate::error::Error;
 use crate::frame::{Canvas, Screen};
 use crate::layout::{ColorType, Layout};
@@ -558,7 +560,9 @@ impl<W: Write> Parts<'_, W> {
 ///
 /// 廃棄方法は保留中のフレーム自身のバイト列を変えず、投入されたフレームが載る
 /// 画面だけを変える。「不透明 → 透過」の遷移を含まないフレームはキャンバスを
-/// そのまま残し、含むフレームだけが保留中の矩形を透過へ抜いた画面を使う。
+/// そのまま残し、含むフレームだけがキャンバスから画素を抜く候補を立てる。
+///
+/// 抜く候補が2つ立ったときは、両方を符号化して圧縮後の大きさで選ぶ。
 ///
 /// # Errors
 /// どの廃棄方法でも遷移を表現できないとき [`Error::UnsupportedTransparency`]。
@@ -581,12 +585,26 @@ fn choose_disposal(
         return Err(Error::UnsupportedTransparency);
     }
 
-    let screen = canvas.cleared(pending.rect);
-    if !screen.expressible(rendered) {
+    let disposed = canvas.dispose(pending.rect);
+    let background = disposed.background();
+    if !background.expressible(rendered) {
         return Err(Error::UnsupportedTransparency);
     }
-    let laid = lay_out(screen, rendered, palette, indices, delay);
-    Ok((DISPOSAL_RESTORE_TO_BACKGROUND, laid))
+
+    let previous = disposed.previous();
+    let cleared = lay_out(background, rendered, palette, indices, delay);
+    if !previous.expressible(rendered) {
+        return Ok((DISPOSAL_RESTORE_TO_BACKGROUND, cleared));
+    }
+
+    // 画素数は矩形の広さの目安にしかならず、透過ランがどれだけ伸びるかを
+    // 写さないため、符号化して圧縮後の大きさで比べる
+    let restored = lay_out(previous, rendered, palette, indices, delay);
+    if restored.body.len() < cleared.body.len() {
+        Ok((DISPOSAL_RESTORE_TO_PREVIOUS, restored))
+    } else {
+        Ok((DISPOSAL_RESTORE_TO_BACKGROUND, cleared))
+    }
 }
 
 /// `screen` の上で `frame` を符号化し、書き出しを待つフレームにする

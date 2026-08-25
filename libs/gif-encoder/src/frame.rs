@@ -110,6 +110,36 @@ impl Screen<'_> {
     }
 }
 
+/// 保留中のフレームを廃棄した後の画面
+///
+/// 「不透明 → 透過」の遷移を含むフレームだけが使う。どちらの画面もキャンバスから
+/// 画素を抜き、抜いた画素は投入されたフレームが書き直すことになる。
+///
+/// 表現できるかどうかは [`Self::background`] だけで決まる。[`Self::previous`] が
+/// 抜く画素は保留中のフレームが不透明にした画素で、必ずその矩形の中にあるため、
+/// 矩形を丸ごと抜く前者でも抜ける。後者の値打ちは書き直す範囲の狭さだけ。
+pub(crate) struct Disposed<'a> {
+    /// 矩形を透過へ抜いた画面
+    ///
+    /// Restore to Background は仕様上「背景色で塗り直す」だが、現代のデコーダは
+    /// 例外なく透過で抜く。この事実上の挙動を前提に画面を模擬する。
+    background: Screen<'a>,
+    /// 保留中のフレームを描く直前へ戻した画面
+    previous: Screen<'a>,
+}
+
+impl<'a> Disposed<'a> {
+    /// 矩形を透過へ抜いた画面
+    pub(crate) fn background(&self) -> Screen<'a> {
+        self.background
+    }
+
+    /// 保留中のフレームを描く直前へ戻した画面
+    pub(crate) fn previous(&self) -> Screen<'a> {
+        self.previous
+    }
+}
+
 /// 描画後の色の面
 ///
 /// 添字ではなく色で持つ。キャンバスの色が常に現在のカラーテーブルに載って
@@ -129,7 +159,7 @@ pub(crate) struct Canvas {
     after: Vec<u8>,
     /// 保留中のフレームの矩形を透過へ抜いた画面
     ///
-    /// 抜く矩形はフレームごとに変わるため、[`Canvas::cleared`] が組み立て直す。
+    /// 抜く矩形はフレームごとに変わるため、[`Canvas::dispose`] が組み立て直す。
     cleared: Vec<u8>,
     /// 先頭フレームを描いたか
     drawn: bool,
@@ -159,20 +189,23 @@ impl Canvas {
         self.screen(&self.after)
     }
 
-    /// 保留中のフレームの矩形を透過へ抜いた画面
+    /// 保留中のフレームをキャンバスから廃棄した画面を組み立てる
     ///
-    /// Restore to Background は仕様上「背景色で塗り直す」だが、現代のデコーダは
-    /// 例外なく透過で抜く。この事実上の挙動を前提に画面を模擬する。
-    pub(crate) fn cleared(&mut self, rect: Rect) -> Screen<'_> {
+    /// `rect` は保留中のフレームの矩形。
+    pub(crate) fn dispose(&mut self, rect: Rect) -> Disposed<'_> {
         debug_assert_eq!(
             self.layout.color_type,
             ColorType::Rgba8,
-            "透過を持てない面を抜こうとしている"
+            "透過を持てない面を廃棄しようとしている"
         );
         self.cleared.clear();
         self.cleared.extend_from_slice(&self.after);
         fill_rect(&mut self.cleared, rect, &self.layout);
-        self.screen(&self.cleared)
+
+        Disposed {
+            background: self.screen(&self.cleared),
+            previous: self.screen(&self.before),
+        }
     }
 
     /// 論理画面と同じ大きさの画素列を画面として見る
@@ -238,10 +271,14 @@ impl Canvas {
         // 描いた後の面を潰す前に、戻す先を廃棄後の画面へ進める
         if !self.before.is_empty() {
             match disposal {
+                DISPOSAL_DO_NOT_DISPOSE => {
+                    copy_rect(&mut self.before, &self.after, disposed, &self.layout)
+                }
                 DISPOSAL_RESTORE_TO_BACKGROUND => {
                     fill_rect(&mut self.before, disposed, &self.layout)
                 }
-                _ => copy_rect(&mut self.before, &self.after, disposed, &self.layout),
+                // 戻す先そのものが廃棄後の画面になる
+                _ => {}
             }
         }
         if disposal != DISPOSAL_DO_NOT_DISPOSE {
