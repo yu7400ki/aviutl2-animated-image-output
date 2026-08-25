@@ -1,7 +1,6 @@
 //! 出力の色種別が決まるまでフレームを溜めておく領域
 
-use crate::palette::Colors;
-use anim_core::{FrameDelay, Rect, crop, has_transparency};
+use anim_core::{Colors, FrameDelay, Rect, crop, has_transparency};
 
 /// 溜めたフレーム1つ
 pub(crate) struct Spooled {

@@ -1,33 +1,6 @@
-//! 色の和集合の集計とパレットの組み立て
+//! 明るさで並べたパレットの組み立て
 
-/// パレットに収められる色数の上限
-const MAX_COLORS: usize = 256;
-
-/// 表の添字に使うビット数
-const TABLE_BITS: u32 = 10;
-/// 開放アドレス法の表の大きさ
-///
-/// [`MAX_COLORS`] より大きく取る。表に必ず空きが残ることが、色を探す走査が
-/// 一周して戻ってこないことの根拠になる。
-const TABLE_LEN: usize = 1 << TABLE_BITS;
-const _: () = assert!(TABLE_LEN > MAX_COLORS);
-/// 表の添字を取り出すマスク
-const TABLE_MASK: usize = TABLE_LEN - 1;
-/// 値を表全体へ散らす乗数 (2^32を黄金比で割った奇数)
-const HASH_MULTIPLIER: u32 = 0x9E37_79B1;
-
-/// 色を `R | G<<8 | B<<16 | A<<24` へ詰める
-///
-/// `BPP` が3の画素はアルファを255とみなす。
-fn pack<const BPP: usize>(pixel: &[u8]) -> u32 {
-    let alpha = if BPP == 4 { pixel[3] } else { u8::MAX };
-    u32::from_le_bytes([pixel[0], pixel[1], pixel[2], alpha])
-}
-
-/// 色が最初に占める表の位置
-fn slot_of(color: u32) -> usize {
-    (color.wrapping_mul(HASH_MULTIPLIER) >> (u32::BITS - TABLE_BITS)) as usize
-}
+use anim_core::{Colors, Indexed};
 
 /// 色の明るさの目安
 ///
@@ -37,111 +10,8 @@ fn luminance(color: u32) -> u32 {
     r * 2 + g * 5 + b
 }
 
-/// 見つけた色1つ
-#[derive(Debug, Clone, Copy)]
-struct Entry {
-    /// [`pack`] で詰めた色
-    color: u32,
-    /// 表の上でこの色が占める位置
-    slot: usize,
-}
-
-/// 色から添字を引く表
-///
-/// [`Self::values`] が0の位置は空で、それ以外はパレットの添字に1を足した値が入る。
-/// 同じ位置の [`Self::keys`] にその色が入る。
-struct Table {
-    keys: Box<[u32]>,
-    values: Box<[u16]>,
-}
-
-impl Table {
-    fn new() -> Self {
-        Table {
-            keys: vec![0; TABLE_LEN].into_boxed_slice(),
-            values: vec![0; TABLE_LEN].into_boxed_slice(),
-        }
-    }
-}
-
-/// 全フレームに現れた色の和集合
-///
-/// 見つけた色が [`MAX_COLORS`] を超えた時点で走査をやめ、以降は何も数えない。
-pub(crate) struct Colors {
-    table: Table,
-    /// 見つけた順の色
-    entries: Vec<Entry>,
-    /// 上限を超えたか
-    exceeded: bool,
-}
-
-impl Colors {
-    pub(crate) fn new() -> Self {
-        Colors {
-            table: Table::new(),
-            entries: Vec::new(),
-            exceeded: false,
-        }
-    }
-
-    /// 色数が上限を超えたか
-    ///
-    /// 一度真になったら戻らないため、以降の走査は要らない。
-    pub(crate) fn exceeded(&self) -> bool {
-        self.exceeded
-    }
-
-    /// 数えた色の種類数
-    ///
-    /// 上限を超えた後は数えないため、超えていない間だけ意味を持つ。
-    pub(crate) fn len(&self) -> u16 {
-        self.entries.len() as u16
-    }
-
-    /// 画素列に現れる色を数える
-    ///
-    /// `pixels` は1画素 `bpp` バイトが隙間なく並んでいること。`bpp` は3か4であること。
-    pub(crate) fn observe(&mut self, pixels: &[u8], bpp: usize) {
-        if self.exceeded {
-            return;
-        }
-
-        match bpp {
-            3 => self.scan::<3>(pixels),
-            4 => self.scan::<4>(pixels),
-            other => panic!("1画素あたり3バイトか4バイトのみ扱える: {other}"),
-        }
-    }
-
-    fn scan<const BPP: usize>(&mut self, pixels: &[u8]) {
-        for pixel in pixels.chunks_exact(BPP) {
-            if !self.insert(pack::<BPP>(pixel)) {
-                self.exceeded = true;
-                return;
-            }
-        }
-    }
-
-    /// 色を1つ覚える。上限を超えて入らなければ偽を返す
-    fn insert(&mut self, color: u32) -> bool {
-        let mut slot = slot_of(color);
-        loop {
-            if self.table.values[slot] == 0 {
-                if self.entries.len() == MAX_COLORS {
-                    return false;
-                }
-                self.table.keys[slot] = color;
-                self.table.values[slot] = self.entries.len() as u16 + 1;
-                self.entries.push(Entry { color, slot });
-                return true;
-            }
-            if self.table.keys[slot] == color {
-                return true;
-            }
-            slot = (slot + 1) & TABLE_MASK;
-        }
-    }
-
+/// 数えた色をパレットへ落とす
+pub(crate) trait ColorsExt {
     /// 数えた色を並べてパレットにする
     ///
     /// 明るさの順に置く。隣り合う画素の色が近いほど添字も数として近くなるため、
@@ -149,28 +19,20 @@ impl Colors {
     ///
     /// # Panics
     /// 色数が上限を超えているとき。
-    pub(crate) fn into_palette(mut self) -> Palette {
-        assert!(!self.exceeded, "色数が上限を超えている");
+    fn into_palette(self) -> Palette;
+}
 
-        self.entries.sort_by_key(|entry| luminance(entry.color));
-
-        let mut table = self.table;
-        for (index, entry) in self.entries.iter().enumerate() {
-            table.values[entry.slot] = index as u16 + 1;
-        }
-
+impl ColorsExt for Colors {
+    fn into_palette(self) -> Palette {
         Palette {
-            colors: self.entries.iter().map(|entry| entry.color).collect(),
-            table,
+            indexed: self.into_indexed(luminance),
         }
     }
 }
 
-/// 添字と色の対応
+/// PLTEとtRNSへ落とせるパレット
 pub(crate) struct Palette {
-    /// 添字順に並べた色
-    colors: Vec<u32>,
-    table: Table,
+    indexed: Indexed,
 }
 
 impl Palette {
@@ -178,7 +40,8 @@ impl Palette {
     ///
     /// 添字順に3バイトのR,G,Bを並べたもの。
     pub(crate) fn plte(&self) -> Vec<u8> {
-        self.colors
+        self.indexed
+            .colors()
             .iter()
             .flat_map(|&color| [color as u8, (color >> 8) as u8, (color >> 16) as u8])
             .collect()
@@ -190,14 +53,14 @@ impl Palette {
     /// ぶんは255とみなされるため、末尾の255は省く。すべて不透明なら空になり、
     /// この場合はチャンク自体が要らない。
     pub(crate) fn trns(&self) -> Vec<u8> {
-        let opaque = self
-            .colors
+        let colors = self.indexed.colors();
+        let opaque = colors
             .iter()
             .rev()
             .take_while(|&&color| color >> 24 == u32::from(u8::MAX))
             .count();
 
-        self.colors[..self.colors.len() - opaque]
+        colors[..colors.len() - opaque]
             .iter()
             .map(|&color| (color >> 24) as u8)
             .collect()
@@ -208,40 +71,14 @@ impl Palette {
     /// `pixels` は1画素 `bpp` バイトが隙間なく並び、その色がすべてこのパレットに
     /// 含まれていること。`bpp` は3か4であること。
     pub(crate) fn append_indices(&self, pixels: &[u8], bpp: usize, out: &mut Vec<u8>) {
-        out.reserve(pixels.len() / bpp);
-        match bpp {
-            3 => self.map::<3>(pixels, out),
-            4 => self.map::<4>(pixels, out),
-            other => panic!("1画素あたり3バイトか4バイトのみ扱える: {other}"),
-        }
-    }
-
-    fn map<const BPP: usize>(&self, pixels: &[u8], out: &mut Vec<u8>) {
-        for pixel in pixels.chunks_exact(BPP) {
-            out.push(self.index_of(pack::<BPP>(pixel)).expect("パレットに無い色"));
-        }
-    }
-
-    /// 色の添字。このパレットに無ければ `None`
-    fn index_of(&self, color: u32) -> Option<u8> {
-        let mut slot = slot_of(color);
-        loop {
-            let value = self.table.values[slot];
-            // 表に必ず残る空きに当たれば、その色はどこにも入っていない
-            if value == 0 {
-                return None;
-            }
-            if self.table.keys[slot] == color {
-                return Some((value - 1) as u8);
-            }
-            slot = (slot + 1) & TABLE_MASK;
-        }
+        self.indexed.append_indices(pixels, bpp, out);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anim_core::MAX_COLORS;
 
     /// RGBA8の画素列を作る
     fn rgba(pixels: &[[u8; 4]]) -> Vec<u8> {
@@ -346,25 +183,6 @@ mod tests {
         }
     }
 
-    /// パレットに無い色を引いても、走査は表の空きで止まる
-    ///
-    /// 止まらなければ戻り値ではなく無限ループになるため、上限いっぱいまで
-    /// 埋めた表でも一周しないことを踏む。
-    #[test]
-    fn a_color_outside_the_palette_is_reported_as_missing() {
-        let palette = palette_of(&[1, 2, 3, 4, 5, 6], 3);
-        assert_eq!(palette.index_of(pack::<3>(&[1, 2, 3])), Some(0));
-        assert_eq!(palette.index_of(pack::<3>(&[4, 5, 6])), Some(1));
-        for color in 0..8192u32 {
-            assert_eq!(palette.index_of(color), None, "{color:#010X}");
-        }
-
-        let full = palette_of(&distinct_rgb(MAX_COLORS), 3);
-        for color in 0..8192u32 {
-            assert_eq!(full.index_of(color), None, "{color:#010X}");
-        }
-    }
-
     /// 上限いっぱいの色でも添字は一対一に対応する
     #[test]
     fn a_full_palette_still_maps_one_to_one() {
@@ -378,28 +196,19 @@ mod tests {
         assert_eq!(indices.len(), MAX_COLORS);
     }
 
-    /// 表の末尾で衝突した色は、先頭へ回り込んだ位置に入る
+    /// 表の末尾で衝突した色も、それぞれの添字でパレットを引ける
     ///
-    /// [`slot_of`] は色に [`HASH_MULTIPLIER`] を掛けた上位 [`TABLE_BITS`] ビットを
-    /// 取るため、この2色はどちらも表の最後の位置を指す。2色目は末尾が埋まっている
-    /// ぶん、表の端を越えて先頭から空きを探すことになる。
+    /// この2色は開放アドレス法の表で同じ位置を指し、2色目は表の端を越えて
+    /// 先頭から空きを探すことになる。
     #[test]
-    fn colors_colliding_at_the_last_slot_wrap_to_the_front() {
+    fn colors_colliding_at_the_last_slot_keep_distinct_indices() {
         /// 表の最後の位置へ写る色 (詰めると `0x0000_03DB`)
         const FIRST: [u8; 4] = [0xDB, 0x03, 0x00, 0x00];
         /// 同じ位置へ写るもう1つの色 (詰めると `0x0000_07B6`)
         const SECOND: [u8; 4] = [0xB6, 0x07, 0x00, 0x00];
 
-        assert_eq!(slot_of(pack::<4>(&FIRST)), TABLE_MASK, "末尾へ写らない色");
-        assert_eq!(slot_of(pack::<4>(&SECOND)), TABLE_MASK, "末尾へ写らない色");
-
         let pixels = rgba(&[FIRST, SECOND]);
-        let mut colors = Colors::new();
-        colors.observe(&pixels, 4);
-        let slots: Vec<usize> = colors.entries.iter().map(|entry| entry.slot).collect();
-        assert_eq!(slots, [TABLE_MASK, 0], "2色目が先頭へ回り込んでいない");
-
-        let palette = colors.into_palette();
+        let palette = palette_of(&pixels, 4);
         let plte = palette.plte();
         assert_eq!(plte.len() / 3, 2);
 
