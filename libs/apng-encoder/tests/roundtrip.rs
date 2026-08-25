@@ -1142,6 +1142,87 @@ fn frames_spooled_for_the_color_type_are_written_with_source() {
     assert_composites_to(&bytes, BLEND_WIDTH, ColorType::Rgba8, &input);
 }
 
+/// 溜めた区間でも、変化した画素がわずかな矩形はOVERで書く
+///
+/// 溜めた矩形を投入された順に貼れば入力のフレームが戻るため、重ねる先が求まる。
+#[test]
+fn frames_spooled_for_the_color_type_are_written_with_over() {
+    let base = blend_frame(1);
+    let changed = with_opaque_corners(&base);
+    // 3フレーム目で透過が見つかり、そこで色種別が確定して溜めたぶんが流れる
+    let mut translucent = base.clone();
+    set_rgba(&mut translucent, 3, 3, [0x11, 0x22, 0x33, 0x80]);
+
+    let input = vec![base, changed, translucent];
+    let (bytes, _) = encode_with(
+        BLEND_WIDTH,
+        BLEND_HEIGHT,
+        reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+        &input,
+    );
+
+    let (_, decoded) = decode(&bytes);
+    assert_eq!(
+        blend_ops(&decoded),
+        [
+            png::BlendOp::Source,
+            png::BlendOp::Over,
+            png::BlendOp::Source
+        ]
+    );
+    assert_composites_to(&bytes, BLEND_WIDTH, ColorType::Rgba8, &input);
+}
+
+/// 溜めた区間でも、1フレームだけ現れる領域はPREVIOUSで捨てる
+///
+/// 貼り直したフレームからは捨てる前のキャンバスも組み立てられるため、溜めなかった
+/// 場合と同じ判断ができる。
+#[test]
+fn frames_spooled_for_the_color_type_are_disposed_to_previous() {
+    const BLOCK: (u32, u32, u32, u32) = (2, 1, 3, 2);
+    const TRIGGER: (u32, u32) = (20, 13);
+
+    let base = distinct_frames(ColorType::Rgba8, 1).remove(0);
+    let mut marked = base.clone();
+    for y in 0..BLOCK.3 as usize {
+        for x in 0..BLOCK.2 as usize {
+            let start = ((BLOCK.1 as usize + y) * REDUCE_WIDTH as usize + BLOCK.0 as usize + x) * 4;
+            marked[start..start + 3].fill(0x10);
+        }
+    }
+    // 3フレーム目で透過が見つかり、そこで色種別が確定して溜めたぶんが流れる
+    let mut restored = base.clone();
+    let alpha = (TRIGGER.1 as usize * REDUCE_WIDTH as usize + TRIGGER.0 as usize) * 4 + 3;
+    restored[alpha] = 0x80;
+
+    let input = vec![base, marked, restored];
+    let (bytes, _) = encode_with(
+        REDUCE_WIDTH,
+        REDUCE_HEIGHT,
+        reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+        &input,
+    );
+
+    let (_, decoded) = decode(&bytes);
+    assert_eq!(
+        dispose_ops(&decoded),
+        [
+            png::DisposeOp::None,
+            png::DisposeOp::Previous,
+            png::DisposeOp::None
+        ]
+    );
+    assert_eq!(
+        rects(&decoded),
+        [
+            (0, 0, REDUCE_WIDTH, REDUCE_HEIGHT),
+            BLOCK,
+            (TRIGGER.0, TRIGGER.1, 1, 1)
+        ]
+    );
+    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Rgba);
+}
+
 /// 捨てたフレームにしか無い内容は、復元されたキャンバスとの差分として残る
 ///
 /// 重ねる先を捨てたフレームにすると、そこと一致する画素が潰れて矩形から消える。

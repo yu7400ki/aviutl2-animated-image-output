@@ -51,17 +51,16 @@ pub struct Config {
     /// 決まるまでのフレームをエンコーダ内部に溜める。
     ///
     /// 出力が小さくなるとは限らない。アルファを落とした先には重ねる先が無く、
-    /// 変化していない画素を潰す blend_op=OVER の候補が立たなくなる。溜めている間の
-    /// フレームも書き出す表現が決まらないため候補を立てられない。どちらもRGBA8の
-    /// まま書いた方が小さくなる素材があり、その場合は有効にすると大きくなる。
+    /// 変化していない画素を潰す blend_op=OVER の候補が立たなくなる。RGBA8のまま
+    /// 書いた方が小さくなる素材があり、その場合は有効にすると大きくなる。
     pub reduce_color: bool,
     /// 溜めたフレームが抱えるメモリの上限バイト数 ([`DEFAULT_MAX_SPOOL_BYTES`] が目安)
     ///
     /// クロップ済みの画素データに、フレームごとの管理領域を加えた概算で数える。
     /// 超える場合は色種別を落とすのをやめ、入力の色種別のまま書き出す。
     ///
-    /// 溜めている間はdispose_opを決められないため、そこまでのフレームは捨てる
-    /// 判断を経ずに書き出される。上限に達して落とすのをやめた場合、溜めた区間の
+    /// アルファを持たない出力へ落とした場合、溜めた区間は捨てる判断を経ずに
+    /// 書き出される。上限に達して落とすのをやめた場合も、入力がRGB8ならその区間の
     /// ぶんだけ書き出しが大きくなることがある。
     pub max_spool_bytes: usize,
 }
@@ -188,6 +187,18 @@ fn smaller_output(dropped: u64, kept: u64) -> Output {
     }
 }
 
+/// dispose_opを決めた結果
+///
+/// 捨てるかどうかで投入されたフレームの矩形が変わり、圧縮した候補もそれに従う。
+struct Disposal {
+    /// 保留中のフレームに与えるdispose_op
+    op: u8,
+    /// 投入されたフレームを書き出す矩形
+    rect: Rect,
+    /// `rect` をblend_op=SOURCEで圧縮した候補
+    candidate: Candidate,
+}
+
 /// 書き出しを待っているフレーム
 ///
 /// フレームのdispose_opは次のフレームの圧縮後サイズを見るまで決まらないため、
@@ -215,20 +226,23 @@ enum Stage {
         alpha_choice: Option<Output>,
     },
     /// ヘッダを書き終え、1フレーム遅れで書き出している
-    Streaming {
-        /// 出力の画素表現
-        output: Output,
-        /// 書き出しを待っているフレーム
-        pending: Option<Pending>,
-        /// blend_op=OVERの候補を立てるかどうかの間合い
-        blend_pacing: BlendPacing,
-    },
+    Streaming(Streaming),
 }
 
-impl Stage {
-    /// 出力の画素表現を確定した直後の、まだ何も保留していない段階
-    fn streaming(output: Output) -> Self {
-        Stage::Streaming {
+/// 書き出しの段階が持つ状態
+struct Streaming {
+    /// 出力の画素表現
+    output: Output,
+    /// 書き出しを待っているフレーム
+    pending: Option<Pending>,
+    /// blend_op=OVERの候補を立てるかどうかの間合い
+    blend_pacing: BlendPacing,
+}
+
+impl Streaming {
+    /// 出力の画素表現を確定した直後の、まだ何も保留していない状態
+    fn new(output: Output) -> Self {
+        Streaming {
             output,
             pending: None,
             blend_pacing: BlendPacing::new(),
@@ -244,7 +258,8 @@ impl Stage {
 /// さらに内部へ溜める。
 ///
 /// 溜めるかどうかに関わらず、直前のフレームとそれを描く前のキャンバスの2面を常に抱える
-/// (1920x1080のRGBA8で約16.6MB)。
+/// (1920x1080のRGBA8で約16.6MB)。溜めたぶんをアルファを持つ出力へ書き出す間は、
+/// 貼り直すキャンバスをもう1面加える。
 pub struct Encoder<W: Write> {
     /// チャンクを並べる書き出し先
     chunks: ChunkWriter<W>,
@@ -299,7 +314,7 @@ impl<W: Write> Encoder<W> {
                 alpha_choice: None,
             }
         } else {
-            Stage::streaming(Output::from(config.color_type))
+            Stage::Streaming(Streaming::new(Output::from(config.color_type)))
         };
         let mut encoder = Encoder {
             chunks: ChunkWriter::new(writer),
@@ -315,8 +330,8 @@ impl<W: Write> Encoder<W> {
             peak_spool_bytes: 0,
         };
 
-        if let Stage::Streaming { output, .. } = &encoder.stage {
-            let output = *output;
+        if let Stage::Streaming(streaming) = &encoder.stage {
+            let output = streaming.output;
             let (_, mut parts) = encoder.split();
             parts.write_header(output, None)?;
         }
@@ -419,12 +434,9 @@ impl<W: Write> Encoder<W> {
                 spool,
                 alpha_choice,
             } => parts.spool_frame(spool, alpha_choice, data, delay)?,
-            Stage::Streaming {
-                output,
-                pending,
-                blend_pacing,
-            } => {
-                parts.stream_frame(*output, pending, blend_pacing, data, delay)?;
+            Stage::Streaming(streaming) => {
+                let index = parts.frames_accepted;
+                parts.write_frame(streaming, data, delay, index)?;
                 None
             }
         };
@@ -453,8 +465,8 @@ impl<W: Write> Encoder<W> {
 
         // 次のフレームが無いため、最後のフレームは捨てても復元される先が無い
         let (stage, mut parts) = self.split();
-        if let Stage::Streaming { pending, .. } = stage {
-            parts.flush_pending(pending, DISPOSE_OP_NONE)?;
+        if let Stage::Streaming(streaming) = stage {
+            parts.flush_pending(&mut streaming.pending, DISPOSE_OP_NONE)?;
         }
 
         self.chunks.write(*b"IEND", &[])?;
@@ -508,8 +520,8 @@ impl<W: Write> Parts<'_, W> {
     /// 溜めているフレームへ1つ加え、決めたとおりに処理する
     ///
     /// 出力の色種別が決まるまでは、候補を実際に書き出す色種別で圧縮できず大きさを
-    /// 比べられない。溜めている間はdispose_opをNONEに固定し、保留を挟まずに溜める。
-    /// 決まったら溜めたぶんを流し、書き出しの段階を返す。
+    /// 比べられない。溜めている間は保留を挟まずに溜め、決まったら溜めたぶんを流して
+    /// 書き出しの段階を返す。
     fn spool_frame(
         &mut self,
         spool: &mut Spool,
@@ -524,10 +536,15 @@ impl<W: Write> Parts<'_, W> {
 
         // 抱えきれない大きさが来たら、入力の色種別で確定して溜めたぶんを流す
         if !spool.can_hold(region_len) {
-            let output = self.commit(spool, Decision::Abandoned)?;
-            self.emit_frame(data, rect, delay, output)?;
-            self.delta.advance(data, DISPOSE_OP_NONE);
-            return Ok(Some(Stage::streaming(output)));
+            let mut streaming = self.commit(spool, Decision::Abandoned)?;
+            if streaming.output == Output::Rgba8 {
+                let index = self.frames_accepted;
+                self.write_frame(&mut streaming, data, delay, index)?;
+            } else {
+                self.emit_frame(data, rect, delay, streaming.output)?;
+                self.delta.advance(data, DISPOSE_OP_NONE);
+            }
+            return Ok(Some(Stage::Streaming(streaming)));
         }
 
         spool.push(
@@ -540,12 +557,17 @@ impl<W: Write> Parts<'_, W> {
         *self.peak_spool_bytes = (*self.peak_spool_bytes).max(spool.len());
 
         let is_last = self.frames_accepted + 1 == self.num_frames;
-        let next = match self.decide_output(spool, alpha_choice, is_last) {
-            Some(decision) => Some(Stage::streaming(self.commit(spool, decision)?)),
-            None => None,
+        let Some(decision) = self.decide_output(spool, alpha_choice, is_last) else {
+            self.delta.advance(data, DISPOSE_OP_NONE);
+            return Ok(None);
         };
-        self.delta.advance(data, DISPOSE_OP_NONE);
-        Ok(next)
+
+        let streaming = self.commit(spool, decision)?;
+        // 貼り直した経路は溜めたフレームを順に描き終えており、キャンバスは進んでいる
+        if streaming.output != Output::Rgba8 {
+            self.delta.advance(data, DISPOSE_OP_NONE);
+        }
+        Ok(Some(Stage::Streaming(streaming)))
     }
 
     /// 溜めたフレームから出力の画素表現を決める
@@ -633,7 +655,7 @@ impl<W: Write> Parts<'_, W> {
     /// パレット参照へ落とした場合の添字と色の対応は、ヘッダと溜めたフレームを
     /// 書き終えるまでしか要らない。出力がパレット参照に決まるのは最後のフレームで、
     /// 以降のフレームは来ないため、書き出しへ移った後に引くことがない。
-    fn commit(&mut self, spool: &mut Spool, decision: Decision) -> Result<Output, Error> {
+    fn commit(&mut self, spool: &mut Spool, decision: Decision) -> Result<Streaming, Error> {
         let (frames, colors) = spool.drain();
         let output = match decision {
             Decision::Fixed(output) | Decision::Compared(output) => output,
@@ -658,11 +680,30 @@ impl<W: Write> Parts<'_, W> {
         });
         self.write_header(output, palette.as_ref())?;
 
-        for frame in &frames {
+        let mut streaming = Streaming::new(output);
+        // アルファを持つ出力だけが、キャンバスへ重ねる候補を立てられる
+        if output == Output::Rgba8 {
+            self.replay(&frames, &mut streaming)?;
+        } else {
+            self.flush_spooled(&frames, output, palette.as_ref())?;
+        }
+        Ok(streaming)
+    }
+
+    /// 溜めたフレームを矩形のまま順に書き出す
+    ///
+    /// アルファを持たない出力には重ねる先が無く、blend_opはSOURCEに定まる。捨てた先を
+    /// 同じ表現で持てないため、dispose_opもNONEに固定する。
+    fn flush_spooled(
+        &mut self,
+        frames: &[Spooled],
+        output: Output,
+        palette: Option<&Palette>,
+    ) -> Result<(), Error> {
+        for frame in frames {
             let body = self
-                .compress_spooled(frame, output, palette.as_ref())
+                .compress_spooled(frame, output, palette)
                 .into_body(self.codec);
-            // 溜めている間は出力の色種別が決まらず、blend_opの候補も圧縮できない
             self.chunks.write_frame(
                 frame.rect,
                 frame.delay,
@@ -672,13 +713,43 @@ impl<W: Write> Parts<'_, W> {
             )?;
             self.codec.give(body);
         }
+        Ok(())
+    }
 
-        Ok(output)
+    /// 溜めたフレームをキャンバスへ貼り直し、書き出しの経路へ通す
+    ///
+    /// 溜めた矩形は直前のフレームとの差分なので、投入された順に貼れば入力のフレームが
+    /// そのまま戻る。戻したフレームを流せば、溜めなかった場合と同じ判断でdispose_opと
+    /// blend_opが決まる。
+    ///
+    /// 溜めたぶんはこの中で書き終える。最後のフレームは次を見ずに書き出すため、
+    /// dispose_opはNONEになる。
+    fn replay(&mut self, frames: &[Spooled], streaming: &mut Streaming) -> Result<(), Error> {
+        if frames.is_empty() {
+            return Ok(());
+        }
+
+        let mut canvas = self.codec.take();
+        canvas.resize(self.layout.frame_len, 0);
+        self.delta.reset();
+        for (index, frame) in frames.iter().enumerate() {
+            region::paste(
+                &mut canvas,
+                &frame.data,
+                frame.rect,
+                self.layout.stride,
+                self.layout.bytes_per_pixel,
+            );
+            self.write_frame(streaming, &canvas, frame.delay, index as u32)?;
+        }
+        self.codec.give(canvas);
+
+        self.flush_pending(&mut streaming.pending, DISPOSE_OP_NONE)
     }
 
     /// 溜めるのをやめたフレームを1つ書き出す
     ///
-    /// 溜めている間はdispose_opを決められず、blend_opの候補も圧縮できない。
+    /// アルファを持たない出力には重ねる先が無く、捨てる候補も立てられない。
     fn emit_frame(
         &mut self,
         data: &[u8],
@@ -694,21 +765,25 @@ impl<W: Write> Parts<'_, W> {
     }
 
     /// 保留中のフレームを書き出し、投入されたフレームを保留にする
-    fn stream_frame(
+    ///
+    /// `index` は投入された順の位置で、先頭フレームかどうかと、捨てられる過去が
+    /// あるかどうかを決める。
+    fn write_frame(
         &mut self,
-        output: Output,
-        pending: &mut Option<Pending>,
-        blend_pacing: &mut BlendPacing,
+        streaming: &mut Streaming,
         data: &[u8],
         delay: FrameDelay,
+        index: u32,
     ) -> Result<(), Error> {
-        let (dispose, rect, candidate) = self.choose_dispose(data, output, pending.is_some());
+        let output = streaming.output;
+        let disposal = self.choose_dispose(data, output, streaming.pending.is_some(), index);
+        let (dispose, rect) = (disposal.op, disposal.rect);
         let (blend, candidate) =
-            self.choose_blend(data, dispose, rect, candidate, output, blend_pacing);
+            self.choose_blend(data, disposal, output, &mut streaming.blend_pacing, index);
         let body = candidate.into_body(self.codec);
 
-        self.flush_pending(pending, dispose)?;
-        *pending = Some(Pending {
+        self.flush_pending(&mut streaming.pending, dispose)?;
+        streaming.pending = Some(Pending {
             rect,
             delay,
             blend,
@@ -728,27 +803,35 @@ impl<W: Write> Parts<'_, W> {
         data: &[u8],
         output: Output,
         disposable: bool,
-    ) -> (u8, Rect, Candidate) {
-        let kept = self
+        index: u32,
+    ) -> Disposal {
+        let kept = self.delta.kept_rect(self.layout, data, index);
+        let restored = self
             .delta
-            .kept_rect(self.layout, data, self.frames_accepted);
-        let restored =
-            self.delta
-                .restored_rect(self.layout, data, kept, self.frames_accepted, disposable);
+            .restored_rect(self.layout, data, kept, index, disposable);
 
         let kept_candidate = self.compress_rect(data, kept, output);
+        let keep = |candidate| Disposal {
+            op: DISPOSE_OP_NONE,
+            rect: kept,
+            candidate,
+        };
         let Some(restored) = restored else {
-            return (DISPOSE_OP_NONE, kept, kept_candidate);
+            return keep(kept_candidate);
         };
 
         let restored_candidate = self.compress_rect(data, restored, output);
 
         if restored_candidate.len() < kept_candidate.len() {
             kept_candidate.discard(self.codec);
-            (DISPOSE_OP_PREVIOUS, restored, restored_candidate)
+            Disposal {
+                op: DISPOSE_OP_PREVIOUS,
+                rect: restored,
+                candidate: restored_candidate,
+            }
         } else {
             restored_candidate.discard(self.codec);
-            (DISPOSE_OP_NONE, kept, kept_candidate)
+            keep(kept_candidate)
         }
     }
 
@@ -756,8 +839,8 @@ impl<W: Write> Parts<'_, W> {
     ///
     /// 矩形の中で変化した画素がすべて不透明なら、変化していない画素を完全な透明へ
     /// 潰した候補が立つ。blend_op=OVERはその画素でキャンバスを残すため、潰しても
-    /// 元の値に戻る。`source` の候補と両方を圧縮して小さい方を採り、採った側を戻り値へ
-    /// 残して、退けた側のバッファはプールへ返す。同じ大きさならSOURCEを採る。
+    /// 元の値に戻る。`disposal` の候補と両方を圧縮して小さい方を採り、採った側を
+    /// 戻り値へ残して、退けた側のバッファはプールへ返す。同じ大きさならSOURCEを採る。
     ///
     /// アルファを持たない出力には重ねる先が無いため、候補が立つのは出力がRGBA8のとき
     /// だけになる。先頭フレームはキャンバスがまだ空で、重ねる先が無い。負けが続く間は
@@ -765,13 +848,18 @@ impl<W: Write> Parts<'_, W> {
     fn choose_blend(
         &mut self,
         data: &[u8],
-        dispose: u8,
-        rect: Rect,
-        source: Candidate,
+        disposal: Disposal,
         output: Output,
         pacing: &mut BlendPacing,
+        index: u32,
     ) -> (u8, Candidate) {
-        if output != Output::Rgba8 || self.frames_accepted == 0 {
+        let Disposal {
+            op: dispose,
+            rect,
+            candidate: source,
+        } = disposal;
+
+        if output != Output::Rgba8 || index == 0 {
             return (BLEND_OP_SOURCE, source);
         }
         if !pacing.should_try() {
@@ -1420,7 +1508,7 @@ mod tests {
     /// 書き出しへ移ったエンコーダが持つ間合い
     fn pacing_of<W: Write>(encoder: &Encoder<W>) -> &BlendPacing {
         match &encoder.stage {
-            Stage::Streaming { blend_pacing, .. } => blend_pacing,
+            Stage::Streaming(streaming) => &streaming.blend_pacing,
             Stage::Deciding { .. } => panic!("書き出しへ移っている"),
         }
     }
