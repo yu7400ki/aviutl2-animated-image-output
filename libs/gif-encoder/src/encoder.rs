@@ -809,7 +809,7 @@ fn choose_disposal(
     palettes: &mut Palettes,
     indices: &mut Vec<u8>,
     pending: &mut Pending,
-    rendered: &[u8],
+    rendered: &mut [u8],
     delay: u16,
     pacing: &mut RestorePacing,
 ) -> (u8, Pending) {
@@ -836,13 +836,15 @@ fn choose_disposal(
     // 描いた後の画面は変わらない
     let widened = canvas.widen(pending.rect, rendered);
     if widened != pending.rect {
+        let delay = pending.delay;
+        let (restored, composite) = canvas.pending_frame();
         *pending = encode_on(
-            canvas.restored(),
-            canvas.composite(),
+            restored,
+            composite,
             widened,
             palettes.earlier(),
             indices,
-            pending.delay,
+            delay,
         );
     }
 
@@ -875,25 +877,19 @@ fn choose_disposal(
 /// 圧縮結果をそのまま書き出しへ回す。
 fn lay_out(
     screen: Screen<'_>,
-    frame: &[u8],
+    frame: &mut [u8],
     palette: &mut Palette,
     indices: &mut Vec<u8>,
     delay: u16,
 ) -> Pending {
-    encode_on(
-        screen,
-        frame,
-        screen.rect_of(frame),
-        palette,
-        indices,
-        delay,
-    )
+    let rect = screen.rect_of(frame);
+    encode_on(screen, frame, rect, palette, indices, delay)
 }
 
 /// `screen` の上で `frame` の `rect` を符号化し、書き出しを待つフレームにする
 fn encode_on(
     screen: Screen<'_>,
-    frame: &[u8],
+    frame: &mut [u8],
     rect: Rect,
     palette: &mut Palette,
     indices: &mut Vec<u8>,

@@ -338,13 +338,6 @@ impl Palette {
             approximated: true,
         }
     }
-
-    /// 画素の色を写す先の添字。最近傍へ落ちたら数に加える
-    pub(crate) fn index_of(&mut self, pixel: &[u8], bpp: usize) -> u8 {
-        let mapped = self.map(pixel, bpp);
-        self.approximated += u64::from(mapped.approximated);
-        mapped.index
-    }
 }
 
 /// 2色のRGBの二乗距離

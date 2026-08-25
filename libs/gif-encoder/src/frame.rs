@@ -73,17 +73,21 @@ impl Screen<'_> {
             .all(|(screen, pixel)| !is_transparent(pixel) || is_transparent(screen))
     }
 
-    /// `rect` の添字列を `out` へ追記する
+    /// `rect` の添字列を `out` へ追記し、書いた色を `frame` へ戻す
     ///
     /// 透過インデックスを持つテーブルでは、矩形の中で画面と一致する画素を
     /// それへ置き換える。その画素は画面を書き換えないまま、LZWにとって
     /// 同じ値の長いランになる。潰すのが写すより先なので、テーブルに載って
     /// いない色を持ち越した未変更画素もそのまま潰れる。
     ///
+    /// 潰れずに写した画素は、テーブルに完全一致が無ければ最近傍へずれる。
+    /// 書いた添字が指す色を `frame` へ戻すので、これを [`Canvas::advance`] へ
+    /// 渡せばキャンバスはデコーダが見る色をそのまま持つ。
+    ///
     /// `frame` は [`Canvas::render`] が写した描画後の色。
     pub(crate) fn append_indices(
         &self,
-        frame: &[u8],
+        frame: &mut [u8],
         rect: Rect,
         palette: &mut Palette,
         out: &mut Vec<u8>,
@@ -91,23 +95,35 @@ impl Screen<'_> {
         let stride = self.layout.stride;
         let bpp = self.layout.bytes_per_pixel;
         let transparent = palette.transparent();
+        let mut approximated = 0;
 
         out.reserve(rect.area() as usize);
         for y in 0..rect.height as usize {
             let row = (rect.y as usize + y) * stride + rect.x as usize * bpp;
             for x in 0..rect.width as usize {
                 let at = row + x * bpp;
-                let pixel = &frame[at..at + bpp];
+                let mut pixel = [0u8; 4];
+                pixel[..bpp].copy_from_slice(&frame[at..at + bpp]);
+
                 let index = match (transparent, self.pixels) {
-                    (Some(transparent), Some(screen)) if screen[at..at + bpp] == *pixel => {
+                    (Some(transparent), Some(screen)) if screen[at..at + bpp] == pixel[..bpp] => {
                         transparent
                     }
-                    _ => palette.index_of(pixel, bpp),
+                    _ => {
+                        let mapped = palette.map(&pixel[..bpp], bpp);
+                        if mapped.approximated {
+                            approximated += 1;
+                            let color = palette.color_at(mapped.index).to_le_bytes();
+                            frame[at..at + bpp].copy_from_slice(&color[..bpp]);
+                        }
+                        mapped.index
+                    }
                 };
                 palette.mark_used(index);
                 out.push(index);
             }
         }
+        palette.note_approximated(approximated);
     }
 }
 
@@ -193,19 +209,29 @@ impl Canvas {
         self.screen(&self.after)
     }
 
-    /// 保留中のフレームを描く直前へ戻した画面
-    pub(crate) fn restored(&self) -> Screen<'_> {
+    /// 保留中のフレームを、描く直前の画面とその上に描いた色の組で借りる
+    ///
+    /// そのフレームを符号化し直す経路が使う。書いた色を描いた後の面へ戻せる。
+    pub(crate) fn pending_frame(&mut self) -> (Screen<'_>, &mut [u8]) {
         debug_assert_eq!(
             self.layout.color_type,
             ColorType::Rgba8,
             "透過を持てない面には戻す先が無い"
         );
-        self.screen(&self.before)
-    }
-
-    /// 保留中のフレームを描いた後の色
-    pub(crate) fn composite(&self) -> &[u8] {
-        &self.after
+        let Canvas {
+            layout,
+            before,
+            after,
+            drawn,
+            ..
+        } = self;
+        (
+            Screen {
+                layout,
+                pixels: drawn.then_some(before.as_slice()),
+            },
+            after,
+        )
     }
 
     /// `frame` が透過にしたい画素をすべて含むまで `rect` を広げる
@@ -577,7 +603,7 @@ mod tests {
         let mut indices = Vec::new();
         canvas
             .kept()
-            .append_indices(&next, rect, &mut palette, &mut indices);
+            .append_indices(&mut next, rect, &mut palette, &mut indices);
         let last = indices.len() - 1;
         assert_ne!(indices[0], transparent, "変わった画素まで潰れている");
         assert_ne!(indices[last], transparent, "変わった画素まで潰れている");
@@ -590,7 +616,7 @@ mod tests {
     /// 先頭フレームには未変更画素が無く、全画素がテーブルへ写る
     #[test]
     fn the_first_frame_maps_every_pixel_through_the_table() {
-        let frame = opaque(0x10);
+        let mut frame = opaque(0x10);
         let mut palette = palette_of(&[&frame], 4);
         let transparent = palette.transparent().expect("透過インデックスが無い");
 
@@ -599,7 +625,7 @@ mod tests {
         let mut indices = Vec::new();
         canvas
             .kept()
-            .append_indices(&frame, rect, &mut palette, &mut indices);
+            .append_indices(&mut frame, rect, &mut palette, &mut indices);
 
         assert!(
             indices.iter().all(|&index| index != transparent),
@@ -610,7 +636,7 @@ mod tests {
     /// 透過インデックスを持たないテーブルでは、未変更画素もそのまま写る
     #[test]
     fn a_table_without_a_transparent_index_keeps_every_pixel() {
-        let frame: Vec<u8> = (0..WIDTH * HEIGHT).flat_map(|i| [i as u8, 0, 0]).collect();
+        let mut frame: Vec<u8> = (0..WIDTH * HEIGHT).flat_map(|i| [i as u8, 0, 0]).collect();
         let full: Vec<u8> = (0..256)
             .flat_map(|i| [i as u8, (i >> 8) as u8, 0])
             .collect();
@@ -623,7 +649,7 @@ mod tests {
         let mut indices = Vec::new();
         canvas
             .kept()
-            .append_indices(&frame, UNCHANGED, &mut palette, &mut indices);
+            .append_indices(&mut frame, UNCHANGED, &mut palette, &mut indices);
         assert_eq!(indices, [0]);
     }
 
@@ -641,7 +667,7 @@ mod tests {
         let mut indices = Vec::new();
         canvas
             .kept()
-            .append_indices(&first, rect, &mut palette, &mut indices);
+            .append_indices(&mut first, rect, &mut palette, &mut indices);
 
         assert_eq!(indices[0], transparent);
         assert!(indices[1..].iter().all(|&index| index != transparent));
@@ -688,10 +714,51 @@ mod tests {
         assert!(!canvas.kept().expressible(&rendered));
     }
 
+    /// 書いた添字が指す色が、そのままキャンバスへ入る
+    ///
+    /// テーブルから落ちた色を持ち越した画素は、廃棄方法が抜いた矩形の中で
+    /// 書き直されて最近傍へずれる。持ち越した色のまま進めると、キャンバスが
+    /// 持つ色とデコーダが見る色が離れる。
+    #[test]
+    fn the_canvas_takes_the_color_that_was_written() {
+        /// 先に据えたテーブルにだけある色
+        const CARRIED: [u8; 4] = [0xFF, 0x00, 0xFF, 0xFF];
+        /// 据え直したテーブルが持つ唯一の非透過色
+        const SETTLED: [u8; 4] = [0x10, 0x20, 0x30, 0xFF];
+
+        let first: Vec<u8> = CARRIED.repeat((WIDTH * HEIGHT) as usize);
+        let mut canvas = Canvas::new(layout(ColorType::Rgba8));
+        let mut rendered = Vec::new();
+        canvas.render(&[], &first, &mut palette_of(&[&first], 4), 0, &mut rendered);
+        start(&mut canvas, &rendered);
+
+        // 入力が変わらない画素は、据え直した後も持ち越される
+        let mut palette = palette_of(&[&SETTLED[..]], 4);
+        canvas.render(&first, &first, &mut palette, 0, &mut rendered);
+        assert_eq!(rendered, first, "持ち越しがテーブルを通っている");
+
+        // 矩形を透過へ抜いた画面では、持ち越した画素も書き直す
+        let rect = layout(ColorType::Rgba8).whole();
+        let mut indices = Vec::new();
+        canvas.dispose(rect).background().append_indices(
+            &mut rendered,
+            rect,
+            &mut palette,
+            &mut indices,
+        );
+
+        let written = palette.color_at(indices[0]).to_le_bytes();
+        assert_ne!(written, CARRIED, "持ち越した色がテーブルに残っている");
+        assert_eq!(rendered[..4], written, "書いた色がキャンバスへ渡っていない");
+
+        canvas.advance(DISPOSAL_RESTORE_TO_BACKGROUND, rect, &rendered, rect);
+        assert_eq!(canvas.after[..4], written, "キャンバスが書いた色を持たない");
+    }
+
     /// 全幅でない矩形は行をまたいで切り出される
     #[test]
     fn a_partial_width_rect_is_cropped_row_by_row() {
-        let frame = opaque(0x10);
+        let mut frame = opaque(0x10);
         let mut palette = palette_of(&[&frame], 4);
 
         let canvas = Canvas::new(layout(ColorType::Rgba8));
@@ -704,7 +771,7 @@ mod tests {
         let mut indices = Vec::new();
         canvas
             .kept()
-            .append_indices(&frame, rect, &mut palette, &mut indices);
+            .append_indices(&mut frame, rect, &mut palette, &mut indices);
 
         let expected: Vec<u8> = [1u8, 2, 5, 6]
             .iter()
