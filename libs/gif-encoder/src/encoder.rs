@@ -6,6 +6,7 @@ use crate::layout::{ColorType, Layout};
 use crate::normalize::{self, TRANSPARENT};
 use crate::table::ColorTable;
 use anim_core::{Colors, FrameDelay, Indexed};
+use std::borrow::Cow;
 use std::io::Write;
 
 /// 遅延時間の下限 (1/100秒)
@@ -106,10 +107,14 @@ impl<W: Write> Encoder<W> {
             });
         }
 
-        let mut pixels = data.to_vec();
-        if self.layout.color_type == ColorType::Rgba8 {
-            normalize::binarize(&mut pixels);
-        }
+        let pixels = match self.layout.color_type {
+            ColorType::Rgb8 => Cow::Borrowed(data),
+            ColorType::Rgba8 => {
+                let mut pixels = data.to_vec();
+                normalize::binarize(&mut pixels);
+                Cow::Owned(pixels)
+            }
+        };
 
         let mut colors = Colors::new();
         colors.observe(&pixels, self.layout.bytes_per_pixel);
