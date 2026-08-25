@@ -71,30 +71,31 @@ fn region_rows<'a>(
     })
 }
 
-/// 矩形を切り出し、`prev` と一致する画素を完全な透明にして `out` へ追記する
-///
-/// `prev` と `curr` はRGBA8で、`stride` バイトの行が隙間なく並んでいること。
-/// 追記した領域をblend_op=OVERで合成すると、矩形の中は `curr` と一致する。
-///
-/// 次のどちらかに当たる矩形はOVERの候補にならず、`out` を変えずに偽を返す。
-/// - 変化した画素に不透明でないものがある。完全に透明な画素はキャンバスに埋もれ、
-///   半透明の画素はキャンバスと混ざるため、どちらも元の値に戻らない
-/// - `prev` と一致する画素が1つも無い。潰す先が無く、切り出した結果が
-///   blend_op=SOURCEの候補と同じバイト列になる
-pub(crate) fn pack_over(
-    prev: &[u8],
-    curr: &[u8],
+/// 切り出し済みの領域の行を、`prev` の同じ位置の行と組にして上から順に返す
+fn cropped_rows<'a>(
+    prev: &'a [u8],
+    region: &'a [u8],
     stride: usize,
     rect: Rect,
-    out: &mut Vec<u8>,
-) -> bool {
+) -> impl Iterator<Item = (&'a [u8], &'a [u8])> {
+    let head = rect.y as usize * stride + rect.x as usize * RGBA;
+    let row_len = rect.width as usize * RGBA;
+    region
+        .chunks_exact(row_len)
+        .enumerate()
+        .map(move |(y, row)| {
+            let start = head + y * stride;
+            (&prev[start..start + row_len], row)
+        })
+}
+
+/// 行の組を上から順に潰して `out` へ追記する
+fn pack_over_rows<'a>(rows: impl Iterator<Item = (&'a [u8], &'a [u8])>, out: &mut Vec<u8>) -> bool {
     const TRANSPARENT: [u8; RGBA] = [0; RGBA];
 
     let start = out.len();
-    out.reserve(rect.width as usize * rect.height as usize * RGBA);
-
     let mut collapsed = false;
-    for (prev_row, curr_row) in region_rows(prev, curr, stride, rect) {
+    for (prev_row, curr_row) in rows {
         for (p, c) in prev_row.chunks_exact(RGBA).zip(curr_row.chunks_exact(RGBA)) {
             if p == c {
                 collapsed = true;
@@ -112,6 +113,42 @@ pub(crate) fn pack_over(
         out.truncate(start);
     }
     collapsed
+}
+
+/// 矩形を切り出し、`prev` と一致する画素を完全な透明にして `out` へ追記する
+///
+/// `prev` と `curr` はRGBA8で、`stride` バイトの行が隙間なく並んでいること。
+/// 追記した領域をblend_op=OVERで合成すると、矩形の中は `curr` と一致する。
+///
+/// 次のどちらかに当たる矩形はOVERの候補にならず、`out` を変えずに偽を返す。
+/// - 変化した画素に不透明でないものがある。完全に透明な画素はキャンバスに埋もれ、
+///   半透明の画素はキャンバスと混ざるため、どちらも元の値に戻らない
+/// - `prev` と一致する画素が1つも無い。潰す先が無く、切り出した結果が
+///   blend_op=SOURCEの候補と同じバイト列になる
+pub(crate) fn pack_over(
+    prev: &[u8],
+    curr: &[u8],
+    stride: usize,
+    rect: Rect,
+    out: &mut Vec<u8>,
+) -> bool {
+    out.reserve(rect.width as usize * rect.height as usize * RGBA);
+    pack_over_rows(region_rows(prev, curr, stride, rect), out)
+}
+
+/// 切り出し済みの領域を [`pack_over`] と同じ規則で潰して `out` へ追記する
+///
+/// `region` は `rect` を画素表現を変えずに切り出したもので、`prev` はその切り出し元と
+/// 同じ配置のRGBA8であること。
+pub(crate) fn pack_over_cropped(
+    prev: &[u8],
+    region: &[u8],
+    stride: usize,
+    rect: Rect,
+    out: &mut Vec<u8>,
+) -> bool {
+    out.reserve(region.len());
+    pack_over_rows(cropped_rows(prev, region, stride, rect), out)
 }
 
 #[cfg(test)]

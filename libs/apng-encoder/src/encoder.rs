@@ -83,8 +83,12 @@ impl Default for Config {
 /// 先頭フレームはキャンバス全体を書くため、差分矩形を書く以降のフレームとは
 /// 中身の性質が違う。アルファを落とせるかどうかの傾きはフレームごとの振れが
 /// 大きく、行ごとのフィルタを選ぶときより多くの差分矩形を見ないと定まらない。
-/// 比べるための圧縮は書き出しに使い回せないため、増やした分だけ丸ごと余分になる。
-const COLOR_PROBE_FRAMES: u32 = 8;
+///
+/// 差分矩形は先頭ほど小さく、その中の変化していない画素も少ない。キャンバスへ
+/// 重ねる候補の利得は矩形が広がってから現れるため、先頭を数フレーム見るだけでは
+/// アルファを残す側を過小に見積もる。比べるための圧縮は書き出しに使い回せないため、
+/// 増やした分だけ丸ごと余分になる。
+const COLOR_PROBE_FRAMES: u32 = 24;
 
 /// blend_op=OVERの候補を試すのをやめるまでの連敗数
 ///
@@ -627,7 +631,9 @@ impl<W: Write> Parts<'_, W> {
 
     /// アルファを落とした表現と落とさない表現を圧縮して比べ、小さい方を採る
     ///
-    /// 見るのは先頭の [`COLOR_PROBE_FRAMES`] フレームまで。
+    /// 見るのは先頭の [`COLOR_PROBE_FRAMES`] フレームまで。アルファを残した側だけは
+    /// キャンバスへ重ねる候補が立つため、溜めた矩形を貼り直したキャンバスとの差分も
+    /// 圧縮し、そのフレームで書ける小さい方を数える。落とした側には重ねる先が無い。
     ///
     /// ここでの圧縮はどちらの表現を採るかを決めるためのもので、フィルタ戦略の
     /// プローブには数えない。数えないままなので戦略はまだ固まっておらず、どちらの
@@ -637,17 +643,64 @@ impl<W: Write> Parts<'_, W> {
         debug_assert_eq!(self.layout.input, ColorType::Rgba8);
         debug_assert!(self.codec.is_probing());
 
+        let mut canvas = self.codec.take();
+        canvas.resize(self.layout.frame_len, 0);
+
         let (mut dropped, mut kept) = (0u64, 0u64);
-        for frame in frames.iter().take(COLOR_PROBE_FRAMES as usize) {
+        for (index, frame) in frames.iter().take(COLOR_PROBE_FRAMES as usize).enumerate() {
+            // 先頭フレームはキャンバスがまだ空で、重ねる先が無い
+            let over = (index > 0)
+                .then(|| self.compress_over(&canvas, frame))
+                .flatten();
+            region::paste(
+                &mut canvas,
+                &frame.data,
+                frame.rect,
+                self.layout.stride,
+                self.layout.bytes_per_pixel,
+            );
+
             let candidate = self.compress_spooled(frame, Output::Rgb8, None);
             dropped += candidate.len() as u64;
             candidate.discard(self.codec);
+
             let candidate = self.compress_spooled(frame, Output::Rgba8, None);
-            kept += candidate.len() as u64;
+            let mut smallest = candidate.len() as u64;
             candidate.discard(self.codec);
+            if let Some(over) = over {
+                smallest = smallest.min(over.len() as u64);
+                over.discard(self.codec);
+            }
+            kept += smallest;
         }
+        self.codec.give(canvas);
 
         smaller_output(dropped, kept)
+    }
+
+    /// 溜めたフレームを、貼り直したキャンバスへ重ねる候補として圧縮する
+    ///
+    /// 候補が立たない矩形では `None` を返す。
+    fn compress_over(&mut self, canvas: &[u8], frame: &Spooled) -> Option<Candidate> {
+        let out_bpp = Output::Rgba8.bytes_per_pixel();
+        let mut over = self.codec.take();
+        let packed = diff::pack_over_cropped(
+            canvas,
+            &frame.data,
+            self.layout.stride,
+            frame.rect,
+            &mut over,
+        );
+        if !packed {
+            self.codec.give(over);
+            return None;
+        }
+
+        let candidate = self
+            .codec
+            .compress(&over, frame.rect.width as usize * out_bpp, out_bpp);
+        self.codec.give(over);
+        Some(candidate)
     }
 
     /// 出力の画素表現を確定し、ヘッダに続けて溜めたフレームを書き出す
@@ -1420,6 +1473,32 @@ mod tests {
         assert!(types[3].iter().all(|&f| f == 0), "{:?}", types[3]);
         // 固めた戦略は適応フィルタなので、同じ素材でもNone以外を選ぶ
         assert!(types[4].iter().any(|&f| f != 0), "{:?}", types[4]);
+    }
+
+    /// 重ねて書ける素材は、アルファを残した方が小さく落とさない
+    ///
+    /// 矩形の中で変化した画素がわずかなら、アルファを残した表現だけが変化していない
+    /// 画素を潰せる。矩形をそのまま書いた大きさ同士で比べると、この差が出ない。
+    #[test]
+    fn an_input_that_gains_from_over_keeps_its_alpha() {
+        /// 変化させる画素の色
+        const MARK: [u8; 4] = [0xFF, 0x00, 0x00, 0xFF];
+
+        let base = with_alpha(&detailed_frame(0));
+        // 矩形がキャンバスのほぼ全体に広がり、その中のほとんどの画素が変化しない
+        let mut changed = base.clone();
+        for (x, y) in [(1, 1), (WIDTH as usize - 2, HEIGHT as usize - 2)] {
+            let at = (y * WIDTH as usize + x) * 4;
+            changed[at..at + 4].copy_from_slice(&MARK);
+        }
+
+        let input: Vec<Vec<u8>> = (0..COLOR_PROBE_FRAMES + 2)
+            .map(|index| if index % 2 == 0 { &base } else { &changed })
+            .cloned()
+            .collect();
+        let bytes = encode(&input, reduce_rgba_config());
+
+        assert_eq!(output_bytes_per_pixel(&bytes), 4);
     }
 
     /// 圧縮後の合計が同じならアルファを落とす

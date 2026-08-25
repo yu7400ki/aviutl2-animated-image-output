@@ -2211,7 +2211,7 @@ fn an_opaque_input_that_grows_without_alpha_keeps_its_alpha() {
 }
 
 /// アルファを落とすかどうかを比べるのに要るフレーム数
-const COLOR_PROBE_FRAMES: u32 = 8;
+const COLOR_PROBE_FRAMES: u32 = 24;
 
 /// 1フレームだけ現れる領域を `base` に書き加える
 fn with_transient_block(base: &[u8]) -> Vec<u8> {
