@@ -189,6 +189,49 @@ impl Canvas {
         self.screen(&self.after)
     }
 
+    /// 保留中のフレームを描く直前へ戻した画面
+    pub(crate) fn restored(&self) -> Screen<'_> {
+        self.screen(&self.before)
+    }
+
+    /// 保留中のフレームを描いた後の色
+    pub(crate) fn composite(&self) -> &[u8] {
+        &self.after
+    }
+
+    /// `frame` が透過にしたい画素をすべて含むまで `rect` を広げる
+    ///
+    /// 矩形を丸ごと抜く候補は、この矩形の中しか抜けない。返した矩形が `rect` と
+    /// 同じなら、抜きたい画素はすべて中にあってその候補で表現できる。
+    pub(crate) fn widen(&self, rect: Rect, frame: &[u8]) -> Rect {
+        let bpp = self.layout.bytes_per_pixel;
+        let width = usize::from(self.layout.width);
+        let (mut left, mut right) = (usize::MAX, 0usize);
+        let (mut top, mut bottom) = (usize::MAX, 0usize);
+
+        let pixels = self.after.chunks_exact(bpp).zip(frame.chunks_exact(bpp));
+        for (at, (screen, pixel)) in pixels.enumerate() {
+            if !is_transparent(pixel) || is_transparent(screen) {
+                continue;
+            }
+            left = left.min(at % width);
+            right = right.max(at % width);
+            top = top.min(at / width);
+            bottom = bottom.max(at / width);
+        }
+        if left > right {
+            return rect;
+        }
+
+        let clearing = Rect {
+            x: left as u32,
+            y: top as u32,
+            width: (right - left + 1) as u32,
+            height: (bottom - top + 1) as u32,
+        };
+        union(rect, clearing)
+    }
+
     /// 保留中のフレームをキャンバスから廃棄した画面を組み立てる
     ///
     /// `rect` は保留中のフレームの矩形。
@@ -285,6 +328,18 @@ impl Canvas {
             copy_rect(&mut self.after, frame, disposed, &self.layout);
         }
         copy_rect(&mut self.after, frame, rect, &self.layout);
+    }
+}
+
+/// 2つの矩形をどちらも含む最小の矩形
+fn union(a: Rect, b: Rect) -> Rect {
+    let x = a.x.min(b.x);
+    let y = a.y.min(b.y);
+    Rect {
+        x,
+        y,
+        width: (a.x + a.width).max(b.x + b.width) - x,
+        height: (a.y + a.height).max(b.y + b.height) - y,
     }
 }
 

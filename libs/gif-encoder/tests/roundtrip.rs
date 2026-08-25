@@ -865,6 +865,58 @@ fn the_smaller_of_the_two_clearing_candidates_wins() {
     );
 }
 
+/// 毎フレーム変わるティッカーの隣で、離れた静止物が消える素材
+///
+/// 静止物は保留中のフレームの矩形の外にあり、そのフレームを描く直前にも
+/// 不透明なので、どちらの候補でも抜けない。
+fn a_still_object_vanishing() -> Vec<Vec<u8>> {
+    const WIDTH: u32 = 16;
+    let color = ColorType::Rgba8;
+
+    let frame = |ticker: u8, object: bool| {
+        let mut data = solid(WIDTH, 8, color, &[0, 0, 0, 0]);
+        for y in 0..2 {
+            for x in 0..4 {
+                set_pixel(&mut data, WIDTH, color, x, y, &[ticker, 0x20, 0x30, 0xFF]);
+            }
+        }
+        if object {
+            for y in 2..4 {
+                for x in 8..12 {
+                    set_pixel(&mut data, WIDTH, color, x, y, &[0x11, 0x99, 0x55, 0xFF]);
+                }
+            }
+        }
+        data
+    };
+
+    vec![frame(0x40, true), frame(0x50, true), frame(0x60, false)]
+}
+
+/// どの候補でも抜けない画素があれば、保留中のフレームの矩形を広げる
+///
+/// 広げた矩形は保留中のフレームを描く直前の画面との差分として符号化し直す。
+/// 広げた分は描く直前と一致する画素なので透過ランに潰れ、画面は変わらない。
+#[test]
+fn a_pixel_outside_the_pending_rect_widens_it() {
+    let frames = a_still_object_vanishing();
+    let (bytes, _) = round_trip(16, 8, ColorType::Rgba8, &frames);
+
+    assert_eq!(
+        disposals(&bytes),
+        [
+            gif::DisposalMethod::Keep,
+            gif::DisposalMethod::Background,
+            gif::DisposalMethod::Keep,
+        ]
+    );
+    assert_eq!(
+        rects(&bytes),
+        [(0, 0, 16, 8), (0, 0, 12, 4), (0, 0, 4, 2)],
+        "保留中のフレームの矩形が広がっていない"
+    );
+}
+
 /// 透過を持たない素材はキャンバスを残したまま流れる
 ///
 /// 候補 2 と 3 が立つのは「不透明 → 透過」の遷移を含むフレームだけで、

@@ -231,8 +231,8 @@ impl<W: Write> Encoder<W> {
     /// # Errors
     /// バイト数が寸法と色種別から決まる長さと違うとき
     /// [`Error::FrameSizeMismatch`]。宣言したフレーム数を超えたとき
-    /// [`Error::FrameCountMismatch`]。不透明な画素が透過になる遷移が
-    /// あるとき [`Error::UnsupportedTransparency`]。
+    /// [`Error::FrameCountMismatch`]。透過インデックスを持たない
+    /// テーブルに透過画素が現れたとき [`Error::UnsupportedTransparency`]。
     pub fn add_frame(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
         if self.poisoned {
             return Err(Error::Poisoned);
@@ -519,9 +519,9 @@ impl<W: Write> Parts<'_, W> {
                 canvas.start(rendered);
                 *pending = Some(laid);
             }
-            Some(waiting) => {
+            Some(mut waiting) => {
                 let (disposal, laid) =
-                    choose_disposal(canvas, palette, indices, &waiting, rendered, delay)?;
+                    choose_disposal(canvas, palette, indices, &mut waiting, rendered, delay)?;
                 let disposed = waiting.rect;
                 self.write_pending(waiting, disposal)?;
                 canvas.advance(disposal, disposed, rendered, laid.rect);
@@ -562,15 +562,17 @@ impl<W: Write> Parts<'_, W> {
 /// 画面だけを変える。「不透明 → 透過」の遷移を含まないフレームはキャンバスを
 /// そのまま残し、含むフレームだけがキャンバスから画素を抜く候補を立てる。
 ///
-/// 抜く候補が2つ立ったときは、両方を符号化して圧縮後の大きさで選ぶ。
+/// 抜く候補が2つ立ったときは、両方を符号化して圧縮後の大きさで選ぶ。抜きたい
+/// 画素が保留中のフレームの矩形の外にあるときは、その矩形を広げて符号化し直す。
 ///
 /// # Errors
-/// どの廃棄方法でも遷移を表現できないとき [`Error::UnsupportedTransparency`]。
+/// 透過インデックスを持たないテーブルに透過画素が現れたとき
+/// [`Error::UnsupportedTransparency`]。
 fn choose_disposal(
     canvas: &mut Canvas,
     palette: &mut Palette,
     indices: &mut Vec<u8>,
-    pending: &Pending,
+    pending: &mut Pending,
     rendered: &[u8],
     delay: u16,
 ) -> Result<(u8, Pending), Error> {
@@ -585,11 +587,27 @@ fn choose_disposal(
         return Err(Error::UnsupportedTransparency);
     }
 
+    // 矩形を丸ごと抜く候補はその中しか抜けない。外に抜きたい画素が残るなら、
+    // 保留中のフレームを広げた矩形で符号化し直す。広げた分は描く直前の画面と
+    // 一致する画素なので透過ランに潰れ、描いた後の画面は変わらない
+    let widened = canvas.widen(pending.rect, rendered);
+    if widened != pending.rect {
+        *pending = encode_on(
+            canvas.restored(),
+            canvas.composite(),
+            widened,
+            palette,
+            indices,
+            pending.delay,
+        );
+    }
+
     let disposed = canvas.dispose(pending.rect);
     let background = disposed.background();
-    if !background.expressible(rendered) {
-        return Err(Error::UnsupportedTransparency);
-    }
+    debug_assert!(
+        background.expressible(rendered),
+        "広げた矩形を抜いても遷移が残っている"
+    );
 
     let previous = disposed.previous();
     let cleared = lay_out(background, rendered, palette, indices, delay);
@@ -618,7 +636,25 @@ fn lay_out(
     indices: &mut Vec<u8>,
     delay: u16,
 ) -> Pending {
-    let rect = screen.rect_of(frame);
+    encode_on(
+        screen,
+        frame,
+        screen.rect_of(frame),
+        palette,
+        indices,
+        delay,
+    )
+}
+
+/// `screen` の上で `frame` の `rect` を符号化し、書き出しを待つフレームにする
+fn encode_on(
+    screen: Screen<'_>,
+    frame: &[u8],
+    rect: Rect,
+    palette: &mut Palette,
+    indices: &mut Vec<u8>,
+    delay: u16,
+) -> Pending {
     indices.clear();
     screen.append_indices(frame, rect, palette, indices);
 

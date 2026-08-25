@@ -17,7 +17,7 @@ pub enum Error {
     FrameSizeMismatch { expected: usize, actual: usize },
     /// 投入されたフレーム数が宣言したフレーム数と一致しない
     FrameCountMismatch { expected: u32, actual: u32 },
-    /// 不透明な画素が透過になる遷移がある
+    /// 透過インデックスを持たないテーブルに透過画素が現れた
     UnsupportedTransparency,
     /// 書き出し先のI/Oエラー
     Io(std::io::Error),
@@ -49,7 +49,10 @@ impl fmt::Display for Error {
                 )
             }
             Error::UnsupportedTransparency => {
-                write!(f, "不透明な画素が透過になるフレームは扱えません")
+                write!(
+                    f,
+                    "透過インデックスの無いカラーテーブルでは透過画素を書けません"
+                )
             }
             Error::Io(e) => write!(f, "書き出しに失敗しました: {e}"),
             Error::Poisoned => write!(f, "書き出しに失敗したエンコーダは再利用できません"),
