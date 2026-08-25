@@ -80,6 +80,7 @@ fn cropped_rows<'a>(
 ) -> impl Iterator<Item = (&'a [u8], &'a [u8])> {
     let head = rect.y as usize * stride + rect.x as usize * RGBA;
     let row_len = rect.width as usize * RGBA;
+    debug_assert_eq!(region.len(), row_len * rect.height as usize);
     region
         .chunks_exact(row_len)
         .enumerate()

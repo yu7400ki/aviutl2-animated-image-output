@@ -46,10 +46,10 @@ impl Delta {
 
     /// 保留中のフレームを捨てないときの、投入されたフレームの矩形
     ///
-    /// 先頭フレームはIDATに入るためキャンバス全体とする。以降は保留中のフレームとの
-    /// 差分の外接矩形を使う。
-    pub(crate) fn kept_rect(&self, layout: &Layout, data: &[u8], frames_accepted: u32) -> Rect {
-        if frames_accepted == 0 {
+    /// `index` は投入された順の位置。先頭フレームはIDATに入るためキャンバス全体とし、
+    /// 以降は保留中のフレームとの差分の外接矩形を使う。
+    pub(crate) fn kept_rect(&self, layout: &Layout, data: &[u8], index: u32) -> Rect {
+        if index == 0 {
             return layout.whole();
         }
 
@@ -58,8 +58,8 @@ impl Delta {
 
     /// 保留中のフレームをdispose_op=PREVIOUSで捨てるときの、投入されたフレームの矩形
     ///
-    /// `disposable` は捨てられる保留中のフレームがあることを表す。次の場合は
-    /// 捨てても割に合わないため、候補にせず `None` を返す。
+    /// `index` は投入された順の位置、`disposable` は捨てられる保留中のフレームが
+    /// あることを表す。次の場合は捨てても割に合わないため、候補にせず `None` を返す。
     /// - 書き出しを待っているフレームが無いとき。捨てる先が無く、
     ///   [`Self::canvas`] もまだ埋まっていない
     /// - 保留中のフレームが先頭フレームのとき。先頭のfcTLの
@@ -72,10 +72,10 @@ impl Delta {
         layout: &Layout,
         data: &[u8],
         kept: Rect,
-        frames_accepted: u32,
+        index: u32,
         disposable: bool,
     ) -> Option<Rect> {
-        if !disposable || frames_accepted < 2 {
+        if !disposable || index < 2 {
             return None;
         }
 

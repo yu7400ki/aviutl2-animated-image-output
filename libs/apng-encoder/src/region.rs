@@ -44,6 +44,7 @@ pub(crate) fn crop(
 /// `region` は画素表現を変えずに切り出したものであること。
 pub(crate) fn paste(data: &mut [u8], region: &[u8], rect: Rect, stride: usize, bpp: usize) {
     let row_len = rect.width as usize * bpp;
+    debug_assert_eq!(region.len(), row_len * rect.height as usize);
     let head = rect.y as usize * stride + rect.x as usize * bpp;
     for (y, row) in region.chunks_exact(row_len).enumerate() {
         let start = head + y * stride;
