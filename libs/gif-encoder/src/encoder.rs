@@ -109,6 +109,63 @@ pub struct Report {
     pub peak_spool_bytes: usize,
 }
 
+/// 描く直前へ戻す候補を試すのをやめるまでの連敗数
+///
+/// 候補が立つかどうかは素材の作りで決まるため、何十フレームも立ち続けて負ける
+/// ことがある。数フレームで見切ると勝ち負けの揺れを拾うので、傾きがはっきり
+/// するまでの回数を取る。
+const RESTORE_LOSS_STREAK: u32 = 6;
+
+/// 連敗した後、描く直前へ戻す候補を立てないフレーム数
+///
+/// 素材の性質は途中で変わるため、休みを置いてまた試す。長く休むほど符号化の
+/// 回数は減るが、変わり目を見つけるのが遅れる。
+const RESTORE_REST_FRAMES: u32 = 8;
+
+/// 描く直前へ戻す候補を立てるかどうかの間合い
+///
+/// 候補は符号化するまで採否が決まらず、負けた側の符号化はそのまま無駄になる。
+/// [`RESTORE_LOSS_STREAK`] 回続けて負けたら [`RESTORE_REST_FRAMES`] フレーム
+/// 立てるのを休む。
+struct RestorePacing {
+    /// 採られないまま続いた回数
+    losses: u32,
+    /// 残りの休みフレーム数
+    resting: u32,
+}
+
+impl RestorePacing {
+    fn new() -> Self {
+        RestorePacing {
+            losses: 0,
+            resting: 0,
+        }
+    }
+
+    /// 候補を立てるか。休んでいる間は1フレームぶん消費して偽を返す
+    fn should_try(&mut self) -> bool {
+        if self.resting == 0 {
+            return true;
+        }
+        self.resting -= 1;
+        false
+    }
+
+    /// 立てた候補が採られたかどうかを記録する
+    fn record(&mut self, taken: bool) {
+        if taken {
+            self.losses = 0;
+            return;
+        }
+
+        self.losses += 1;
+        if self.losses == RESTORE_LOSS_STREAK {
+            self.losses = 0;
+            self.resting = RESTORE_REST_FRAMES;
+        }
+    }
+}
+
 /// 書き出しを待っているフレーム
 ///
 /// 廃棄方法は次のフレームを見るまで決まらず、グラフィック制御拡張は画像記述子の
@@ -160,6 +217,8 @@ struct Streaming {
     indices: Vec<u8>,
     /// 書き出しを待っているフレーム
     pending: Option<Pending>,
+    /// 描く直前へ戻す候補を立てる間合い
+    pacing: RestorePacing,
 }
 
 /// GIFのエンコーダ
@@ -449,6 +508,7 @@ impl<W: Write> Parts<'_, W> {
             rendered: Vec::new(),
             indices: Vec::new(),
             pending: None,
+            pacing: RestorePacing::new(),
         };
         self.replay(&settled.frames, &mut streaming)?;
         Ok(streaming)
@@ -509,6 +569,7 @@ impl<W: Write> Parts<'_, W> {
             rendered,
             indices,
             pending,
+            pacing,
         } = streaming;
         canvas.render(previous, pixels, palette, rendered);
 
@@ -520,8 +581,15 @@ impl<W: Write> Parts<'_, W> {
                 *pending = Some(laid);
             }
             Some(mut waiting) => {
-                let (disposal, laid) =
-                    choose_disposal(canvas, palette, indices, &mut waiting, rendered, delay)?;
+                let (disposal, laid) = choose_disposal(
+                    canvas,
+                    palette,
+                    indices,
+                    &mut waiting,
+                    rendered,
+                    delay,
+                    pacing,
+                )?;
                 let disposed = waiting.rect;
                 self.write_pending(waiting, disposal)?;
                 canvas.advance(disposal, disposed, rendered, laid.rect);
@@ -575,6 +643,7 @@ fn choose_disposal(
     pending: &mut Pending,
     rendered: &[u8],
     delay: u16,
+    pacing: &mut RestorePacing,
 ) -> Result<(u8, Pending), Error> {
     if canvas.kept().expressible(rendered) {
         let laid = lay_out(canvas.kept(), rendered, palette, indices, delay);
@@ -611,14 +680,16 @@ fn choose_disposal(
 
     let previous = disposed.previous();
     let cleared = lay_out(background, rendered, palette, indices, delay);
-    if !previous.expressible(rendered) {
+    if !previous.expressible(rendered) || !pacing.should_try() {
         return Ok((DISPOSAL_RESTORE_TO_BACKGROUND, cleared));
     }
 
     // 画素数は矩形の広さの目安にしかならず、透過ランがどれだけ伸びるかを
     // 写さないため、符号化して圧縮後の大きさで比べる
     let restored = lay_out(previous, rendered, palette, indices, delay);
-    if restored.body.len() < cleared.body.len() {
+    let taken = restored.body.len() < cleared.body.len();
+    pacing.record(taken);
+    if taken {
         Ok((DISPOSAL_RESTORE_TO_PREVIOUS, restored))
     } else {
         Ok((DISPOSAL_RESTORE_TO_BACKGROUND, cleared))
@@ -722,6 +793,108 @@ mod tests {
         // 下限そのものへ丸まる遅延は切り上げていない
         let delay = FrameDelay::new(1, 60).unwrap();
         assert_eq!(hundredths(delay), (MIN_DELAY as u16, false));
+    }
+
+    /// 連敗が続くと候補を立てるのを休み、休みが明けたらまた試す
+    #[test]
+    fn the_pacing_rests_after_a_streak_of_losses() {
+        let mut pacing = RestorePacing::new();
+        for _ in 0..RESTORE_LOSS_STREAK {
+            assert!(pacing.should_try());
+            pacing.record(false);
+        }
+
+        for frame in 0..RESTORE_REST_FRAMES {
+            assert!(!pacing.should_try(), "休み {frame} フレーム目");
+        }
+        assert!(pacing.should_try());
+    }
+
+    /// 連敗が閾値に届くまでは候補を立てるのをやめない
+    ///
+    /// 少ない負けで見切ると勝ち負けの揺れを拾い、まだ採られる素材でも候補が
+    /// 立たなくなる。休みに入るのは閾値に届いたときだけ。
+    #[test]
+    fn the_pacing_keeps_trying_below_the_streak() {
+        let mut pacing = RestorePacing::new();
+        for loss in 1..RESTORE_LOSS_STREAK {
+            assert!(pacing.should_try(), "連敗 {loss} 回目");
+            pacing.record(false);
+            assert_eq!(pacing.resting, 0, "連敗 {loss} 回で休みに入っている");
+        }
+        assert!(pacing.should_try(), "閾値に届く前に休みに入っている");
+    }
+
+    /// 候補が採られると連敗は解ける
+    #[test]
+    fn a_taken_candidate_clears_the_losses() {
+        let mut pacing = RestorePacing::new();
+        for _ in 0..RESTORE_LOSS_STREAK - 1 {
+            pacing.record(false);
+        }
+        pacing.record(true);
+
+        for _ in 0..RESTORE_LOSS_STREAK - 1 {
+            assert!(pacing.should_try());
+            pacing.record(false);
+        }
+        assert!(pacing.should_try());
+    }
+
+    /// 透過背景を1画素ずつ動く不透明なスプライト
+    ///
+    /// 毎フレーム「不透明 → 透過」を作るので、抜く候補が毎フレーム立つ。抜いた
+    /// 画面と戻した画面はどちらもスプライトの無い背景になり、候補は必ず引き分ける。
+    fn moving_sprite(count: u32) -> Vec<Vec<u8>> {
+        const WIDTH: u32 = 16;
+        const HEIGHT: u32 = 4;
+
+        (0..count)
+            .map(|index| {
+                let mut frame = vec![0u8; (WIDTH * HEIGHT) as usize * 4];
+                for y in 0..2 {
+                    let at = (y * WIDTH + index) as usize * 4;
+                    frame[at..at + 8]
+                        .copy_from_slice(&[0x80, 0x20, 0x40, 0xFF, 0x80, 0x20, 0x40, 0xFF]);
+                }
+                frame
+            })
+            .collect()
+    }
+
+    /// `count` フレームを投入した時点の間合い
+    fn pacing_after(count: u32) -> RestorePacing {
+        let config = Config {
+            color_type: ColorType::Rgba8,
+            ..Config::default()
+        };
+        let mut encoder = Encoder::new(Vec::new(), 16, 4, count, config).unwrap();
+        let delay = FrameDelay::new(1, 30).unwrap();
+        for frame in moving_sprite(count) {
+            encoder.add_frame(&frame, delay).unwrap();
+        }
+
+        match encoder.stage {
+            Stage::Streaming(streaming) => streaming.pacing,
+            Stage::Deciding(_) => panic!("書き出しへ移っていない"),
+        }
+    }
+
+    /// 書き出しの経路は、候補を立てる前に間合いを見る
+    ///
+    /// 廃棄方法を決めるのは投入されたフレームの1つ前なので、`n` フレームの素材で
+    /// 決まるのは `n - 1` フレームぶん。
+    #[test]
+    fn the_write_path_consults_the_pacing() {
+        let pacing = pacing_after(RESTORE_LOSS_STREAK + 1);
+        assert_eq!(pacing.resting, RESTORE_REST_FRAMES, "連敗で休みに入らない");
+
+        let pacing = pacing_after(RESTORE_LOSS_STREAK + 2);
+        assert_eq!(
+            pacing.resting,
+            RESTORE_REST_FRAMES - 1,
+            "休みがフレームごとに減らない"
+        );
     }
 
     /// 上限を超える遅延は飽和させるが、切り上げとしては数えない
