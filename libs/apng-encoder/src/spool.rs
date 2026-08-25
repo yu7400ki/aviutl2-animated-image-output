@@ -1,9 +1,9 @@
 //! 出力の色種別が決まるまでフレームを溜めておく領域
 
 use crate::delay::FrameDelay;
-use crate::diff::Rect;
 use crate::palette::Colors;
 use crate::region;
+use anim_core::Rect;
 use anim_core::has_transparency;
 
 /// 溜めたフレーム1つ

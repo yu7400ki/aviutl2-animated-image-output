@@ -6,12 +6,13 @@ use crate::chunk::{
 use crate::codec::{Candidate, Codec};
 use crate::delay::FrameDelay;
 use crate::delta::Delta;
-use crate::diff::{self, Rect};
+use crate::diff;
 use crate::error::Error;
 use crate::layout::{ColorType, Layout, Output};
 use crate::palette::Palette;
 use crate::region;
 use crate::spool::{Spool, Spooled};
+use anim_core::Rect;
 use std::io::Write;
 use std::ops::RangeInclusive;
 

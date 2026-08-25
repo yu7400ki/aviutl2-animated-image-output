@@ -1,8 +1,8 @@
 //! 直前のフレームとキャンバスの追跡、およびそこから決まる差分矩形
 
 use crate::chunk::DISPOSE_OP_NONE;
-use crate::diff::{self, Rect};
 use crate::layout::Layout;
+use anim_core::{Rect, dirty_rect};
 
 /// 直前のフレームと、それを描く直前のキャンバス
 pub(crate) struct Delta {
@@ -95,5 +95,5 @@ fn bounding_rect(layout: &Layout, base: &[u8], data: &[u8]) -> Rect {
         height: 1,
     };
 
-    diff::dirty_rect(base, data, layout.stride, layout.bytes_per_pixel).unwrap_or(UNCHANGED)
+    dirty_rect(base, data, layout.stride, layout.bytes_per_pixel).unwrap_or(UNCHANGED)
 }

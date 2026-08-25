@@ -1,7 +1,7 @@
 //! 入力フレームの並びと、選べる画素表現
 
-use crate::diff::Rect;
 use crate::error::Error;
+use anim_core::Rect;
 
 /// 画素の色種別 (ビット深度8固定)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
