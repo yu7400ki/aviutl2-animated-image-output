@@ -1657,3 +1657,235 @@ fn a_missing_or_extra_frame_is_rejected() {
         })
     ));
 }
+
+/// カラーテーブルの据え直しを見る素材の寸法
+const SCENE_WIDTH: u32 = 64;
+const SCENE_HEIGHT: u32 = 64;
+
+/// 先頭フレームだけを見てカラーテーブルを据える設定
+///
+/// 溜める余地を無くすと、以降のフレームに現れる色は据えたテーブルに載っていない。
+/// 場面転換をテーブルの外側へ置けるので、据え直しの経路を名指しで踏める。
+fn settle_on_the_first_frame() -> Config {
+    Config {
+        max_spool_bytes: 0,
+        ..Config::default()
+    }
+}
+
+/// 合成結果から画素を1つ取り出す
+fn pixel_at(screen: &[u8], x: u32, y: u32) -> [u8; 4] {
+    let at = (y as usize * SCENE_WIDTH as usize + x as usize) * 4;
+    screen[at..at + 4].try_into().unwrap()
+}
+
+/// 先頭フレーム以降まったく変わらない目印の色
+const MARKER: [u8; 3] = [0xFF, 0x00, 0xFF];
+/// 目印が占める行数
+const MARKER_ROWS: u32 = 2;
+
+/// 上端に目印の帯を置き、残りを `background` で埋めたフレーム
+fn marked_frame(background: impl Fn(usize) -> [u8; 3]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity((SCENE_WIDTH * SCENE_HEIGHT) as usize * 3);
+    for y in 0..SCENE_HEIGHT {
+        for x in 0..SCENE_WIDTH {
+            let pixel = if y < MARKER_ROWS {
+                MARKER
+            } else {
+                background((y * SCENE_WIDTH + x) as usize)
+            };
+            frame.extend_from_slice(&pixel);
+        }
+    }
+    frame
+}
+
+/// 入力が変わらない画素の画面上の色は、テーブルを据え直しても変わらない
+///
+/// 目印の帯は先頭フレームで据えたテーブルにそのまま載り、以降どのフレームでも
+/// 入力が変わらない。背景は据え直しの空きを埋め尽くすので目印の色はテーブルから
+/// 落ちるが、持ち越した画素を写し直さない限り画面には残り続ける。
+#[test]
+fn a_pixel_that_never_changes_keeps_its_color_across_a_rebuild() {
+    const FRAMES: usize = 12;
+
+    // 6-6-6 のビンを512個埋める背景。据え直しの空きをすべて奪う
+    let scene = |index: usize| [(index % 32 * 8) as u8, (index / 32 % 16 * 8) as u8, 0];
+    let mut frames = vec![marked_frame(|_| [4, 4, 4])];
+    frames.resize_with(FRAMES, || marked_frame(scene));
+
+    let (bytes, report) = round_trip_config(
+        SCENE_WIDTH,
+        SCENE_HEIGHT,
+        settle_on_the_first_frame(),
+        &frames,
+        8,
+    );
+    assert_eq!(report.rebuilds, 1, "テーブルを据え直していない");
+    assert_eq!(
+        report.local_tables,
+        FRAMES as u32 - 1,
+        "据え直した後のフレームが色表を持っていない"
+    );
+
+    let expected = [MARKER[0], MARKER[1], MARKER[2], u8::MAX];
+    for (index, screen) in compose(&decode_with_gif(&bytes)).iter().enumerate() {
+        for y in 0..MARKER_ROWS {
+            assert_eq!(
+                pixel_at(screen, 0, y),
+                expected,
+                "{index} 番目で目印の色が変わっている"
+            );
+        }
+    }
+}
+
+/// 瞬きの目印を置く位置
+const BLINK_AT: (u32, u32) = (0, 0);
+
+/// 場面転換を跨いで瞬く画素を持つ素材
+///
+/// 先頭区間の背景は据えるテーブルの空きを残す色数で、場面転換で現れる色は
+/// ほんの数色しかない。据え直しても空きが足りるので、直近の出力で使った
+/// エントリはすべて維持される。
+fn blinking_scene(frames: usize, change_at: usize, blink_back_at: usize) -> Vec<Vec<u8>> {
+    /// 瞬く画素が戻ってくる色
+    const BLINK: [u8; 3] = [0xFF, 0x00, 0xFF];
+    /// 場面転換の後に瞬く画素が持つ色
+    const BLINKED: [u8; 3] = [0xFF, 0xFF, 0x00];
+    /// 場面転換の後の背景の色
+    const AFTER: [[u8; 3]; 4] = [
+        [0xFF, 0xFF, 0xFF],
+        [0xF0, 0x00, 0x00],
+        [0x00, 0xF0, 0x00],
+        [0x00, 0x00, 0xF0],
+    ];
+
+    (0..frames)
+        .map(|index| {
+            let changed = index >= change_at;
+            let mut frame = Vec::with_capacity((SCENE_WIDTH * SCENE_HEIGHT) as usize * 3);
+            for at in 0..(SCENE_WIDTH * SCENE_HEIGHT) as usize {
+                // 先頭区間の背景は 6-6-6 のビンが200個ぶんの暗い色
+                let pixel = if changed {
+                    AFTER[at % AFTER.len()]
+                } else {
+                    [(at % 200 * 4) as u8 / 4 * 4, 0x10, 0x20]
+                };
+                frame.extend_from_slice(&pixel);
+            }
+            let blink = if changed && index < blink_back_at {
+                BLINKED
+            } else {
+                BLINK
+            };
+            set_pixel(
+                &mut frame,
+                SCENE_WIDTH,
+                ColorType::Rgb8,
+                BLINK_AT.0,
+                BLINK_AT.1,
+                &blink,
+            );
+            frame
+        })
+        .collect()
+}
+
+/// 瞬き (A→B→A) で戻った色は、場面転換で据え直したテーブルにも残る
+///
+/// 戻ってくるフレームは据え直したときの先読みの窓より後ろにあるので、残差から
+/// この色は得られない。維持したエントリだけがこの色を保てる。
+#[test]
+fn a_color_that_blinks_back_survives_a_rebuild() {
+    const FRAMES: usize = 14;
+    const CHANGE_AT: usize = 3;
+    const BLINK_BACK_AT: usize = 12;
+
+    let frames = blinking_scene(FRAMES, CHANGE_AT, BLINK_BACK_AT);
+    let (bytes, report) = round_trip_config(
+        SCENE_WIDTH,
+        SCENE_HEIGHT,
+        settle_on_the_first_frame(),
+        &frames,
+        0,
+    );
+    assert_eq!(report.rebuilds, 1, "テーブルを据え直していない");
+    assert_eq!(
+        report.approximated_pixels, 0,
+        "維持したエントリで足りるはずの色を最近傍へ写している"
+    );
+
+    let screens = compose(&decode_with_gif(&bytes));
+    assert_eq!(
+        pixel_at(&screens[BLINK_BACK_AT], BLINK_AT.0, BLINK_AT.1),
+        pixel_at(&screens[0], BLINK_AT.0, BLINK_AT.1),
+        "戻ってきた色が先頭フレームと違う"
+    );
+}
+
+/// 据え直しの後に現れる色を、窓のフレームへ散らした素材
+///
+/// 場面転換のフレームは全画面が変わるので据え直しを起こすが、続く数フレームが
+/// 足す色は下限に届かないので、そこでは据え直しが起きない。窓が届かなければ
+/// これらの色はテーブルに載らない。
+fn colors_spread_over_the_window(frames: usize, spread: &[[u8; 3]]) -> Vec<Vec<u8>> {
+    /// 場面転換で全画面を覆う色
+    const SCENE: [u8; 3] = [0xFF, 0x00, 0x00];
+    /// 後から足す色が占める辺の長さ
+    const BLOCK: u32 = 4;
+
+    (0..frames)
+        .map(|index| {
+            let mut frame = if index == 0 {
+                solid(SCENE_WIDTH, SCENE_HEIGHT, ColorType::Rgb8, &[128, 128, 128])
+            } else {
+                solid(SCENE_WIDTH, SCENE_HEIGHT, ColorType::Rgb8, &SCENE)
+            };
+            // 足した色は消さずに積み上げる。1フレームで変わるのはブロック1つぶん
+            for (slot, color) in spread.iter().enumerate() {
+                if index < slot + 2 {
+                    break;
+                }
+                for y in 0..BLOCK {
+                    for x in 0..BLOCK {
+                        let at = (slot as u32 * BLOCK + x, y);
+                        set_pixel(&mut frame, SCENE_WIDTH, ColorType::Rgb8, at.0, at.1, color);
+                    }
+                }
+            }
+            frame
+        })
+        .collect()
+}
+
+/// 残差は書き出し位置の1枚ではなく、先読みの窓全体から取る
+///
+/// 窓の中の後続フレームが足す色までテーブルに載るので、そのフレームを写す時点で
+/// 完全一致が引ける。窓が書き出し位置の1枚だけなら、これらの色は最近傍へ落ちる。
+#[test]
+fn the_residual_reaches_the_whole_lookahead_window() {
+    const FRAMES: usize = 16;
+    const SPREAD: [[u8; 3]; 6] = [
+        [0x00, 0xFF, 0x00],
+        [0x00, 0x00, 0xFF],
+        [0xFF, 0xFF, 0x00],
+        [0x00, 0xFF, 0xFF],
+        [0xFF, 0x00, 0xFF],
+        [0xFF, 0xFF, 0xFF],
+    ];
+
+    let frames = colors_spread_over_the_window(FRAMES, &SPREAD);
+    let (_, report) = round_trip_config(
+        SCENE_WIDTH,
+        SCENE_HEIGHT,
+        settle_on_the_first_frame(),
+        &frames,
+        0,
+    );
+    assert_eq!(report.rebuilds, 1, "テーブルを据え直していない");
+    assert_eq!(
+        report.approximated_pixels, 0,
+        "窓の中で現れる色がテーブルに載っていない"
+    );
+}
