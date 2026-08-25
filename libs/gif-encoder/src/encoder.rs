@@ -8,7 +8,7 @@ use crate::frame::{Canvas, Screen};
 use crate::layout::{ColorType, Layout};
 use crate::lzw;
 use crate::normalize;
-use crate::spool::{Spool, Spooled};
+use crate::spool::{Ring, Spool, Spooled};
 use crate::table::{Palette, QUANTIZED_COLORS};
 use anim_core::{FrameDelay, Rect, paste};
 use std::borrow::Cow;
@@ -43,7 +43,7 @@ pub struct Config {
     ///
     /// クロップ済みの画素データに、フレームごとの管理領域を加えた概算で数える。
     /// 超える場合はそこまでの色でカラーテーブルを据え、以降のフレームは
-    /// 1フレーム遅れで書き出す。カラーテーブルは1枚も溜めずには据えられない
+    /// 先読みリングを通して書き出す。カラーテーブルは1枚も溜めずには据えられない
     /// ため、先頭フレームだけは上限に関わらず溜める。
     pub max_spool_bytes: usize,
 }
@@ -108,6 +108,12 @@ pub struct Report {
     /// 溜めたフレームが抱えたバイト数の最大値
     pub peak_spool_bytes: usize,
 }
+
+/// 書き出し位置から先を覗くフレーム数
+///
+/// 書き出しはこのフレーム数だけ遅れる。廃棄方法を決めるための1フレーム保留を
+/// 含むので、リングに留まるのは `LOOKAHEAD - 1` フレーム。
+const LOOKAHEAD: usize = 4;
 
 /// 描く直前へ戻す候補を試すのをやめるまでの連敗数
 const RESTORE_LOSS_STREAK: u32 = 6;
@@ -183,23 +189,33 @@ struct Pending {
 /// グローバルカラーテーブルは1枚目の画像データより前に書く必要があるため、
 /// 色が決まるまで1フレームも書き出せない。決まった時点で [`Stage::Deciding`] は
 /// [`Stage::Streaming`] へ移り、後戻りしない。
+///
+/// どちらの段階も抱える領域が大きいため、値そのものは間接に置く。
 enum Stage {
     /// 色が決まるまでフレームを溜めている
-    Deciding(Spool),
-    /// ヘッダとカラーテーブルを書き終え、1フレーム遅れで書き出している
-    Streaming(Streaming),
+    Deciding(Box<Spool>),
+    /// ヘッダとカラーテーブルを書き終え、先読みリング越しに書き出している
+    Streaming(Box<Streaming>),
 }
 
 /// 書き出しの段階が持つ状態
+struct Streaming {
+    /// 書き出し位置から先を覗く窓
+    ring: Ring,
+    /// 書き出し位置のフレームを処理する状態
+    writing: Writing,
+}
+
+/// 書き出し位置のフレーム1つを処理する状態
 ///
 /// 面が分かれる。[`Self::previous`] は「この画素は変わったか」を決め、
 /// [`Self::canvas`] はデコーダが見ている色を持つ。差分矩形と透過ランは後者で
 /// 求める。量子化を通すと別々の入力色が同じ色へ落ちることがあり、それは
 /// 出力上は未変更だからで、比べる面を分けないとこの一致を見落とす。
-struct Streaming {
+struct Writing {
     /// 据えたグローバルカラーテーブル
     palette: Palette,
-    /// 直前に投入されたフレームの正規化した入力
+    /// 直前に書き出しへ渡されたフレームの正規化した入力
     previous: Vec<u8>,
     /// 描画後の色の面
     canvas: Canvas,
@@ -219,8 +235,8 @@ struct Streaming {
 /// フレームを投入し、[`Encoder::finish`] で閉じる。
 ///
 /// グローバルカラーテーブルを全フレームの色の和集合から据えるため、投入された
-/// フレームは色が決まるまでエンコーダ内部に溜まる。決まった後は、廃棄方法が
-/// 決まる次の投入まで1フレームぶんを保持する。
+/// フレームは色が決まるまでエンコーダ内部に溜まる。決まった後も、先読みリングの
+/// ぶんだけ書き出しが遅れる。
 pub struct Encoder<W: Write> {
     writer: W,
     layout: Layout,
@@ -262,7 +278,7 @@ impl<W: Write> Encoder<W> {
         Ok(Encoder {
             writer,
             layout: Layout::new(width, height, config.color_type)?,
-            stage: Stage::Deciding(Spool::new(config.max_spool_bytes, num_frames)),
+            stage: Stage::Deciding(Box::new(Spool::new(config.max_spool_bytes, num_frames))),
             num_frames,
             num_plays: config.num_plays,
             frames_accepted: 0,
@@ -337,12 +353,13 @@ impl<W: Write> Encoder<W> {
         let mut approximated_pixels = 0;
         let mut black_fallback = false;
         if let Stage::Streaming(streaming) = stage {
-            if let Some(pending) = streaming.pending.take() {
+            parts.drain(streaming)?;
+            if let Some(pending) = streaming.writing.pending.take() {
                 // 次のフレームが無く、廃棄方法が変えられるキャンバスの続きも無い
                 parts.write_pending(pending, DISPOSAL_DO_NOT_DISPOSE)?;
             }
-            approximated_pixels = streaming.palette.approximated();
-            black_fallback = streaming.palette.black_fallback();
+            approximated_pixels = streaming.writing.palette.approximated();
+            black_fallback = streaming.writing.palette.black_fallback();
         }
 
         block::trailer(&mut self.writer)?;
@@ -401,7 +418,7 @@ impl<W: Write> Encoder<W> {
         let next = match stage {
             Stage::Deciding(spool) => parts.spool_frame(spool, pixels, delay)?,
             Stage::Streaming(streaming) => {
-                parts.write_frame(streaming, pixels, delay)?;
+                parts.push_frame(streaming, pixels, delay)?;
                 None
             }
         };
@@ -442,7 +459,7 @@ impl<W: Write> Parts<'_, W> {
         // 投入されたフレームは以降と同じ逐次の経路へ通す
         if !spool.can_hold(region_len) {
             let mut streaming = self.commit(spool, true)?;
-            self.write_frame(&mut streaming, pixels, delay)?;
+            self.push_frame(&mut streaming, pixels, delay)?;
             return Ok(Some(Stage::Streaming(streaming)));
         }
 
@@ -466,7 +483,7 @@ impl<W: Write> Parts<'_, W> {
     /// `from_prefix` は溜めきれずに決着したことを表す。据えた色は溜めた区間の
     /// ものでしかないため、以降のフレームの色を覆っているとは限らない。覆って
     /// いない色は最近傍で写る。
-    fn commit(&mut self, spool: &mut Spool, from_prefix: bool) -> Result<Streaming, Error> {
+    fn commit(&mut self, spool: &mut Spool, from_prefix: bool) -> Result<Box<Streaming>, Error> {
         let settled = spool.drain();
         let (palette, kind) = match settled.histogram {
             Some(histogram) => {
@@ -496,15 +513,18 @@ impl<W: Write> Parts<'_, W> {
         *self.palette_kind = Some(kind);
         self.write_head(&palette)?;
 
-        let mut streaming = Streaming {
-            palette,
-            previous: Vec::new(),
-            canvas: Canvas::new(*self.layout),
-            rendered: Vec::new(),
-            indices: Vec::new(),
-            pending: None,
-            pacing: RestorePacing::new(),
-        };
+        let mut streaming = Box::new(Streaming {
+            ring: Ring::new(LOOKAHEAD),
+            writing: Writing {
+                palette,
+                previous: Vec::new(),
+                canvas: Canvas::new(*self.layout),
+                rendered: Vec::new(),
+                indices: Vec::new(),
+                pending: None,
+                pacing: RestorePacing::new(),
+            },
+        });
         self.replay(&settled.frames, &mut streaming)?;
         Ok(streaming)
     }
@@ -530,7 +550,8 @@ impl<W: Write> Parts<'_, W> {
     /// フレームがそのまま戻る。戻したフレームを流せば、溜めなかった場合と同じ
     /// 判定で廃棄方法が決まる。
     ///
-    /// 最後のフレームは保留のまま残す。続きを見ずに書き出すと廃棄方法を選べない。
+    /// 末尾の数フレームは先読みリングに残る。続きを見ずに書き出すと廃棄方法を
+    /// 選べない。
     fn replay(&mut self, frames: &[Spooled], streaming: &mut Streaming) -> Result<(), Error> {
         let mut rebuilt = vec![0; self.layout.frame_len];
         for frame in frames {
@@ -541,23 +562,46 @@ impl<W: Write> Parts<'_, W> {
                 self.layout.stride,
                 self.layout.bytes_per_pixel,
             );
-            self.write_frame(streaming, &rebuilt, frame.delay)?;
+            self.push_frame(streaming, &rebuilt, frame.delay)?;
         }
         Ok(())
     }
 
-    /// 保留中のフレームを書き出し、投入されたフレームを保留にする
-    ///
-    /// 矩形も透過ランも、入力ではなく写した後の色の面で求める。廃棄方法は
-    /// 保留中のフレームのもので、投入されたフレームが載る画面を決めるため、
-    /// 先に決めてからその画面で矩形と添字を求める。
-    fn write_frame(
+    /// 投入されたフレームを先読みリングへ入れ、溢れたぶんを書き出しへ渡す
+    fn push_frame(
         &mut self,
         streaming: &mut Streaming,
         pixels: &[u8],
         delay: FrameDelay,
     ) -> Result<(), Error> {
-        let Streaming {
+        let Streaming { ring, writing } = streaming;
+        let Some(due) = ring.push(pixels.to_vec(), delay) else {
+            return Ok(());
+        };
+        self.write_frame(writing, &due.pixels, due.delay)
+    }
+
+    /// 先読みリングに残ったフレームをすべて書き出しへ渡す
+    fn drain(&mut self, streaming: &mut Streaming) -> Result<(), Error> {
+        let Streaming { ring, writing } = streaming;
+        while let Some(due) = ring.take() {
+            self.write_frame(writing, &due.pixels, due.delay)?;
+        }
+        Ok(())
+    }
+
+    /// 保留中のフレームを書き出し、渡されたフレームを保留にする
+    ///
+    /// 矩形も透過ランも、入力ではなく写した後の色の面で求める。廃棄方法は
+    /// 保留中のフレームのもので、渡されたフレームが載る画面を決めるため、
+    /// 先に決めてからその画面で矩形と添字を求める。
+    fn write_frame(
+        &mut self,
+        writing: &mut Writing,
+        pixels: &[u8],
+        delay: FrameDelay,
+    ) -> Result<(), Error> {
+        let Writing {
             palette,
             previous,
             canvas,
@@ -565,7 +609,7 @@ impl<W: Write> Parts<'_, W> {
             indices,
             pending,
             pacing,
-        } = streaming;
+        } = writing;
         canvas.render(previous, pixels, palette, rendered);
 
         let delay = self.hundredths(delay);
@@ -836,7 +880,7 @@ mod tests {
     /// 毎フレーム「不透明 → 透過」を作るので、抜く候補が毎フレーム立つ。抜いた
     /// 画面と戻した画面はどちらもスプライトの無い背景になり、候補は必ず引き分ける。
     fn moving_sprite(count: u32) -> Vec<Vec<u8>> {
-        const WIDTH: u32 = 16;
+        const WIDTH: u32 = 32;
         const HEIGHT: u32 = 4;
 
         (0..count)
@@ -852,34 +896,35 @@ mod tests {
             .collect()
     }
 
-    /// `count` フレームを投入した時点の間合い
-    fn pacing_after(count: u32) -> RestorePacing {
+    /// 廃棄方法を `decisions` 回決めた時点の間合い
+    ///
+    /// 廃棄方法が決まるのは書き出しへ渡されたフレームの1つ前なので、書き出しへ
+    /// 渡すのは1つ多い。書き出しは先読みリングのぶん遅れる。
+    fn pacing_after(decisions: u32) -> RestorePacing {
+        let count = decisions + 1 + (LOOKAHEAD as u32 - 1);
         let config = Config {
             color_type: ColorType::Rgba8,
             ..Config::default()
         };
-        let mut encoder = Encoder::new(Vec::new(), 16, 4, count, config).unwrap();
+        let mut encoder = Encoder::new(Vec::new(), 32, 4, count, config).unwrap();
         let delay = FrameDelay::new(1, 30).unwrap();
         for frame in moving_sprite(count) {
             encoder.add_frame(&frame, delay).unwrap();
         }
 
         match encoder.stage {
-            Stage::Streaming(streaming) => streaming.pacing,
+            Stage::Streaming(streaming) => streaming.writing.pacing,
             Stage::Deciding(_) => panic!("書き出しへ移っていない"),
         }
     }
 
     /// 書き出しの経路は、候補を立てる前に間合いを見る
-    ///
-    /// 廃棄方法を決めるのは投入されたフレームの1つ前なので、`n` フレームの素材で
-    /// 決まるのは `n - 1` フレームぶん。
     #[test]
     fn the_write_path_consults_the_pacing() {
-        let pacing = pacing_after(RESTORE_LOSS_STREAK + 1);
+        let pacing = pacing_after(RESTORE_LOSS_STREAK);
         assert_eq!(pacing.resting, RESTORE_REST_FRAMES, "連敗で休みに入らない");
 
-        let pacing = pacing_after(RESTORE_LOSS_STREAK + 2);
+        let pacing = pacing_after(RESTORE_LOSS_STREAK + 1);
         assert_eq!(
             pacing.resting,
             RESTORE_REST_FRAMES - 1,

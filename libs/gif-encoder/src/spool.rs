@@ -1,9 +1,10 @@
-//! グローバルカラーテーブルが決まるまでフレームを溜める領域
+//! グローバルカラーテーブルが決まるまでフレームを溜める領域と、その後の先読み
 
 use crate::frame::bounding_rect;
 use crate::layout::Layout;
 use crate::quantize::Histogram;
 use anim_core::{Colors, FrameDelay, Rect, crop};
+use std::collections::VecDeque;
 
 /// 溜めたフレーム1つ
 pub(crate) struct Spooled {
@@ -173,6 +174,51 @@ impl Spool {
             colors: spool.colors,
             histogram: spool.histogram,
         }
+    }
+}
+
+/// 先読みリングが抱えているフレーム1つ
+pub(crate) struct Held {
+    /// 正規化した入力そのまま
+    pub(crate) pixels: Vec<u8>,
+    pub(crate) delay: FrameDelay,
+}
+
+/// 書き出し位置から先のフレームを覗くための窓
+///
+/// 投入されたフレームをそのまま入れ、窓から溢れたぶんを書き出しへ渡す。
+/// 窓が `lookahead` フレームなら、書き出し位置のフレーム1つと、リングに残る
+/// `lookahead - 1` フレームが残差の材料になる。
+///
+/// 書き出しが遅れるだけで、出したバイト列は遅れない場合と変わらない。
+pub(crate) struct Ring {
+    frames: VecDeque<Held>,
+    /// リングに留めておくフレーム数
+    capacity: usize,
+}
+
+impl Ring {
+    /// `lookahead` フレームの窓を持つリング
+    pub(crate) fn new(lookahead: usize) -> Self {
+        Ring {
+            frames: VecDeque::new(),
+            capacity: lookahead.saturating_sub(1),
+        }
+    }
+
+    /// フレームを1つ入れ、窓から溢れたぶんを返す
+    pub(crate) fn push(&mut self, pixels: Vec<u8>, delay: FrameDelay) -> Option<Held> {
+        self.frames.push_back(Held { pixels, delay });
+        if self.frames.len() > self.capacity {
+            self.frames.pop_front()
+        } else {
+            None
+        }
+    }
+
+    /// 残っているフレームのうち最も古いものを取り出す
+    pub(crate) fn take(&mut self) -> Option<Held> {
+        self.frames.pop_front()
     }
 }
 
@@ -370,6 +416,38 @@ mod tests {
         let mut spool = Spool::new(usize::MAX, FRAMES);
         push(&mut spool, &frame(0x10));
         assert!(spool.drain().histogram.is_none());
+    }
+
+    /// リングは窓のぶんだけ留め、溢れたフレームを投入された順に返す
+    #[test]
+    fn the_ring_holds_back_the_window_and_releases_the_rest() {
+        const LOOKAHEAD: usize = 4;
+        let mut ring = Ring::new(LOOKAHEAD);
+
+        for value in 0..LOOKAHEAD as u8 - 1 {
+            assert!(
+                ring.push(vec![value], delay()).is_none(),
+                "窓が埋まる前に溢れた"
+            );
+        }
+        for value in LOOKAHEAD as u8 - 1..LOOKAHEAD as u8 + 3 {
+            let due = ring.push(vec![value], delay()).expect("溢れていない");
+            assert_eq!(due.pixels, [value - (LOOKAHEAD as u8 - 1)]);
+        }
+
+        let rest: Vec<u8> = std::iter::from_fn(|| ring.take())
+            .map(|held| held.pixels[0])
+            .collect();
+        assert_eq!(rest, [4, 5, 6]);
+    }
+
+    /// 窓が1フレームなら留めずにそのまま流す
+    #[test]
+    fn a_window_of_one_frame_holds_nothing_back() {
+        let mut ring = Ring::new(1);
+        let due = ring.push(vec![7], delay()).expect("留めている");
+        assert_eq!(due.pixels, [7]);
+        assert!(ring.take().is_none());
     }
 
     /// 矩形の外にある色は数えない
