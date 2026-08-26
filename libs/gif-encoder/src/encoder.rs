@@ -87,10 +87,14 @@ pub struct Report {
     /// グローバルカラーテーブルの据え方
     pub palette: PaletteKind,
     /// カラーテーブルを据え直した回数 (0ならグローバルの1枚で足りた)
+    ///
+    /// 1回目が先頭の書き出し位置で起きたときは、その結果がグローバルカラー
+    /// テーブルになる。
     pub rebuilds: u32,
     /// ローカルカラーテーブルを書いたフレーム数
     ///
-    /// 一度でも据え直すと、それ以降のフレームはすべて色表を自分で運ぶ。
+    /// グローバルカラーテーブルと違うテーブルで符号化したフレームは、色表を
+    /// 自分で運ぶ。GIFには前のフレームの色表を参照する手段が無い。
     pub local_tables: u32,
     /// 完全一致が無く最近傍へ写した画素数
     ///
@@ -286,7 +290,7 @@ impl Palettes {
 enum Stage {
     /// 色が決まるまでフレームを溜めている
     Deciding(Box<Spool>),
-    /// ヘッダとカラーテーブルを書き終え、先読みリング越しに書き出している
+    /// 色が決まり、先読みリング越しに書き出している
     Streaming(Box<Streaming>),
 }
 
@@ -343,6 +347,11 @@ pub struct Encoder<W: Write> {
     poisoned: bool,
     /// グローバルカラーテーブルの据え方。決まるまでは `None`
     palette_kind: Option<PaletteKind>,
+    /// まだ書いていないグローバルカラーテーブル
+    ///
+    /// 先頭のフレームを符号化するまで書かない。据え直しがそこで起きたときは、
+    /// 据え直した結果をここへ入れ替えてから書く。
+    head: Option<ColorTable>,
     /// カラーテーブルを据え直した回数
     rebuilds: u32,
     /// ローカルカラーテーブルを書いたフレーム数
@@ -384,6 +393,7 @@ impl<W: Write> Encoder<W> {
             frames_accepted: 0,
             poisoned: false,
             palette_kind: None,
+            head: None,
             rebuilds: 0,
             local_tables: 0,
             binarized: Binarized::default(),
@@ -500,6 +510,7 @@ impl<W: Write> Encoder<W> {
             frames_accepted,
             poisoned: _,
             palette_kind,
+            head,
             rebuilds,
             local_tables,
             binarized: _,
@@ -514,6 +525,7 @@ impl<W: Write> Encoder<W> {
                 writer,
                 layout,
                 palette_kind,
+                head,
                 rebuilds,
                 local_tables,
                 hundredths,
@@ -552,6 +564,7 @@ struct Parts<'a, W: Write> {
     writer: &'a mut W,
     layout: &'a Layout,
     palette_kind: &'a mut Option<PaletteKind>,
+    head: &'a mut Option<ColorTable>,
     rebuilds: &'a mut u32,
     local_tables: &'a mut u32,
     hundredths: &'a mut Hundredths,
@@ -593,10 +606,14 @@ impl<W: Write> Parts<'_, W> {
         Ok(Some(Stage::Streaming(streaming)))
     }
 
-    /// 色を決めてヘッダからカラーテーブルまでを書き、溜めたフレームを流す
+    /// 色を決めて溜めたフレームを流す
     ///
     /// 溜めた区間の色が上限に収まっていればそのまま据えて可逆に出し、超えて
     /// いればヒストグラムから量子化する。
+    ///
+    /// 据えたテーブルはここでは書かない。先頭のフレームがこのテーブルで
+    /// 符号化されるとは限らず、据え直しがそこで起きたときはその結果が
+    /// グローバルカラーテーブルになる。
     ///
     /// `from_prefix` は溜めきれずに決着したことを表す。据えた色は溜めた区間の
     /// ものでしかないため、以降のフレームの色を覆っているとは限らない。覆って
@@ -629,7 +646,7 @@ impl<W: Write> Parts<'_, W> {
             }
         };
         *self.palette_kind = Some(kind);
-        self.write_head(&palette)?;
+        *self.head = Some(palette.table().clone());
 
         let mut streaming = Box::new(Streaming {
             ring: Ring::new(LOOKAHEAD),
@@ -649,8 +666,7 @@ impl<W: Write> Parts<'_, W> {
     }
 
     /// ヘッダ・論理画面記述子・グローバルカラーテーブル・ループ回数を書く
-    fn write_head(&mut self, palette: &Palette) -> Result<(), Error> {
-        let table = palette.table();
+    fn write_head(&mut self, table: &ColorTable) -> Result<(), Error> {
         block::header(self.writer)?;
         block::logical_screen_descriptor(
             self.writer,
@@ -742,7 +758,7 @@ impl<W: Write> Parts<'_, W> {
         // 無いテーブルは溜めた区間が全画素透過のときしか生まれず、据え直した
         // テーブルは必ず非透過色を持つので、この経路が繰り返し立つことはない
         if mapped.substituted > 0 || mapped.exceeded > self.rebuild_floor() {
-            let fresh = rebuild(
+            let mut fresh = rebuild(
                 self.layout,
                 &palettes.current,
                 KEEP_WINDOW,
@@ -750,6 +766,14 @@ impl<W: Write> Parts<'_, W> {
                 previous,
                 std::iter::once(pixels).chain(ring.window()),
             );
+            // まだ1フレームも符号化していないなら、据え直した結果がそのまま
+            // グローバルカラーテーブルになる。書く順を入れ替えるだけで、
+            // 次の据え直しまでのフレームは色表を自分で運ばずに済む
+            if pending.is_none() {
+                debug_assert!(self.head.is_some(), "書いた後のテーブルを入れ替えている");
+                fresh.promote_to_global();
+                *self.head = Some(fresh.table().clone());
+            }
             palettes.replace(fresh);
             palettes.current.set_frame(*frames);
             mapped = canvas.render(previous, pixels, &mut palettes.current, tolerance, rendered);
@@ -802,7 +826,12 @@ impl<W: Write> Parts<'_, W> {
     }
 
     /// 保留していたフレームを `disposal` で書き出す
+    ///
+    /// 最初の1枚の前に、まだ書いていないヘッダとグローバルカラーテーブルを書く。
     fn write_pending(&mut self, pending: Pending, disposal: u8) -> Result<(), Error> {
+        if let Some(table) = self.head.take() {
+            self.write_head(&table)?;
+        }
         block::graphic_control(self.writer, disposal, pending.delay, pending.transparent)?;
         block::image_descriptor(
             self.writer,

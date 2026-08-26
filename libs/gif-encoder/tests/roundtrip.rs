@@ -1873,28 +1873,74 @@ impl Write for FailingWriter {
 
 /// 途中で切れたブロックの列に書き足すと読めないGIFになるため、失敗後は受け付けない
 ///
-/// 溜める余地を無くすと2枚目の投入で書き出しが始まり、そこで失敗する。
+/// 書き出しは先読みリングが埋まるまで始まらないので、失敗するのは投入の途中に
+/// なる。何枚目かは先読みの深さで決まるため、最初に失敗した投入を探す。
 #[test]
 fn a_failed_write_poisons_the_encoder() {
-    let frames: Vec<Vec<u8>> = (0..3).map(|seed| noise(8 * 8 * 3, seed)).collect();
+    const FRAMES: u32 = 16;
+    let frames: Vec<Vec<u8>> = (0..FRAMES).map(|seed| noise(8 * 8 * 3, seed)).collect();
     let config = Config {
         max_spool_bytes: 0,
         ..Config::default()
     };
     // ヘッダは通り、論理画面記述子かカラーテーブルで尽きる長さ
     let writer = FailingWriter { remaining: 8 };
-    let mut encoder = Encoder::new(writer, 8, 8, 3, config).unwrap();
+    let mut encoder = Encoder::new(writer, 8, 8, FRAMES, config).unwrap();
 
-    encoder.add_frame(&frames[0], delay_of(0)).unwrap();
+    let failure = frames
+        .iter()
+        .enumerate()
+        .find_map(|(index, frame)| encoder.add_frame(frame, delay_of(index)).err());
+    assert!(matches!(failure, Some(Error::Io(_))), "{failure:?}");
+
     assert!(matches!(
-        encoder.add_frame(&frames[1], delay_of(1)),
-        Err(Error::Io(_))
-    ));
-    assert!(matches!(
-        encoder.add_frame(&frames[2], delay_of(2)),
+        encoder.add_frame(&frames[0], delay_of(0)),
         Err(Error::Poisoned)
     ));
     assert!(matches!(encoder.finish(), Err(Error::Poisoned)));
+}
+
+/// 先頭の書き出し位置で据え直したら、その結果がグローバルカラーテーブルになる
+///
+/// まだ1フレームも符号化していないので、据え直したテーブルを据える先は
+/// グローバルの1枚しかない。決着したままのテーブルを書くと、そのテーブルは
+/// 1フレームも使われずに終わり、以降のフレームは色表を運び続ける。
+#[test]
+fn a_rebuild_at_the_first_written_frame_becomes_the_global_table() {
+    const WIDTH: u32 = 64;
+    const HEIGHT: u32 = 64;
+
+    // 量子化の誤差が先頭フレームで下限を超え、その位置で据え直す。以降の
+    // フレームは変わらないので、据え直しはこの1回で終わる
+    let frame = noise((WIDTH * HEIGHT * 3) as usize, 11);
+    let frames = vec![frame; 10];
+
+    let config = Config {
+        max_spool_bytes: 0,
+        ..Config::default()
+    };
+    let (bytes, report) = encode_with(WIDTH, HEIGHT, config, &frames).unwrap();
+    assert!(
+        matches!(report.palette, PaletteKind::QuantizedFromPrefix { .. }),
+        "{:?}",
+        report.palette
+    );
+    assert_eq!(report.rebuilds, 1, "先頭の書き出し位置で据え直していない");
+    assert_eq!(
+        report.local_tables, 0,
+        "据え直した結果をグローバルへ据えていない"
+    );
+
+    // 先頭フレームが描く色は、すべてグローバルカラーテーブルに載っている
+    let decoded = decode_with_gif(&bytes);
+    let screen = compose(&decoded)[0].clone();
+    let palette = decoded.palette.expect("グローバルカラーテーブルが無い");
+    for pixel in screen.chunks_exact(4) {
+        assert!(
+            palette.chunks_exact(3).any(|entry| entry == &pixel[..3]),
+            "グローバルに無い色を先頭フレームが描いている: {pixel:?}"
+        );
+    }
 }
 
 /// カラーテーブルの据え直しを見る素材の寸法
