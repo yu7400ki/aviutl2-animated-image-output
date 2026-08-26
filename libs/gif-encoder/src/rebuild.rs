@@ -201,15 +201,19 @@ mod tests {
     }
 
     /// 窓の中の後続フレームは、その1つ前のフレームとの差分で積む
+    ///
+    /// 比較相手を書き出し位置の1つ前に固定すると、窓の中で元の色へ戻った画素が
+    /// 「変わっていない」と読める。
     #[test]
     fn later_frames_in_the_window_are_compared_with_the_one_before() {
+        let base = [1u8, 1, 1, 10, 10, 10];
         let first = [1u8, 1, 1, 200, 200, 200];
-        let second = [1u8, 1, 1, 100, 100, 100];
+        let second = base;
         let frames = [&first[..], &second[..]];
 
-        let histogram = changed_colors(&layout(), &[], frames.into_iter());
-        // 先頭は2色、続くフレームは変わった1色だけ
-        assert_eq!(histogram.distinct(), 3);
+        let histogram = changed_colors(&layout(), &base, frames.into_iter());
+        // 先頭で変わった色と、次のフレームで戻った色
+        assert_eq!(histogram.distinct(), 2);
     }
 
     /// 透過標識は積まない
@@ -245,6 +249,47 @@ mod tests {
         let frame = [1u8, 1, 1, 200, 200, 200];
         let rebuilt = rebuild(&layout(), &current, 8, 64, &[], std::iter::once(&frame[..]));
         assert!(rebuilt.colors() as usize <= QUANTIZED_COLORS);
+    }
+
+    /// 維持で足りる色には空きを費やさない
+    #[test]
+    fn the_residual_leaves_out_the_colors_the_kept_entries_cover() {
+        let mut colors = Colors::new();
+        colors.observe(&[0u8, 0, 0], 3);
+        let mut current = Palette::from_colors(colors, false);
+        current.set_frame(1);
+        current.mark_used(0);
+
+        // 黒の近くの画素は維持で足り、遠い画素だけが残差になる
+        let frame = [1u8, 1, 1, 200, 200, 200];
+        let rebuilt = rebuild(&layout(), &current, 8, 64, &[], std::iter::once(&frame[..]));
+        assert_eq!(rebuilt.colors(), 2, "維持と重なる色に空きを費やしている");
+    }
+
+    /// 残差はテーブルの空きの数だけ量子化する
+    #[test]
+    fn the_residual_is_quantized_into_exactly_the_free_slots() {
+        const COLORS: u32 = 300;
+        let layout = Layout::new(COLORS, 1, ColorType::Rgb8).unwrap();
+        let frame: Vec<u8> = (0..COLORS)
+            .flat_map(|i| [(i % 60) as u8 * 4, (i / 60) as u8 * 4, 0])
+            .collect();
+
+        // 維持が空なので、空きはテーブルの非透過スロットすべて
+        let mut colors = Colors::new();
+        colors.observe(&[0u8, 0, 0], 3);
+        let current = Palette::from_colors(colors, false);
+        assert!(current.recently_used(8).is_empty());
+
+        let expected =
+            changed_colors(&layout, &[], std::iter::once(&frame[..])).quantize(QUANTIZED_COLORS);
+        assert_eq!(expected.len(), QUANTIZED_COLORS);
+
+        let rebuilt = rebuild(&layout, &current, 8, 64, &[], std::iter::once(&frame[..]));
+        let actual: Vec<u32> = (0..rebuilt.colors())
+            .map(|index| rebuilt.color_at(index as u8))
+            .collect();
+        assert_eq!(actual, expected, "空きの数と残差の色数が食い違っている");
     }
 
     /// 外したビンを捨てると、残差の数がそのぶん減る

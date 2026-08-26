@@ -477,6 +477,61 @@ mod tests {
         assert_eq!(palette.table().len(), MAX_COLORS);
     }
 
+    /// 透過のエントリは維持の対象にならない
+    ///
+    /// 透過スロットは据え直したテーブルが必ず1つ取り直すもので、維持へ数えると
+    /// 非透過色の空きを食う。
+    #[test]
+    fn the_transparent_entry_is_never_kept() {
+        let pixels = [1u8, 2, 3, 4, 5, 6];
+        let mut palette = Palette::from_colors(colors_of(&pixels, 3), false);
+        let transparent = palette.transparent().expect("透過インデックスが無い");
+
+        palette.set_frame(1);
+        palette.mark_used(0);
+        palette.mark_used(transparent);
+
+        let kept = palette.recently_used(8);
+        assert_eq!(kept.len(), 1, "透過のエントリまで維持している");
+        assert_eq!(kept[0].color, 0xFF03_0201);
+    }
+
+    /// 一度も添字を書いていないエントリは維持の対象にならない
+    #[test]
+    fn an_entry_that_was_never_written_is_not_kept() {
+        let pixels = [1u8, 2, 3, 4, 5, 6];
+        let mut palette = Palette::from_colors(colors_of(&pixels, 3), false);
+
+        palette.set_frame(1);
+        palette.mark_used(0);
+
+        let kept = palette.recently_used(8);
+        assert_eq!(kept.len(), 1, "書いていないエントリまで維持している");
+        assert_eq!(kept[0].color, 0xFF03_0201);
+    }
+
+    /// 維持したエントリの最終使用は、据え直した後のテーブルへ引き継ぐ
+    #[test]
+    fn a_kept_entry_carries_its_last_use_into_the_rebuilt_table() {
+        let kept = [
+            Kept {
+                color: 0xFF00_0000,
+                last_used: 9,
+            },
+            Kept {
+                color: 0xFF00_00FF,
+                last_used: 2,
+            },
+        ];
+        let mut palette = Palette::from_rebuilt(&kept, &[]);
+        palette.set_frame(10);
+
+        let carried = palette.recently_used(4);
+        assert_eq!(carried.len(), 1, "最終使用が引き継がれていない");
+        assert_eq!(carried[0].color, 0xFF00_0000);
+        assert_eq!(carried[0].last_used, 9);
+    }
+
     #[test]
     fn the_minimum_code_size_never_drops_below_two() {
         for (colors, size) in [(1, 2), (2, 2), (3, 2), (4, 2), (5, 3), (255, 8), (256, 8)] {
