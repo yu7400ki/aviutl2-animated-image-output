@@ -76,21 +76,10 @@ fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
     )
     .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
 
-    for frame in 0..info.num_frames() {
-        if info.is_abort() {
-            return Err("処理が中断されました".into());
-        }
-
-        let frame_data = info
-            .get_video_frame(frame, config.color_format)
-            .ok_or_else(|| format!("フレーム取得エラー: フレーム {}", frame))?;
-
-        encoder
-            .add_frame(&frame_data, delay)
-            .map_err(|e| format!("フレーム書き込みエラー: {}", e))?;
-
-        info.rest_time_disp(frame, info.num_frames());
-    }
+    info.encode_frames(config.color_format, |frame_data| {
+        encoder.add_frame(&frame_data, delay)
+    })
+    .map_err(|e| e.to_string())?;
 
     // 色種別は最後のフレームまでに決まるが、書き出しの成否は終端まで分からない
     let reduction = encoder.color_reduction();
