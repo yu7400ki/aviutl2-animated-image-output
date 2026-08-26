@@ -8,9 +8,11 @@
 use gif_encoder::{
     ColorType, Config, DEFAULT_MAX_SPOOL_BYTES, Encoder, Error, FrameDelay, PaletteKind, Report,
 };
+use std::cell::RefCell;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// 決定的な擬似乱数列
@@ -1852,8 +1854,24 @@ fn a_missing_or_extra_frame_is_rejected() {
 }
 
 /// 一定バイト数まで受け付け、それ以降は必ず失敗する書き出し先
+///
+/// 受け付けたバイトは共有した控えへ写す。失敗したエンコーダは書き出し先を
+/// 返さないため、途中で切れたブロックの列はこの控えからしか見られない。
 struct FailingWriter {
     remaining: usize,
+    written: Rc<RefCell<Vec<u8>>>,
+}
+
+impl FailingWriter {
+    /// `budget` バイトまで受け付ける書き出し先と、書けたバイト列の控え
+    fn new(budget: usize) -> (Self, Rc<RefCell<Vec<u8>>>) {
+        let written = Rc::new(RefCell::new(Vec::new()));
+        let writer = FailingWriter {
+            remaining: budget,
+            written: Rc::clone(&written),
+        };
+        (writer, written)
+    }
 }
 
 impl Write for FailingWriter {
@@ -1863,6 +1881,7 @@ impl Write for FailingWriter {
             return Err(std::io::Error::other("書き出し失敗"));
         }
         self.remaining -= buf.len();
+        self.written.borrow_mut().extend_from_slice(buf);
         Ok(buf.len())
     }
 
@@ -1884,7 +1903,7 @@ fn a_failed_write_poisons_the_encoder() {
         ..Config::default()
     };
     // ヘッダは通り、論理画面記述子かカラーテーブルで尽きる長さ
-    let writer = FailingWriter { remaining: 8 };
+    let (writer, _) = FailingWriter::new(8);
     let mut encoder = Encoder::new(writer, 8, 8, FRAMES, config).unwrap();
 
     let failure = frames
@@ -1898,6 +1917,79 @@ fn a_failed_write_poisons_the_encoder() {
         Err(Error::Poisoned)
     ));
     assert!(matches!(encoder.finish(), Err(Error::Poisoned)));
+}
+
+/// 1枚書き終えた後で尽きた書き出しは、終端の無いブロックの列を残す
+///
+/// 毒を仕込む理由がこの形にある。中断した列に書き足しても終端まで揃わないため、
+/// 失敗した後のエンコーダは投入も終端も受け付けない。
+#[test]
+fn a_write_that_fails_after_a_frame_leaves_the_stream_unterminated() {
+    const FRAMES: u32 = 16;
+    /// GIFの終端を表すブロック
+    const TRAILER: u8 = 0x3B;
+
+    let frames: Vec<Vec<u8>> = (0..FRAMES).map(|seed| noise(8 * 8 * 3, seed)).collect();
+    // 溜める余地を無くし、先読みリングが埋まった後の投入から書き出させる
+    let config = Config {
+        max_spool_bytes: 0,
+        ..Config::default()
+    };
+
+    // 終端まで書けたときの出力と、1枚目を書き終えた時点のバイト数を測る
+    let (writer, complete) = FailingWriter::new(usize::MAX);
+    let mut encoder = Encoder::new(writer, 8, 8, FRAMES, config).unwrap();
+    let mut first_frame_bytes = 0;
+    for (index, frame) in frames.iter().enumerate() {
+        encoder.add_frame(frame, delay_of(index)).unwrap();
+        if first_frame_bytes == 0 {
+            first_frame_bytes = complete.borrow().len();
+        }
+    }
+    encoder.finish().unwrap();
+    let full = complete.borrow().clone();
+    assert!(first_frame_bytes > 0, "投入の途中で書き出していない");
+    assert!(first_frame_bytes < full.len(), "1枚目で出力が終わっている");
+
+    // 同じ投入を、1枚目を書き終えたところで尽きる予算で走らせる
+    let (writer, interrupted) = FailingWriter::new(first_frame_bytes);
+    let mut encoder = Encoder::new(writer, 8, 8, FRAMES, config).unwrap();
+    let mut accepted = 0;
+    let mut failure = None;
+    for (index, frame) in frames.iter().enumerate() {
+        match encoder.add_frame(frame, delay_of(index)) {
+            Ok(()) => accepted += 1,
+            Err(error) => {
+                failure = Some(error);
+                break;
+            }
+        }
+    }
+    assert!(accepted > 0, "1枚も受け付けないまま失敗している");
+    assert!(matches!(failure, Some(Error::Io(_))), "{failure:?}");
+
+    assert!(matches!(
+        encoder.add_frame(&frames[0], delay_of(0)),
+        Err(Error::Poisoned)
+    ));
+    assert!(matches!(encoder.finish(), Err(Error::Poisoned)));
+
+    let written = interrupted.borrow();
+    assert_eq!(
+        written.as_slice(),
+        &full[..first_frame_bytes],
+        "書けたバイト列が終端まで書けた出力の接頭辞でない"
+    );
+    assert_eq!(
+        full.last(),
+        Some(&TRAILER),
+        "終端まで書いた出力に終端が無い"
+    );
+    assert_ne!(
+        written.last(),
+        Some(&TRAILER),
+        "中断した列が終端を持っている"
+    );
 }
 
 /// 先頭の書き出し位置で据え直したら、その結果がグローバルカラーテーブルになる
