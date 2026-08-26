@@ -913,6 +913,87 @@ fn encode_on(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anim_core::Colors;
+
+    /// 1色だけのテーブル
+    fn table_of(pixel: &[u8; 3]) -> Palette {
+        let mut colors = Colors::new();
+        colors.observe(pixel, 3);
+        Palette::from_colors(colors, false)
+    }
+
+    /// 手放したテーブルが最近傍へ写した画素も、報告に残る
+    ///
+    /// 据え直しを跨ぐと保留中のフレームは1つ前のテーブルで符号化され、そのテーブルは
+    /// 書き終えた時点で手放される。数え落とすと、劣化しているのに
+    /// [`Report::approximated_pixels`] が0を報せうる。
+    #[test]
+    fn a_retired_table_keeps_the_pixels_it_approximated() {
+        let mut palettes = Palettes::new(table_of(&[1, 2, 3]));
+        palettes.current.note_approximated(3);
+
+        palettes.replace(table_of(&[4, 5, 6]));
+        palettes.current.note_approximated(5);
+        assert_eq!(palettes.approximated(), 8);
+
+        palettes.retire();
+        assert_eq!(
+            palettes.approximated(),
+            8,
+            "手放したテーブルが写した画素が消えている"
+        );
+    }
+
+    /// 一様な色で埋めたRGB8のフレーム
+    fn flat(value: u8) -> Vec<u8> {
+        vec![value; (REBUILD_WIDTH * REBUILD_HEIGHT) as usize * 3]
+    }
+
+    const REBUILD_WIDTH: u32 = 20;
+    const REBUILD_HEIGHT: u32 = 20;
+
+    /// 据え直したテーブルは、いま処理しているフレームから最終使用を数える
+    ///
+    /// 番号を伝えないと、据え直したフレームで書いた添字が「一度も使っていない」の
+    /// ままになり、次の据え直しの維持から外れる。
+    #[test]
+    fn a_rebuilt_table_counts_its_entries_from_the_current_frame() {
+        // 先頭フレームだけで決着させ、2枚目の白で据え直しへ踏み切らせる
+        let mut frames = vec![flat(0x00), flat(0xFF)];
+        frames.resize(12, flat(0x00));
+
+        let config = Config {
+            color_type: ColorType::Rgb8,
+            max_spool_bytes: 0,
+            ..Config::default()
+        };
+        let mut encoder = Encoder::new(
+            Vec::new(),
+            REBUILD_WIDTH,
+            REBUILD_HEIGHT,
+            frames.len() as u32,
+            config,
+        )
+        .unwrap();
+        let delay = FrameDelay::new(1, 30).unwrap();
+        for frame in &frames {
+            encoder.add_frame(frame, delay).unwrap();
+        }
+
+        let Stage::Streaming(streaming) = encoder.stage else {
+            panic!("書き出しへ移っていない");
+        };
+        let writing = streaming.writing;
+
+        // 白を書いたのは据え直した2枚目だけ
+        let kept = writing.palettes.current.recently_used(KEEP_WINDOW);
+        let white = kept.iter().find(|entry| entry.color == 0xFFFF_FFFF);
+        assert_eq!(
+            white.map(|entry| entry.last_used),
+            Some(2),
+            "据え直したフレームで書いた添字の最終使用が残っていない"
+        );
+    }
 
     /// 連敗が続くと候補を立てるのを休み、休みが明けたらまた試す
     #[test]
