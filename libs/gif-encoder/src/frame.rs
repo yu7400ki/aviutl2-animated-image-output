@@ -786,6 +786,35 @@ mod tests {
         assert_eq!(canvas.after[..4], written, "キャンバスが書いた色を持たない");
     }
 
+    /// 誤差が閾値ちょうどの画素は、閾値を超えた画素に数えない
+    ///
+    /// この数は据え直すかどうかを決める。境目を含めると、ちょうどの誤差で
+    /// 据え直しへ倒れる。
+    #[test]
+    fn an_error_equal_to_the_tolerance_is_not_counted_as_exceeding() {
+        /// テーブルが持つ唯一の非透過色
+        const SETTLED: [u8; 4] = [0x10, 0x20, 0x30, 0xFF];
+        /// 緑だけ 20 離れた色。写した先との二乗距離はちょうど TOLERANCE になる
+        const OFF_BY_TOLERANCE: [u8; 4] = [0x10, 0x34, 0x30, 0xFF];
+        const TOLERANCE: u32 = 20 * 20;
+
+        let pixels = u64::from(WIDTH * HEIGHT);
+        let frame: Vec<u8> = OFF_BY_TOLERANCE.repeat(pixels as usize);
+        let mut palette = palette_of(&[&SETTLED[..]], 4);
+        let canvas = Canvas::new(layout(ColorType::Rgba8));
+        let mut rendered = Vec::new();
+
+        let counted = canvas.render(&[], &frame, &mut palette, TOLERANCE, &mut rendered);
+        assert_eq!(counted.approximated, pixels, "最近傍へ写していない");
+        assert_eq!(
+            counted.exceeded, 0,
+            "閾値ちょうどの誤差を超えたものに数えている"
+        );
+
+        let counted = canvas.render(&[], &frame, &mut palette, TOLERANCE - 1, &mut rendered);
+        assert_eq!(counted.exceeded, pixels, "閾値を超えた誤差を数えていない");
+    }
+
     /// 全幅でない矩形は行をまたいで切り出される
     #[test]
     fn a_partial_width_rect_is_cropped_row_by_row() {
