@@ -525,6 +525,24 @@ mod tests {
         assert_eq!(palette.table().len(), MAX_COLORS);
     }
 
+    /// 写す先が1つも残らないテーブルへ足す埋め草は、不透明な黒
+    ///
+    /// カラーテーブルのパディングは黒なので、写す先にする埋め草も黒にする。
+    /// 別の色を足すと、透過だけの区間から据えたテーブルがその色を画面へ出す。
+    #[test]
+    fn the_padding_that_becomes_a_target_is_opaque_black() {
+        let pixels = [0u8, 0, 0, 0];
+        let mut palette = Palette::from_colors(colors_of(&pixels, 4), false);
+        assert!(palette.black_fallback(), "写す先の埋め草を足していない");
+
+        let mapped = palette.map(&[0x10, 0x20, 0x30, 0xFF], 4);
+        assert!(
+            matches!(mapped.fit, Fit::Substituted),
+            "埋め草へ落ちた画素を近似として返している"
+        );
+        assert_eq!(palette.color_at(mapped.index), 0xFF00_0000);
+    }
+
     /// 透過のエントリは維持の対象にならない
     ///
     /// 透過スロットは据え直したテーブルが必ず1つ取り直すもので、維持へ数えると
