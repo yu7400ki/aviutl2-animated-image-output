@@ -238,9 +238,6 @@ impl Palette {
     }
 
     /// 直近 `window` フレームの出力で使った非透過エントリ
-    ///
-    /// 瞬きで戻ってきた色と、廃棄方法で抜かれた画素を書き直す色を、テーブルを
-    /// 据え直しても失わないために残す。
     pub(crate) fn recently_used(&self, window: u32) -> Vec<Kept> {
         let oldest = self.frame.saturating_sub(window);
         self.entries
