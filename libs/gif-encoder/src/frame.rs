@@ -3,7 +3,7 @@
 use crate::block::{DISPOSAL_DO_NOT_DISPOSE, DISPOSAL_RESTORE_TO_BACKGROUND};
 use crate::layout::{ColorType, Layout};
 use crate::normalize::TRANSPARENT;
-use crate::table::Palette;
+use crate::table::{Fit, Palette};
 use anim_core::{Rect, dirty_rect};
 
 /// 差分の無いフレームが書く矩形
@@ -80,7 +80,7 @@ impl Screen<'_> {
     /// 同じ値の長いランになる。潰すのが写すより先なので、テーブルに載って
     /// いない色を持ち越した未変更画素もそのまま潰れる。
     ///
-    /// 潰れずに写した画素は、テーブルに完全一致が無ければ最近傍へずれる。
+    /// 潰れずに写した画素は、テーブルに完全一致が無ければ最近傍か埋め草へずれる。
     /// 書いた添字が指す色を `frame` へ戻すので、これを [`Canvas::advance`] へ
     /// 渡せばキャンバスはデコーダが見る色をそのまま持つ。
     ///
@@ -96,6 +96,7 @@ impl Screen<'_> {
         let bpp = self.layout.bytes_per_pixel;
         let transparent = palette.transparent();
         let mut approximated = 0;
+        let mut substituted = 0;
 
         out.reserve(rect.area() as usize);
         for y in 0..rect.height as usize {
@@ -111,8 +112,13 @@ impl Screen<'_> {
                     }
                     _ => {
                         let mapped = palette.map(&pixel[..bpp], bpp);
-                        if mapped.approximated {
-                            approximated += 1;
+                        let counter = match mapped.fit {
+                            Fit::Exact => None,
+                            Fit::Approximated { .. } => Some(&mut approximated),
+                            Fit::Substituted => Some(&mut substituted),
+                        };
+                        if let Some(counter) = counter {
+                            *counter += 1;
                             let color = palette.color_at(mapped.index).to_le_bytes();
                             frame[at..at + bpp].copy_from_slice(&color[..bpp]);
                         }
@@ -124,6 +130,7 @@ impl Screen<'_> {
             }
         }
         palette.note_approximated(approximated);
+        palette.note_substituted(substituted);
     }
 }
 
@@ -133,7 +140,9 @@ impl Screen<'_> {
 pub(crate) struct Rendered {
     /// 完全一致が無く最近傍へ写した画素数
     pub(crate) approximated: u64,
-    /// 写す先との誤差が閾値を超えた画素数
+    /// 写す先が無く埋め草へ置いた画素数
+    pub(crate) substituted: u64,
+    /// 最近傍へ写した画素のうち、誤差が閾値を超えた数
     pub(crate) exceeded: u64,
 }
 
@@ -316,6 +325,7 @@ impl Canvas {
 
         let mut rendered = Rendered {
             approximated: 0,
+            substituted: 0,
             exceeded: 0,
         };
         // 先頭フレームには前が無く、持ち越せる色も無い
@@ -335,8 +345,14 @@ impl Canvas {
                 continue;
             }
             let mapped = palette.map(pixel, bpp);
-            rendered.approximated += u64::from(mapped.approximated);
-            rendered.exceeded += u64::from(mapped.error > tolerance);
+            match mapped.fit {
+                Fit::Exact => {}
+                Fit::Approximated { error } => {
+                    rendered.approximated += 1;
+                    rendered.exceeded += u64::from(error > tolerance);
+                }
+                Fit::Substituted => rendered.substituted += 1,
+            }
             out.extend_from_slice(&palette.color_at(mapped.index).to_le_bytes()[..bpp]);
         }
         rendered

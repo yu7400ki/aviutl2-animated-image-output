@@ -94,15 +94,22 @@ pub struct Report {
     pub local_tables: u32,
     /// 完全一致が無く最近傍へ写した画素数
     ///
-    /// 0なら全画素が据えたテーブルの色そのままで解決した。可逆の経路では常に0で、
-    /// 先頭区間から据えたテーブルに無い色が後から現れたときと、量子化した色へ
-    /// 写したときに増える。数えるのは写した画素で、持ち越した画素は数えない。
+    /// 素材の色に近いエントリはあったが、そのものは無かった画素。可逆の経路では
+    /// 常に0で、先頭区間から据えたテーブルに無い色が後から現れたときと、量子化した
+    /// 色へ写したときに増える。数えるのは写した画素で、持ち越した画素は数えない。
+    ///
+    /// [`Report::substituted_pixels`] と合わせて0なら、全画素が据えたテーブルの
+    /// 色そのままで解決した。
     pub approximated_pixels: u64,
+    /// 写す先が無く、埋め草の黒へ置いた画素数
+    ///
+    /// 溜めた区間の画素がすべて透過で、据えたテーブルが非透過色を1つも持たない
+    /// ときに増える。近似と違って素材の色は画面に残らない。
+    pub substituted_pixels: u64,
     /// 据えたテーブルに非透過色が1つも無く、写す先として黒を足したか
     ///
-    /// 溜めた区間の画素がすべて透過だったときに起きる。以降のフレームの不透明な
-    /// 画素は色に関わらずこの黒へ写るため、[`Report::approximated_pixels`] が
-    /// 数える回数の大小に関わらず、素材の色は画面に残らない。
+    /// 溜めた区間の画素がすべて透過だったときに起きる。テーブルの形の記述で、
+    /// その黒へ実際に置いた画素は [`Report::substituted_pixels`] が数える。
     pub black_fallback: bool,
     /// 見えていた画素を完全な透過へ潰した画素数
     ///
@@ -130,6 +137,9 @@ const LOOKAHEAD: usize = 8;
 const REBUILD_TOLERANCE: u32 = 20;
 
 /// 誤差が [`REBUILD_TOLERANCE`] を超えた画素が論理画面に占める割合の下限 (千分率)
+///
+/// この下限は近似だけを測る。もっと良く表せるだけの画素は、わずかな向上のために
+/// 据え直しを繰り返す値打ちが無い。
 const REBUILD_FLOOR_PERMILLE: u64 = 20;
 
 /// 維持するエントリを決める、直近の出力のフレーム数
@@ -213,7 +223,9 @@ struct Palettes {
     /// 保留中のフレームを符号化したテーブル。現在と同じなら `None`
     earlier: Option<Palette>,
     /// 手放したテーブルが最近傍へ写した画素数の合計
-    retired: u64,
+    retired_approximated: u64,
+    /// 手放したテーブルが埋め草へ置いた画素数の合計
+    retired_substituted: u64,
     /// どこかのテーブルが写す先として黒を足したか
     black_fallback: bool,
 }
@@ -224,7 +236,8 @@ impl Palettes {
             black_fallback: palette.black_fallback(),
             current: palette,
             earlier: None,
-            retired: 0,
+            retired_approximated: 0,
+            retired_substituted: 0,
         }
     }
 
@@ -243,15 +256,23 @@ impl Palettes {
     /// 保留中のフレームを書き終えたので、1つ前のテーブルを手放す
     fn retire(&mut self) {
         if let Some(earlier) = self.earlier.take() {
-            self.retired += earlier.approximated();
+            self.retired_approximated += earlier.approximated();
+            self.retired_substituted += earlier.substituted();
         }
     }
 
     /// 手放したものも含め、最近傍へ写した画素数
     fn approximated(&self) -> u64 {
-        self.retired
+        self.retired_approximated
             + self.current.approximated()
             + self.earlier.as_ref().map_or(0, Palette::approximated)
+    }
+
+    /// 手放したものも含め、埋め草へ置いた画素数
+    fn substituted(&self) -> u64 {
+        self.retired_substituted
+            + self.current.substituted()
+            + self.earlier.as_ref().map_or(0, Palette::substituted)
     }
 }
 
@@ -433,6 +454,7 @@ impl<W: Write> Encoder<W> {
 
         let (stage, mut parts) = self.split();
         let mut approximated_pixels = 0;
+        let mut substituted_pixels = 0;
         let mut black_fallback = false;
         if let Stage::Streaming(streaming) = stage {
             parts.drain(streaming)?;
@@ -441,6 +463,7 @@ impl<W: Write> Encoder<W> {
                 parts.write_pending(pending, DISPOSAL_DO_NOT_DISPOSE)?;
             }
             approximated_pixels = streaming.writing.palettes.approximated();
+            substituted_pixels = streaming.writing.palettes.substituted();
             black_fallback = streaming.writing.palettes.black_fallback;
         }
 
@@ -454,6 +477,7 @@ impl<W: Write> Encoder<W> {
             rebuilds: self.rebuilds,
             local_tables: self.local_tables,
             approximated_pixels,
+            substituted_pixels,
             black_fallback,
             binarized_to_transparent: self.binarized.to_transparent,
             binarized_to_opaque: self.binarized.to_opaque,
@@ -713,7 +737,11 @@ impl<W: Write> Parts<'_, W> {
         let tolerance = REBUILD_TOLERANCE * REBUILD_TOLERANCE;
         let mut mapped =
             canvas.render(previous, pixels, &mut palettes.current, tolerance, rendered);
-        if mapped.exceeded > self.rebuild_floor() {
+        // 写す先が無かった画素は1つでも据え直す。近似と違って誤差の大小では
+        // 測れず、据え直す以外にその色を出す手立てが無い。埋め草しか写す先の
+        // 無いテーブルは溜めた区間が全画素透過のときしか生まれず、据え直した
+        // テーブルは必ず非透過色を持つので、この経路が繰り返し立つことはない
+        if mapped.substituted > 0 || mapped.exceeded > self.rebuild_floor() {
             let fresh = rebuild(
                 self.layout,
                 &palettes.current,
@@ -728,6 +756,7 @@ impl<W: Write> Parts<'_, W> {
             *self.rebuilds += 1;
         }
         palettes.current.note_approximated(mapped.approximated);
+        palettes.current.note_substituted(mapped.substituted);
 
         let (delay, clamped) = self.hundredths.next(delay);
         *self.delay_clamped |= clamped;

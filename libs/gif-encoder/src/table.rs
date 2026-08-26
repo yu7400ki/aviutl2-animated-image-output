@@ -72,14 +72,29 @@ impl ColorTable {
     }
 }
 
+/// 画素をテーブルへ写せた度合い
+///
+/// [`Self::Approximated`] と [`Self::Substituted`] は性質が違う。前者は
+/// 「もっと良く表せる」で、据え直す値打ちは寄った画素の数で決まる。後者は
+/// 「表す手立てが無い」で、画素の数に関わらず素材の色が失われる。
+pub(crate) enum Fit {
+    /// テーブルにその色がそのまま載っていた
+    Exact,
+    /// 最近傍へ寄せた
+    Approximated {
+        /// 写す先の色との二乗距離
+        error: u32,
+    },
+    /// 写す先が無く、[`OPAQUE_BLACK`] の埋め草へ置いた
+    Substituted,
+}
+
 /// 画素をテーブルへ写した結果
 pub(crate) struct Mapped {
     /// 写す先の添字
     pub(crate) index: u8,
-    /// 写す先の色との二乗距離。完全一致なら0
-    pub(crate) error: u32,
-    /// 完全一致が無く最近傍へ落ちたか
-    pub(crate) approximated: bool,
+    /// 写せた度合い
+    pub(crate) fit: Fit,
 }
 
 /// 据え直しても残すエントリ1つ
@@ -104,8 +119,10 @@ pub(crate) struct Palette {
     nearest: Nearest,
     /// 完全一致が無く最近傍へ写した画素数
     approximated: u64,
-    /// 写す先として [`OPAQUE_BLACK`] を足したか
-    black_fallback: bool,
+    /// 写す先が無く埋め草へ置いた画素数
+    substituted: u64,
+    /// 写す先として足した [`OPAQUE_BLACK`] の添字
+    fallback: Option<u8>,
     /// グローバルカラーテーブルではなく、フレームごとに書く色表か
     local: bool,
     /// エントリごとの、最後に添字を出力へ書いたフレーム番号 (0は一度も無い)
@@ -208,6 +225,12 @@ impl Palette {
             .iter()
             .position(|&color| color == TRANSPARENT)
             .map(|index| index as u8);
+        let fallback = black_fallback.then(|| {
+            entries
+                .iter()
+                .position(|&color| color == OPAQUE_BLACK)
+                .expect("足した埋め草がテーブルに無い") as u8
+        });
         let table = ColorTable::new(&entries);
         let nearest = Nearest::new(&entries);
 
@@ -219,7 +242,8 @@ impl Palette {
             transparent,
             nearest,
             approximated: 0,
-            black_fallback,
+            substituted: 0,
+            fallback,
             local: false,
             frame: 0,
         }
@@ -261,6 +285,11 @@ impl Palette {
         self.approximated += count;
     }
 
+    /// 埋め草へ置いた画素を数に加える
+    pub(crate) fn note_substituted(&mut self, count: u64) {
+        self.substituted += count;
+    }
+
     /// 透過でないエントリの数
     pub(crate) fn colors(&self) -> u16 {
         (self.entries.len() - usize::from(self.transparent.is_some())) as u16
@@ -271,9 +300,14 @@ impl Palette {
         self.approximated
     }
 
+    /// 写す先が無く埋め草へ置いた画素数
+    pub(crate) fn substituted(&self) -> u64 {
+        self.substituted
+    }
+
     /// 非透過色が1つも無く、写す先として黒を足したか
     pub(crate) fn black_fallback(&self) -> bool {
-        self.black_fallback
+        self.fallback.is_some()
     }
 
     /// 添字が指す色
@@ -303,12 +337,14 @@ impl Palette {
     /// 透過のエントリは最近傍の候補にならない。素材自身の透過画素は完全一致で
     /// 引け、透過ラン用に足したスロットはキャンバスと一致する画素にだけ置く
     /// もので、どちらも色を近似する相手ではない。
+    ///
+    /// 非透過エントリが [`OPAQUE_BLACK`] の埋め草しか無いテーブルでは、最近傍は
+    /// 必ずその埋め草になる。そこへ落ちた画素は近似ではなく代替として返す。
     pub(crate) fn map(&mut self, pixel: &[u8], bpp: usize) -> Mapped {
         if let Some(index) = self.indexed.index_of(pixel, bpp) {
             return Mapped {
                 index,
-                error: 0,
-                approximated: false,
+                fit: Fit::Exact,
             };
         }
 
@@ -319,11 +355,14 @@ impl Palette {
         // 判定が先に弾く
         debug_assert!(color != TRANSPARENT, "透過標識を色として近似している");
         let index = self.nearest.index_of(color);
-        Mapped {
-            index,
-            error: distance(color, self.entries[index as usize]),
-            approximated: true,
-        }
+        let fit = if self.fallback == Some(index) {
+            Fit::Substituted
+        } else {
+            Fit::Approximated {
+                error: distance(color, self.entries[index as usize]),
+            }
+        };
+        Mapped { index, fit }
     }
 }
 

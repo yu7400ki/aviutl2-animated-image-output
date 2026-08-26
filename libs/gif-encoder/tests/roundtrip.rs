@@ -1269,15 +1269,16 @@ fn a_table_quantized_from_a_prefix_is_reported() {
     );
 }
 
-/// 透過だけの先頭区間から据えたテーブルでも、後から現れた不透明色を写せる
+/// 透過だけの先頭区間から据えたテーブルは、不透明な画素1つで据え直す
 ///
-/// 和集合が透過標識だけだと写す先の候補が1つも残らない。カラーテーブルは
-/// 2エントリ未満を書けないため、埋め草の黒がその候補になる。
+/// 和集合が透過標識だけだと写す先の候補が1つも残らず、埋め草の黒しか無い。
+/// そこへ落ちる画素は「もっと良く表せる」のではなく「表す手立てが無い」ので、
+/// 誤差が許容の中でも据え直す。
 ///
-/// 後から現れる色は黒のすぐ隣に置く。誤差が大きいとテーブルを据え直す経路へ
-/// 逸れ、写す先が埋め草でなくなる。
+/// 後から現れる色は黒のすぐ隣に置く。誤差だけが据え直しを決めているなら、
+/// この色は許容の中に収まって黒のまま残る。
 #[test]
-fn an_opaque_pixel_after_a_fully_transparent_prefix_is_mapped_to_the_padding() {
+fn an_opaque_pixel_after_a_fully_transparent_prefix_forces_a_rebuild() {
     const WIDTH: u32 = 4;
     const HEIGHT: u32 = 2;
     let color = ColorType::Rgba8;
@@ -1293,17 +1294,56 @@ fn an_opaque_pixel_after_a_fully_transparent_prefix_is_mapped_to_the_padding() {
     };
     let (bytes, report) = encode_with(WIDTH, HEIGHT, config, &[first, second]).unwrap();
     assert_eq!(report.palette, PaletteKind::ExactFromPrefix { colors: 1 });
-    assert_eq!(report.approximated_pixels, 1);
     assert!(report.black_fallback, "写す先の黒を足したことが出ていない");
+    assert_eq!(report.rebuilds, 1, "写す先が無いのに据え直していない");
+    assert_eq!(
+        report.substituted_pixels, 0,
+        "据え直した後も埋め草へ写している"
+    );
 
     let decoded = decode_with_gif(&bytes);
     let screen = &compose(&decoded)[1];
     let at = ((WIDTH + 1) * 4) as usize;
     assert_eq!(
         screen[at..at + 4],
-        [0, 0, 0, 0xFF],
-        "不透明な黒へ写っていない"
+        [0x01, 0x00, 0x00, 0xFF],
+        "素材の色が残っていない"
     );
+}
+
+/// 写す先が無い画素は、据え直しの画素数の下限を見ない
+///
+/// 下限は論理画面に占める割合で決まる。100x100 の画面に一辺10の矩形は
+/// 1% で、近似なら据え直さない広さしか無い。写す先が無い画素をこの下限で
+/// 測ると、小さく描かれた物の色だけが黒へ落ちる。
+#[test]
+fn a_small_opaque_square_after_a_transparent_prefix_keeps_its_color() {
+    const WIDTH: u32 = 100;
+    const HEIGHT: u32 = 100;
+    const SIDE: u32 = 10;
+    let color = ColorType::Rgba8;
+    let square = [0xE0, 0x20, 0x30, 0xFF];
+
+    let first = solid(WIDTH, HEIGHT, color, &[0, 0, 0, 0]);
+    let mut second = first.clone();
+    for y in 0..SIDE {
+        for x in 0..SIDE {
+            set_pixel(&mut second, WIDTH, color, x, y, &square);
+        }
+    }
+
+    let config = Config {
+        color_type: color,
+        max_spool_bytes: 0,
+        ..Config::default()
+    };
+    let (bytes, report) = encode_with(WIDTH, HEIGHT, config, &[first, second]).unwrap();
+    assert_eq!(report.rebuilds, 1, "下限が写す先の無さを捨てている");
+
+    let decoded = decode_with_gif(&bytes);
+    let screen = &compose(&decoded)[1];
+    let at = ((WIDTH + 1) * 4) as usize;
+    assert_eq!(screen[at..at + 4], square, "素材の色が残っていない");
 }
 
 /// 先頭区間から据えたテーブルに無い色が後から現れたら、最近傍へ写す

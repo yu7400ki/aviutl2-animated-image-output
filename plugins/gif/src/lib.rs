@@ -298,6 +298,7 @@ mod tests {
             rebuilds: 0,
             local_tables: 0,
             approximated_pixels: 0,
+            substituted_pixels: 0,
             black_fallback: false,
             binarized_to_transparent: 0,
             binarized_to_opaque: 0,
