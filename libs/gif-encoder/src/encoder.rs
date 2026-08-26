@@ -3,7 +3,7 @@
 use crate::block::{
     self, DISPOSAL_DO_NOT_DISPOSE, DISPOSAL_RESTORE_TO_BACKGROUND, DISPOSAL_RESTORE_TO_PREVIOUS,
 };
-use crate::delay::hundredths;
+use crate::delay::Hundredths;
 use crate::error::Error;
 use crate::frame::{Canvas, Screen};
 use crate::layout::{ColorType, Layout};
@@ -322,6 +322,8 @@ pub struct Encoder<W: Write> {
     local_tables: u32,
     /// 完全透過へ潰した画素数
     binarized_pixels: u64,
+    /// 1/100秒への累積の丸め
+    hundredths: Hundredths,
     /// 遅延を下限で切り上げたか
     delay_clamped: bool,
     /// 溜めたバイト数の最大値
@@ -358,6 +360,7 @@ impl<W: Write> Encoder<W> {
             rebuilds: 0,
             local_tables: 0,
             binarized_pixels: 0,
+            hundredths: Hundredths::new(),
             delay_clamped: false,
             peak_spool_bytes: 0,
         })
@@ -469,6 +472,7 @@ impl<W: Write> Encoder<W> {
             rebuilds,
             local_tables,
             binarized_pixels: _,
+            hundredths,
             delay_clamped,
             peak_spool_bytes,
         } = self;
@@ -481,6 +485,7 @@ impl<W: Write> Encoder<W> {
                 palette_kind,
                 rebuilds,
                 local_tables,
+                hundredths,
                 delay_clamped,
                 peak_spool_bytes,
                 num_frames: *num_frames,
@@ -518,6 +523,7 @@ struct Parts<'a, W: Write> {
     palette_kind: &'a mut Option<PaletteKind>,
     rebuilds: &'a mut u32,
     local_tables: &'a mut u32,
+    hundredths: &'a mut Hundredths,
     delay_clamped: &'a mut bool,
     peak_spool_bytes: &'a mut usize,
     num_frames: u32,
@@ -716,7 +722,8 @@ impl<W: Write> Parts<'_, W> {
         }
         palettes.current.note_approximated(mapped.approximated);
 
-        let delay = self.hundredths(delay);
+        let (delay, clamped) = self.hundredths.next(delay);
+        *self.delay_clamped |= clamped;
         match pending.take() {
             None => {
                 let laid = lay_out(
@@ -775,13 +782,6 @@ impl<W: Write> Parts<'_, W> {
         }
         block::image_body(self.writer, pending.min_code_size, &pending.body)?;
         Ok(())
-    }
-
-    /// フレーム遅延を1/100秒へ丸め、下限で切り上げたことを覚える
-    fn hundredths(&mut self, delay: FrameDelay) -> u16 {
-        let (rounded, clamped) = hundredths(delay);
-        *self.delay_clamped |= clamped;
-        rounded
     }
 }
 

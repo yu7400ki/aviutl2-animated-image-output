@@ -185,8 +185,8 @@ fn compose(decoded: &Decoded) -> Vec<Vec<u8>> {
     screens
 }
 
-/// ffmpeg で合成済みのフレームへデコードした生RGBA。ffmpeg が無ければ `None`
-fn decode_with_ffmpeg(bytes: &[u8]) -> Option<Vec<u8>> {
+/// バイト列をデコーダへ渡すための一時ファイルへ書き出す
+fn temp_gif(bytes: &[u8]) -> PathBuf {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let path: PathBuf = std::env::temp_dir().join(format!(
         "gif-encoder-roundtrip-{}-{}.gif",
@@ -197,6 +197,12 @@ fn decode_with_ffmpeg(bytes: &[u8]) -> Option<Vec<u8>> {
         .unwrap()
         .write_all(bytes)
         .unwrap();
+    path
+}
+
+/// ffmpeg で合成済みのフレームへデコードした生RGBA。ffmpeg が無ければ `None`
+fn decode_with_ffmpeg(bytes: &[u8]) -> Option<Vec<u8>> {
+    let path = temp_gif(bytes);
 
     let output = Command::new("ffmpeg")
         .args(["-v", "error", "-i"])
@@ -1367,39 +1373,108 @@ fn the_number_of_plays_reaches_the_decoder() {
     assert_eq!(decode_with_gif(&bytes).frames.len(), 1);
 }
 
-/// 1/100秒で表せない遅延は丸められ、下限に届かない遅延は切り上げられる
+/// フレームごとの遅延を指定して1x1のフレーム列を符号化する
+fn encode_delays(frames: &[Vec<u8>], delays: &[FrameDelay]) -> (Vec<u8>, Report) {
+    let mut encoder =
+        Encoder::new(Vec::new(), 1, 1, frames.len() as u32, Config::default()).unwrap();
+    for (data, delay) in frames.iter().zip(delays) {
+        encoder.add_frame(data, *delay).unwrap();
+    }
+    encoder.finish().unwrap()
+}
+
+/// 色だけが違う1x1のフレームを `count` 枚
+fn distinct_pixels(count: u8) -> Vec<Vec<u8>> {
+    (0..count).map(|i| vec![i * 0x10, 0x20, 0x30]).collect()
+}
+
+/// 2つのデコーダが読み出したフレームごとの遅延を確かめる
+fn assert_delays(bytes: &[u8], expected: &[u16], label: &str) {
+    let decoded = decode_with_gif(bytes);
+    assert_eq!(
+        decoded.frames.iter().map(|f| f.delay).collect::<Vec<_>>(),
+        expected,
+        "`gif` クレートが読んだ {label} の遅延が違う"
+    );
+    if let Some(actual) = probe_delays(bytes) {
+        assert_eq!(actual, expected, "ffprobe が読んだ {label} の遅延が違う");
+    }
+}
+
+/// ffprobe が読み出したフレームごとの表示時間 (1/100秒)。ffprobe が無ければ `None`
+///
+/// GIF の時間の刻みは 1/100 秒なので、刻みの数がそのまま遅延になる。
+fn probe_delays(bytes: &[u8]) -> Option<Vec<u16>> {
+    let path = temp_gif(bytes);
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "frame=duration",
+            "-of",
+            "csv=p=0",
+            "-i",
+        ])
+        .arg(&path)
+        .output();
+    std::fs::remove_file(&path).unwrap();
+
+    let output = match output {
+        Ok(output) => output,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "ffprobe が見つからない。デコーダが1つでは、一部のデコーダだけが読める出力を見つけられない"
+            );
+            eprintln!("ffprobe が見つからないため、そちらの読み出しを飛ばす");
+            return None;
+        }
+        Err(e) => panic!("ffprobe の起動に失敗した: {e}"),
+    };
+    assert!(
+        output.status.success(),
+        "ffprobe の読み出しに失敗した: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| line.trim().parse().unwrap())
+            .collect(),
+    )
+}
+
+/// 30fps は3フレームで10/100秒になる
+///
+/// 総和は 3.33, 6.67, 10.00, … と進むので、その丸めの差は 3, 4, 3 を繰り返す。
 #[test]
-fn delays_are_rounded_and_raised_to_the_lower_bound() {
-    let config = Config::default();
-    let frames = [vec![0x10, 0x20, 0x30], vec![0x40, 0x50, 0x60]];
-
-    let mut encoder = Encoder::new(Vec::new(), 1, 1, 2, config).unwrap();
-    for data in &frames {
-        encoder
-            .add_frame(data, FrameDelay::new(1001, 30000).unwrap())
-            .unwrap();
+fn delays_are_accumulated_across_the_frames() {
+    let frames = distinct_pixels(9);
+    for (numerator, denominator) in [(1, 30), (1001, 30000)] {
+        let delay = FrameDelay::new(numerator, denominator).unwrap();
+        let (bytes, report) = encode_delays(&frames, &vec![delay; frames.len()]);
+        assert!(!report.delay_clamped, "{numerator}/{denominator}");
+        assert_delays(
+            &bytes,
+            &[3, 4, 3, 3, 4, 3, 3, 4, 3],
+            &format!("{numerator}/{denominator}"),
+        );
     }
-    let (bytes, report) = encoder.finish().unwrap();
-    assert!(!report.delay_clamped);
-    let decoded = decode_with_gif(&bytes);
-    assert_eq!(
-        decoded.frames.iter().map(|f| f.delay).collect::<Vec<_>>(),
-        [3, 3]
-    );
+}
 
-    let mut encoder = Encoder::new(Vec::new(), 1, 1, 2, config).unwrap();
-    for data in &frames {
-        encoder
-            .add_frame(data, FrameDelay::new(1, 100).unwrap())
-            .unwrap();
-    }
-    let (bytes, report) = encoder.finish().unwrap();
+/// 下限に届かない遅延は切り上げ、そのぶんは累積へ戻さない
+#[test]
+fn a_delay_below_the_lower_bound_is_raised_without_feeding_it_back() {
+    let frames = distinct_pixels(3);
+    let delays = [(1, 100), (1, 10), (1, 10)]
+        .map(|(numerator, denominator)| FrameDelay::new(numerator, denominator).unwrap());
+    let (bytes, report) = encode_delays(&frames, &delays);
     assert!(report.delay_clamped, "切り上げがレポートに載っていない");
-    let decoded = decode_with_gif(&bytes);
-    assert_eq!(
-        decoded.frames.iter().map(|f| f.delay).collect::<Vec<_>>(),
-        [2, 2]
-    );
+    assert_delays(&bytes, &[2, 10, 10], "切り上げた列");
 }
 
 #[test]
