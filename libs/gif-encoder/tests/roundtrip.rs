@@ -516,17 +516,35 @@ fn a_frame_with_transparent_pixels_survives_both_decoders() {
     );
 }
 
-/// 閾値未満のアルファは完全透過へ潰れ、潰した画素数がレポートに載る
+/// 閾値未満のアルファは完全透過へ潰れ、動いた画素数が向きごとにレポートに載る
 #[test]
 fn partial_alpha_is_binarized_before_encoding() {
     let data: Vec<u8> = (0..64 * 8)
         .flat_map(|i| [(i % 200) as u8, 0x10, 0x20, (i % 256) as u8])
         .collect();
-    let squashed = data.chunks_exact(4).filter(|p| p[3] < 128).count() as u64;
-    assert!(squashed > 0, "潰れる画素が無い素材になっている");
+    let alphas = || data.chunks_exact(4).map(|p| p[3]);
+    let squashed = alphas().filter(|&a| (1..128).contains(&a)).count() as u64;
+    let raised = alphas().filter(|&a| (128..255).contains(&a)).count() as u64;
+    assert!(squashed > 0 && raised > 0, "両方が動く素材になっていない");
 
     let (_, report) = round_trip(64, 8, ColorType::Rgba8, &[data]);
-    assert_eq!(report.binarized_pixels, squashed);
+    assert_eq!(report.binarized_to_transparent, squashed);
+    assert_eq!(report.binarized_to_opaque, raised);
+}
+
+/// 元から2値のアルファしか無い素材は、2値化で何も動かない
+#[test]
+fn binary_alpha_moves_no_pixels() {
+    let data: Vec<u8> = (0..64 * 8)
+        .flat_map(|i| {
+            let alpha = if i % 3 == 0 { 0 } else { 255 };
+            [(i % 200) as u8, 0x10, 0x20, alpha]
+        })
+        .collect();
+
+    let (_, report) = round_trip(64, 8, ColorType::Rgba8, &[data]);
+    assert_eq!(report.binarized_to_transparent, 0);
+    assert_eq!(report.binarized_to_opaque, 0);
 }
 
 /// 縦横が異なる矩形

@@ -8,7 +8,7 @@ use crate::error::Error;
 use crate::frame::{Canvas, Screen};
 use crate::layout::{ColorType, Layout};
 use crate::lzw;
-use crate::normalize;
+use crate::normalize::{self, Binarized};
 use crate::rebuild::rebuild;
 use crate::spool::{Ring, Spool, Spooled};
 use crate::table::{ColorTable, Palette, QUANTIZED_COLORS};
@@ -104,8 +104,14 @@ pub struct Report {
     /// 画素は色に関わらずこの黒へ写るため、[`Report::approximated_pixels`] が
     /// 数える回数の大小に関わらず、素材の色は画面に残らない。
     pub black_fallback: bool,
-    /// 閾値未満のアルファを完全透過へ潰した画素数
-    pub binarized_pixels: u64,
+    /// 見えていた画素を完全な透過へ潰した画素数
+    ///
+    /// アルファが閾値未満だった画素のうち、元から完全透過だったものは含まない。
+    pub binarized_to_transparent: u64,
+    /// 透けていた画素を不透明へ上げた画素数
+    ///
+    /// アルファが閾値以上だった画素のうち、元から完全不透明だったものは含まない。
+    pub binarized_to_opaque: u64,
     /// 遅延を下限で切り上げたか
     pub delay_clamped: bool,
     /// 溜めたフレームが抱えたバイト数の最大値
@@ -320,8 +326,8 @@ pub struct Encoder<W: Write> {
     rebuilds: u32,
     /// ローカルカラーテーブルを書いたフレーム数
     local_tables: u32,
-    /// 完全透過へ潰した画素数
-    binarized_pixels: u64,
+    /// 2値化で見た目が変わった画素数
+    binarized: Binarized,
     /// 1/100秒への累積の丸め
     hundredths: Hundredths,
     /// 遅延を下限で切り上げたか
@@ -359,7 +365,7 @@ impl<W: Write> Encoder<W> {
             palette_kind: None,
             rebuilds: 0,
             local_tables: 0,
-            binarized_pixels: 0,
+            binarized: Binarized::default(),
             hundredths: Hundredths::new(),
             delay_clamped: false,
             peak_spool_bytes: 0,
@@ -396,7 +402,7 @@ impl<W: Write> Encoder<W> {
             ColorType::Rgb8 => Cow::Borrowed(data),
             ColorType::Rgba8 => {
                 let mut pixels = data.to_vec();
-                self.binarized_pixels += normalize::binarize(&mut pixels);
+                self.binarized += normalize::binarize(&mut pixels);
                 Cow::Owned(pixels)
             }
         };
@@ -449,7 +455,8 @@ impl<W: Write> Encoder<W> {
             local_tables: self.local_tables,
             approximated_pixels,
             black_fallback,
-            binarized_pixels: self.binarized_pixels,
+            binarized_to_transparent: self.binarized.to_transparent,
+            binarized_to_opaque: self.binarized.to_opaque,
             delay_clamped: self.delay_clamped,
             peak_spool_bytes: self.peak_spool_bytes,
         };
@@ -471,7 +478,7 @@ impl<W: Write> Encoder<W> {
             palette_kind,
             rebuilds,
             local_tables,
-            binarized_pixels: _,
+            binarized: _,
             hundredths,
             delay_clamped,
             peak_spool_bytes,
