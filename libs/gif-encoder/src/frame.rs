@@ -504,22 +504,37 @@ mod tests {
     }
 
     /// 矩形を透過へ抜く廃棄では、戻す先もその矩形を抜いた画面になる
+    ///
+    /// 戻す先が抜いた画素を持ったままだと、以降のフレームで描く直前へ戻す候補が
+    /// 抜けない画素を抜けると読む。
     #[test]
     fn a_background_disposal_clears_the_earlier_plane() {
         let first = opaque(0x10);
-        let second = opaque(0x20);
+        let mut second = first.clone();
+        second[4] = 0x7F;
+        let third = opaque(0x20);
 
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
         let rect = start(&mut canvas, &first);
-        let cleared = canvas.dispose(rect).background().rect_of(&second);
-        canvas.advance(DISPOSAL_RESTORE_TO_BACKGROUND, rect, &second, cleared);
-
+        let rect = draw(&mut canvas, rect, &second);
         assert_eq!(
-            canvas.before,
-            vec![0; first.len()],
-            "抜いた画素が戻す先に残っている"
+            rect,
+            Rect {
+                x: 1,
+                y: 0,
+                width: 1,
+                height: 1,
+            }
         );
-        assert_eq!(canvas.after, second);
+        assert_eq!(canvas.before, first, "描く直前の画面が違う");
+
+        let cleared = canvas.dispose(rect).background().rect_of(&third);
+        canvas.advance(DISPOSAL_RESTORE_TO_BACKGROUND, rect, &third, cleared);
+
+        let mut expected = first.clone();
+        expected[4..8].fill(0);
+        assert_eq!(canvas.before, expected, "抜いた画素が戻す先に残っている");
+        assert_eq!(canvas.after, third);
     }
 
     /// 描く直前へ戻す廃棄では、戻す先はそのまま残る
