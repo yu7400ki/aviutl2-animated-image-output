@@ -37,10 +37,6 @@ const pluginSettings = {
         name: "カラーフォーマット",
         description: "透過無し / 透過付き",
       },
-      {
-        name: "エンコード速度",
-        description: "エンコード速度（1-30、値が大きいほど高速）",
-      },
     ],
   },
   webp: {
