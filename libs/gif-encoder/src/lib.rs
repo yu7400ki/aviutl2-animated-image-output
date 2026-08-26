@@ -1,6 +1,7 @@
 //! GIFエンコーダ
 
 mod block;
+mod delay;
 mod encoder;
 mod error;
 mod frame;
