@@ -22,6 +22,10 @@ pub(crate) fn rebuild<'a>(
 ) -> Palette {
     let mut histogram = changed_colors(layout, base, window);
     let mut kept = current.recently_used(keep_window);
+    // 上限を埋めた不透明なテーブルは QUANTIZED_COLORS を超える維持を返す。
+    // 以降の空きの引き算が成り立つよう、古い順に解いて収める
+    let excess = kept.len().saturating_sub(QUANTIZED_COLORS);
+    release_oldest(&mut kept, excess);
 
     // 割り出せる色はヒストグラムが覆うビンの数まで
     let mut covered = covered_cells(&histogram, &kept, tolerance);
@@ -125,6 +129,7 @@ fn release_oldest(kept: &mut Vec<Kept>, count: usize) {
 mod tests {
     use super::*;
     use crate::layout::ColorType;
+    use anim_core::{Colors, MAX_COLORS};
 
     fn kept_of(entries: &[(u32, u32)]) -> Vec<Kept> {
         entries
@@ -215,6 +220,31 @@ mod tests {
 
         let histogram = changed_colors(&layout, &[], std::iter::once(&frame[..]));
         assert_eq!(histogram.distinct(), 1);
+    }
+
+    /// 上限を埋めた不透明なテーブルからでも、維持は空きの数に収まる
+    ///
+    /// 収まらないと空きの引き算が桁あふれし、あふれた数がそのまま量子化の
+    /// 目標色数になる。
+    #[test]
+    fn the_kept_entries_are_capped_at_the_slots_of_a_rebuilt_table() {
+        let pixels: Vec<u8> = (0..MAX_COLORS)
+            .flat_map(|i| [i as u8, (i >> 8) as u8, 0])
+            .collect();
+        let mut colors = Colors::new();
+        colors.observe(&pixels, 3);
+        let mut current = Palette::from_colors(colors, false);
+        assert_eq!(current.transparent(), None, "透過スロットが取れている");
+
+        current.set_frame(1);
+        for index in 0..MAX_COLORS {
+            current.mark_used(index as u8);
+        }
+        assert_eq!(current.recently_used(8).len(), MAX_COLORS);
+
+        let frame = [1u8, 1, 1, 200, 200, 200];
+        let rebuilt = rebuild(&layout(), &current, 8, 64, &[], std::iter::once(&frame[..]));
+        assert!(rebuilt.colors() as usize <= QUANTIZED_COLORS);
     }
 
     /// 外したビンを捨てると、残差の数がそのぶん減る
