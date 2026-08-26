@@ -2,7 +2,7 @@
 
 use crate::layout::Layout;
 use crate::normalize::{TRANSPARENT, pack};
-use crate::quantize::Histogram;
+use crate::quantize::{Histogram, Marks};
 use crate::table::{Kept, Palette, QUANTIZED_COLORS};
 
 /// 書き出し位置から先の窓を見てカラーテーブルを据え直す
@@ -75,24 +75,26 @@ fn changed_colors<'a>(
     histogram
 }
 
-/// 維持したエントリへ写しても誤差が `tolerance` に収まるビン
+/// 維持したエントリへ写せば誤差が `tolerance` に収まるビン
 ///
-/// 写す先の最近傍はビンごとに決まるので、ビン1つにつき平均色で1度引けば足りる。
-/// ここで外したビンには空きを費やさない。
+/// 写す先はビンごとに決まるので、覆えるかどうかもビンごとに決まる。維持した
+/// エントリの周りへ印を付けて拾う方が、ビンごとに写す先を探すより安い。
+/// ここで拾ったビンには空きを費やさない。
 fn covered_cells(histogram: &Histogram, kept: &[Kept], tolerance: u32) -> Vec<usize> {
     if kept.is_empty() {
         return Vec::new();
     }
 
-    let mut palette = Palette::from_entries(kept.iter().map(|entry| entry.color).collect());
-    let mut covered = Vec::new();
-    for &cell in histogram.cells() {
-        let color = histogram.mean_of(cell).to_le_bytes();
-        if palette.map(&color, 4).error <= tolerance {
-            covered.push(cell);
-        }
+    let mut marks = Marks::new();
+    for entry in kept {
+        marks.mark_within(entry.color, tolerance);
     }
-    covered
+    histogram
+        .cells()
+        .iter()
+        .copied()
+        .filter(|&cell| marks.has(cell))
+        .collect()
 }
 
 /// 最終使用が古い順に `count` 個の維持を解く

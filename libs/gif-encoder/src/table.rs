@@ -159,16 +159,6 @@ impl Palette {
         Palette::new(entries)
     }
 
-    /// 添字順に並べた色をそのままテーブルにする
-    ///
-    /// 写す先を測るためだけのテーブルを組むときに使う。
-    ///
-    /// # Panics
-    /// `entries` が空か、[`MAX_COLORS`] を超えているとき。
-    pub(crate) fn from_entries(entries: Vec<u32>) -> Self {
-        Palette::new(entries)
-    }
-
     /// 維持したエントリと残差の色でテーブルを据え直す
     ///
     /// 非透過色は255色までに抑え、透過スロットを1つ確保する。維持したエントリの

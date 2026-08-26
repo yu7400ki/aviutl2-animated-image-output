@@ -209,22 +209,6 @@ impl Histogram {
         &self.cells
     }
 
-    /// ビンに積んだ画素の平均色 (アルファは255)
-    ///
-    /// # Panics
-    /// 重みが載っていないビンのとき。
-    pub(crate) fn mean_of(&self, cell: usize) -> u32 {
-        let weight = self.weight[cell];
-        assert!(weight > 0, "重みの無いビンの平均色を求めている");
-        let mean = |moment: &[u64]| ((moment[cell] * 2 + weight) / (weight * 2)) as u8;
-        u32::from_le_bytes([
-            mean(&self.red),
-            mean(&self.green),
-            mean(&self.blue),
-            u8::MAX,
-        ])
-    }
-
     /// ビンに積んだものを捨てる
     pub(crate) fn discard(&mut self, cell: usize) {
         if self.weight[cell] == 0 {
@@ -513,6 +497,65 @@ impl Histogram {
     }
 }
 
+/// ビンごとの印
+///
+/// 添字は [`Histogram`] のビンと同じもの。
+pub(crate) struct Marks {
+    flags: Box<[bool]>,
+}
+
+impl Marks {
+    /// どのビンにも印の無い表
+    pub(crate) fn new() -> Self {
+        Marks {
+            flags: vec![false; CELLS].into_boxed_slice(),
+        }
+    }
+
+    /// ビンに印があるか
+    pub(crate) fn has(&self, cell: usize) -> bool {
+        self.flags[cell]
+    }
+
+    /// 中心が `color` から二乗距離 `tolerance` 以内にあるビンへ印を付ける
+    pub(crate) fn mark_within(&mut self, color: u32, tolerance: u32) {
+        let [r, g, b, _] = color.to_le_bytes();
+        // 中心の座標が2倍なので、距離の二乗は4倍で比べる
+        let limit = tolerance as i64 * 4;
+        let radius = (tolerance as f64).sqrt().ceil() as i32 * 2;
+        let target = [i32::from(r) * 2, i32::from(g) * 2, i32::from(b) * 2];
+        let bins = |axis: usize| {
+            let low = (target[axis] - radius - 3)
+                .div_euclid(8)
+                .clamp(0, BINS as i32 - 1);
+            let high = (target[axis] + radius - 3)
+                .div_euclid(8)
+                .clamp(0, BINS as i32 - 1);
+            low as usize..=high as usize
+        };
+
+        let squared =
+            |axis: usize, bin: usize| i64::from((target[axis] - center_doubled(bin)).pow(2));
+        for red in bins(0) {
+            let to_red = squared(0, red);
+            if to_red > limit {
+                continue;
+            }
+            for green in bins(1) {
+                let to_green = to_red + squared(1, green);
+                if to_green > limit {
+                    continue;
+                }
+                for blue in bins(2) {
+                    if to_green + squared(2, blue) <= limit {
+                        self.flags[at(red + 1, green + 1, blue + 1)] = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// 最近傍で写す先の添字を、ビン単位で覚える表
 ///
 /// 覚えるのはビンの中心色に対する最近傍で、これはビンだけの関数なので走査順に
@@ -771,6 +814,54 @@ mod tests {
     fn the_transparent_entry_is_never_a_target() {
         let mut nearest = Nearest::new(&[TRANSPARENT, 0xFF80_8080]);
         assert_eq!(nearest.index_of(0xFF01_0101), 1);
+    }
+
+    /// 印が付くのは、中心が閾値の内側にあるビンだけ
+    ///
+    /// ビン25が覆う実値は 100..=103 で中心は 101.5。隣のビン26の中心は 105.5。
+    #[test]
+    fn only_the_bins_whose_center_is_inside_the_tolerance_are_marked() {
+        let color = pack([100, 100, 100]);
+        let cell = |bin: usize| at(bin + 1, 25 + 1, 25 + 1);
+
+        // 中心までの距離は (1.5, 1.5, 1.5) で二乗距離 6.75
+        let mut marks = Marks::new();
+        marks.mark_within(color, 6);
+        assert!(!marks.has(cell(25)), "閾値の外側に印が付いている");
+
+        let mut marks = Marks::new();
+        marks.mark_within(color, 7);
+        assert!(marks.has(cell(25)), "閾値の内側に印が付いていない");
+        // ビン26の中心までは (5.5, 1.5, 1.5) で二乗距離 34.75
+        assert!(!marks.has(cell(26)));
+
+        let mut marks = Marks::new();
+        marks.mark_within(color, 35);
+        assert!(marks.has(cell(26)));
+        // ビン24の中心までは (2.5, 1.5, 1.5) で二乗距離 10.75
+        assert!(marks.has(cell(24)));
+    }
+
+    /// 印は立方体ではなく球で付く
+    #[test]
+    fn the_marked_bins_form_a_ball_and_not_a_box() {
+        let color = pack([100, 100, 100]);
+        let mut marks = Marks::new();
+        marks.mark_within(color, 35);
+
+        // 3軸すべてが隣のビンなら二乗距離 (5.5^2)*3 = 90.75 で外側
+        assert!(!marks.has(at(26 + 1, 26 + 1, 26 + 1)));
+    }
+
+    /// 端の色でもビンの範囲からはみ出さない
+    #[test]
+    fn a_color_at_the_edge_stays_inside_the_bins() {
+        for color in [pack([0, 0, 0]), pack([255, 255, 255])] {
+            let mut marks = Marks::new();
+            marks.mark_within(color, 195_075);
+            assert!(marks.has(at(1, 1, 1)));
+            assert!(marks.has(at(BINS, BINS, BINS)));
+        }
     }
 
     /// 等距離の候補は添字の小さい方へ写る
