@@ -8,9 +8,8 @@ use crate::table::{Kept, Palette, QUANTIZED_COLORS};
 /// 書き出し位置から先の窓を見てカラーテーブルを据え直す
 ///
 /// 維持は現在のテーブルのうち直近 `keep_window` フレームの出力で使ったエントリ。
-/// 残差は窓の中で入力が変わり、維持したエントリへ写しても誤差が `tolerance` を
-/// 超える画素だけを積んだヒストグラムから割る。変わった画素でも維持したエントリ
-/// で足りる色には空きを費やさない。
+/// 残差は窓の中で入力が変わった画素のうち、維持したエントリへ写すと誤差が
+/// `tolerance` を超えるものから割る。
 ///
 /// `base` は書き出し位置の1つ前のフレームの正規化した入力で、先頭フレームでは空。
 /// `window` は書き出し位置から順に並んだフレーム。
@@ -22,17 +21,20 @@ pub(crate) fn rebuild<'a>(
     base: &'a [u8],
     window: impl Iterator<Item = &'a [u8]>,
 ) -> Palette {
-    let window: Vec<&[u8]> = window.collect();
+    let mut histogram = changed_colors(layout, base, window);
     let mut kept = current.recently_used(keep_window);
-    let mut histogram = residual(layout, &kept, tolerance, base, &window);
 
     // 割り出せる色はヒストグラムが覆うビンの数まで
-    let demand = histogram.distinct().min(QUANTIZED_COLORS);
+    let mut covered = covered_cells(&histogram, &kept, tolerance);
+    let demand = (histogram.distinct() - covered.len()).min(QUANTIZED_COLORS);
     let free = QUANTIZED_COLORS - kept.len();
     if demand > free {
-        // 解いたエントリが覆っていた色は写す先を失うので、残差へ積み直す
+        // 解いたエントリが覆っていたビンは残差へ戻る
         release_oldest(&mut kept, demand - free);
-        histogram = residual(layout, &kept, tolerance, base, &window);
+        covered = covered_cells(&histogram, &kept, tolerance);
+    }
+    for &cell in &covered {
+        histogram.discard(cell);
     }
 
     let free = QUANTIZED_COLORS - kept.len();
@@ -44,24 +46,19 @@ pub(crate) fn rebuild<'a>(
     Palette::from_rebuilt(&kept, &residual)
 }
 
-/// 窓の中で、維持したエントリでは足りない画素を積む
+/// 窓の中で入力が変わった画素の色を積む
 ///
-/// 入力が変わっていない画素は写し直さないため積まない。透過標識は色を持たない
-/// ため積まない。
-fn residual<'a>(
+/// 変わっていない画素は写し直さないため積まない。透過標識は色を持たないため
+/// 積まない。
+fn changed_colors<'a>(
     layout: &Layout,
-    kept: &[Kept],
-    tolerance: u32,
     base: &'a [u8],
-    window: &[&'a [u8]],
+    window: impl Iterator<Item = &'a [u8]>,
 ) -> Histogram {
     let bpp = layout.bytes_per_pixel;
-    let mut covered = (!kept.is_empty())
-        .then(|| Palette::from_entries(kept.iter().map(|entry| entry.color).collect()));
-
     let mut histogram = Histogram::new();
     let mut previous = base;
-    for &frame in window {
+    for frame in window {
         for (at, pixel) in frame.chunks_exact(bpp).enumerate() {
             let at = at * bpp;
             if !previous.is_empty() && previous[at..at + bpp] == *pixel {
@@ -71,16 +68,31 @@ fn residual<'a>(
             if color == TRANSPARENT {
                 continue;
             }
-            if let Some(covered) = &mut covered
-                && covered.map(pixel, bpp).error <= tolerance
-            {
-                continue;
-            }
             histogram.observe_color(color, 1);
         }
         previous = frame;
     }
     histogram
+}
+
+/// 維持したエントリへ写しても誤差が `tolerance` に収まるビン
+///
+/// 写す先の最近傍はビンごとに決まるので、ビン1つにつき平均色で1度引けば足りる。
+/// ここで外したビンには空きを費やさない。
+fn covered_cells(histogram: &Histogram, kept: &[Kept], tolerance: u32) -> Vec<usize> {
+    if kept.is_empty() {
+        return Vec::new();
+    }
+
+    let mut palette = Palette::from_entries(kept.iter().map(|entry| entry.color).collect());
+    let mut covered = Vec::new();
+    for &cell in histogram.cells() {
+        let color = histogram.mean_of(cell).to_le_bytes();
+        if palette.map(&color, 4).error <= tolerance {
+            covered.push(cell);
+        }
+    }
+    covered
 }
 
 /// 最終使用が古い順に `count` 個の維持を解く
@@ -152,24 +164,33 @@ mod tests {
         Layout::new(2, 1, ColorType::Rgb8).unwrap()
     }
 
-    /// 維持したエントリで足りる色は残差に積まない
+    /// 維持したエントリで足りる色は残差から外れる
     #[test]
-    fn colors_the_kept_entries_already_cover_stay_out_of_the_residual() {
+    fn colors_the_kept_entries_already_cover_are_left_out() {
         let kept = kept_of(&[(0xFF00_0000, 1)]);
         let frame = [1u8, 1, 1, 200, 200, 200];
 
-        let histogram = residual(&layout(), &kept, 64, &[], &[&frame[..]]);
+        let histogram = changed_colors(&layout(), &[], std::iter::once(&frame[..]));
+        assert_eq!(histogram.distinct(), 2);
         // 黒の近くの画素だけが維持で足り、遠い画素が残差になる
-        assert_eq!(histogram.distinct(), 1);
+        assert_eq!(covered_cells(&histogram, &kept, 64).len(), 1);
     }
 
-    /// 入力が変わっていない画素は残差に積まない
+    /// 維持が空なら、外れるビンは無い
     #[test]
-    fn unchanged_pixels_stay_out_of_the_residual() {
+    fn nothing_is_covered_without_kept_entries() {
+        let frame = [1u8, 1, 1, 200, 200, 200];
+        let histogram = changed_colors(&layout(), &[], std::iter::once(&frame[..]));
+        assert!(covered_cells(&histogram, &[], 64).is_empty());
+    }
+
+    /// 入力が変わっていない画素は積まない
+    #[test]
+    fn unchanged_pixels_are_not_counted() {
         let base = [1u8, 1, 1, 200, 200, 200];
         let frame = [1u8, 1, 1, 9, 9, 9];
 
-        let histogram = residual(&layout(), &[], 0, &base, &[&frame[..]]);
+        let histogram = changed_colors(&layout(), &base, std::iter::once(&frame[..]));
         assert_eq!(histogram.distinct(), 1);
     }
 
@@ -180,18 +201,32 @@ mod tests {
         let second = [1u8, 1, 1, 100, 100, 100];
         let frames = [&first[..], &second[..]];
 
-        let histogram = residual(&layout(), &[], 0, &[], &frames);
+        let histogram = changed_colors(&layout(), &[], frames.into_iter());
         // 先頭は2色、続くフレームは変わった1色だけ
         assert_eq!(histogram.distinct(), 3);
     }
 
-    /// 透過標識は残差に積まない
+    /// 透過標識は積まない
     #[test]
-    fn the_transparent_marker_stays_out_of_the_residual() {
+    fn the_transparent_marker_is_not_counted() {
         let layout = Layout::new(2, 1, ColorType::Rgba8).unwrap();
         let frame = [0u8, 0, 0, 0, 200, 200, 200, 255];
 
-        let histogram = residual(&layout, &[], 0, &[], &[&frame[..]]);
+        let histogram = changed_colors(&layout, &[], std::iter::once(&frame[..]));
         assert_eq!(histogram.distinct(), 1);
+    }
+
+    /// 外したビンを捨てると、残差の数がそのぶん減る
+    #[test]
+    fn discarding_a_covered_bin_shrinks_the_residual() {
+        let frame = [1u8, 1, 1, 200, 200, 200];
+        let mut histogram = changed_colors(&layout(), &[], std::iter::once(&frame[..]));
+        let covered = covered_cells(&histogram, &kept_of(&[(0xFF00_0000, 1)]), 64);
+
+        for cell in covered {
+            histogram.discard(cell);
+        }
+        assert_eq!(histogram.distinct(), 1);
+        assert_eq!(histogram.quantize(8), vec![0xFFC8_C8C8]);
     }
 }

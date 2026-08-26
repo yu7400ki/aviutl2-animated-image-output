@@ -174,7 +174,9 @@ pub(crate) struct Histogram {
     blue: Box<[u64]>,
     /// 実値の二乗和
     squared: Box<[u128]>,
-    /// 重みが載っているビンの数
+    /// 重みが載ったビン (積んだ順、重複なし)
+    cells: Vec<usize>,
+    /// 捨てずに残っているビンの数
     distinct: usize,
 }
 
@@ -188,15 +190,52 @@ impl Histogram {
             green: zeros(),
             blue: zeros(),
             squared: vec![0u128; CELLS].into_boxed_slice(),
+            cells: Vec::new(),
             distinct: 0,
         }
     }
 
-    /// 重みが載っているビンの数
+    /// 捨てずに残っているビンの数
     ///
     /// 分割はビンの境界にしか置けないため、この数より多くの色は割り出せない。
     pub(crate) fn distinct(&self) -> usize {
         self.distinct
+    }
+
+    /// 重みが載ったビン
+    ///
+    /// [`Histogram::discard`] で捨てたビンも並びには残る。
+    pub(crate) fn cells(&self) -> &[usize] {
+        &self.cells
+    }
+
+    /// ビンに積んだ画素の平均色 (アルファは255)
+    ///
+    /// # Panics
+    /// 重みが載っていないビンのとき。
+    pub(crate) fn mean_of(&self, cell: usize) -> u32 {
+        let weight = self.weight[cell];
+        assert!(weight > 0, "重みの無いビンの平均色を求めている");
+        let mean = |moment: &[u64]| ((moment[cell] * 2 + weight) / (weight * 2)) as u8;
+        u32::from_le_bytes([
+            mean(&self.red),
+            mean(&self.green),
+            mean(&self.blue),
+            u8::MAX,
+        ])
+    }
+
+    /// ビンに積んだものを捨てる
+    pub(crate) fn discard(&mut self, cell: usize) {
+        if self.weight[cell] == 0 {
+            return;
+        }
+        self.weight[cell] = 0;
+        self.red[cell] = 0;
+        self.green[cell] = 0;
+        self.blue[cell] = 0;
+        self.squared[cell] = 0;
+        self.distinct -= 1;
     }
 
     /// 色を `count` 画素ぶん積む
@@ -240,6 +279,7 @@ impl Histogram {
         );
         let (r, g, b) = (u64::from(r), u64::from(g), u64::from(b));
         if self.weight[cell] == 0 {
+            self.cells.push(cell);
             self.distinct += 1;
         }
         self.weight[cell] += count;
