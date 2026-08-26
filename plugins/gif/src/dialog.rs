@@ -14,8 +14,6 @@ pub fn show_config_dialog(
         .value(default_config.repeat as i32)
         .range(0, u16::MAX as i32);
 
-    let speed_input = Number::new().value(default_config.speed).range(1, 30);
-
     let color_options = vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()];
     let color_combobox = ComboBox::new(color_options).selected(match default_config.color_format {
         ColorFormat::Rgb24 => 0,
@@ -29,21 +27,12 @@ pub fn show_config_dialog(
     let ok_button = Button::primary("OK").on_click({
         let handle = handle.clone();
         let repeat_input = repeat_input.clone();
-        let speed_input = speed_input.clone();
         move || {
             let owner = handle.hwnd();
             if repeat_input.get_value::<u16>().is_err() {
                 MessageBox::error(
                     owner,
                     "ループ回数の値が無効です。正しい数値を入力してください。",
-                    "エラー",
-                );
-                return;
-            }
-            if speed_input.get_value::<i32>().is_err() {
-                MessageBox::error(
-                    owner,
-                    "エンコード速度の値が無効です。1-30の値を入力してください。",
                     "エラー",
                 );
                 return;
@@ -62,7 +51,6 @@ pub fn show_config_dialog(
         .with_padding(15.0)
         .with_gap(10.0)
         .with_layout(labeled("ループ回数 (0=無限ループ)", repeat_input.clone()))
-        .with_layout(labeled("エンコード速度 (1-30)", speed_input.clone()))
         .with_layout(labeled("カラーフォーマット", color_combobox.clone()))
         .with_layout(
             FlexLayout::row()
@@ -84,7 +72,6 @@ pub fn show_config_dialog(
     // acceptはOKハンドラの検証を通過した場合のみ呼ばれるため、ここでのパースは成功する
     Ok(Some(Config {
         repeat: repeat_input.get_value().map_err(|_| ())?,
-        speed: speed_input.get_value().map_err(|_| ())?,
         color_format: match color_combobox.selected_index() {
             0 => ColorFormat::Rgb24,
             1 => ColorFormat::Rgba32,

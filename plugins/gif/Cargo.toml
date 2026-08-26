@@ -9,8 +9,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 aviutl2 = { path = "../../libs/aviutl2" }
+gif_encoder = { path = "../../libs/gif-encoder" }
 win32_dialog = { path = "../../libs/dialog" }
-gif = { version = "0.13" }
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",

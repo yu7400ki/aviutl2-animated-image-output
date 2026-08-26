@@ -5,68 +5,78 @@ use aviutl2::{
     FileFilter, IniConfig, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
     register_logger, register_output_plugin,
 };
-use gif::{Encoder, Frame, Repeat};
-use std::fs::File;
+use config::{ColorFormat, Config};
+use dialog::show_config_dialog;
+use gif_encoder::{ColorType, Config as EncoderConfig, Encoder, FrameDelay};
+use std::io::BufWriter;
 use win32_dialog::MessageBox;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
 
-use config::{ColorFormat, Config};
-use dialog::show_config_dialog;
+/// 負の値をエンコーダへ渡さないためのi32からu32への変換
+fn to_u32(value: i32, name: &str) -> std::result::Result<u32, String> {
+    u32::try_from(value).map_err(|_| format!("{}が不正です: {}", name, value))
+}
+
+/// プラグイン設定をエンコーダの設定へ対応付ける
+fn encoder_config(config: &Config) -> EncoderConfig {
+    EncoderConfig {
+        color_type: match config.color_format {
+            ColorFormat::Rgb24 => ColorType::Rgb8,
+            ColorFormat::Rgba32 => ColorType::Rgba8,
+        },
+        num_plays: config.repeat as u32,
+        ..EncoderConfig::default()
+    }
+}
+
+/// 1フレームの表示時間 (scale / rate 秒) を求める
+fn frame_delay(scale: i32, rate: i32) -> std::result::Result<FrameDelay, String> {
+    let scale = to_u32(scale, "フレームレートのスケール")?;
+    let rate = to_u32(rate, "フレームレート")?;
+    FrameDelay::new(scale, rate).map_err(|e| format!("フレームレート設定エラー: {}", e))
+}
 
 fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
     let output_path = info.savefile();
 
     let output_file =
-        File::create(&output_path).map_err(|e| format!("ファイル作成エラー: {}", e))?;
-    let mut encoder = Encoder::new(output_file, info.width() as u16, info.height() as u16, &[])
-        .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
-    // 設定を取得
-    let repeat_setting = if config.repeat == 0 {
-        Repeat::Infinite
-    } else {
-        Repeat::Finite(config.repeat - 1)
-    };
+        std::fs::File::create(&output_path).map_err(|e| format!("ファイル作成エラー: {}", e))?;
 
-    encoder
-        .set_repeat(repeat_setting)
-        .map_err(|e| format!("ループ設定エラー: {}", e))?;
+    let delay = frame_delay(info.scale(), info.rate())?;
 
-    let delay = (100.0 * info.scale() as f64 / info.rate() as f64).round() as u16;
-    let delay = delay.max(1);
+    let mut encoder = Encoder::new(
+        BufWriter::new(output_file),
+        to_u32(info.width(), "幅")?,
+        to_u32(info.height(), "高さ")?,
+        to_u32(info.num_frames(), "フレーム数")?,
+        encoder_config(config),
+    )
+    .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
 
     for frame in 0..info.num_frames() {
         if info.is_abort() {
             return Err("処理が中断されました".into());
         }
 
-        let image_data = info.get_video_frame(frame, config.color_format);
+        let frame_data = info
+            .get_video_frame(frame, config.color_format)
+            .ok_or_else(|| format!("フレーム取得エラー: フレーム {}", frame))?;
 
-        if let Some(mut image_data) = image_data {
-            let mut gif_frame = match config.color_format {
-                ColorFormat::Rgb24 => Frame::from_rgb_speed(
-                    info.width() as u16,
-                    info.height() as u16,
-                    &image_data,
-                    config.speed,
-                ),
-                ColorFormat::Rgba32 => Frame::from_rgba_speed(
-                    info.width() as u16,
-                    info.height() as u16,
-                    &mut image_data,
-                    config.speed,
-                ),
-            };
-
-            gif_frame.dispose = gif::DisposalMethod::Background;
-            gif_frame.delay = delay;
-
-            encoder
-                .write_frame(&gif_frame)
-                .map_err(|e| format!("フレーム書き込みエラー: {}", e))?;
-        }
+        encoder
+            .add_frame(&frame_data, delay)
+            .map_err(|e| format!("フレーム書き込みエラー: {}", e))?;
 
         info.rest_time_disp(frame, info.num_frames());
     }
+
+    let (writer, _report) = encoder
+        .finish()
+        .map_err(|e| format!("エンコーダー終了エラー: {}", e))?;
+
+    writer
+        .into_inner()
+        .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
+
     Ok(())
 }
 
@@ -122,3 +132,57 @@ impl OutputPlugin for GifOutputPlugin {
 
 register_output_plugin!(GifOutputPlugin);
 register_logger!();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_frame_rates_are_rejected() {
+        assert!(frame_delay(1, 0).is_err());
+        assert!(frame_delay(1, -30).is_err());
+        assert!(frame_delay(-1, 30).is_err());
+        assert!(frame_delay(1001, 30000).is_ok());
+    }
+
+    #[test]
+    fn negative_dimensions_are_rejected() {
+        assert_eq!(to_u32(1920, "幅").unwrap(), 1920);
+        assert!(to_u32(-1, "幅").is_err());
+    }
+
+    #[test]
+    fn color_format_maps_to_the_matching_color_type() {
+        let rgb = encoder_config(&Config {
+            color_format: ColorFormat::Rgb24,
+            ..Config::default()
+        });
+        assert_eq!(rgb.color_type, ColorType::Rgb8);
+
+        let rgba = encoder_config(&Config {
+            color_format: ColorFormat::Rgba32,
+            ..Config::default()
+        });
+        assert_eq!(rgba.color_type, ColorType::Rgba8);
+    }
+
+    #[test]
+    fn repeat_is_passed_through_as_the_number_of_plays() {
+        assert_eq!(
+            encoder_config(&Config {
+                repeat: 5,
+                ..Config::default()
+            })
+            .num_plays,
+            5
+        );
+        assert_eq!(
+            encoder_config(&Config {
+                repeat: 0,
+                ..Config::default()
+            })
+            .num_plays,
+            0
+        );
+    }
+}
