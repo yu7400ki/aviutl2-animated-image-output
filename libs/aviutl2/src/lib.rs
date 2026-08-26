@@ -15,6 +15,7 @@ pub mod logger;
 mod metrics;
 pub mod module;
 pub mod output;
+pub mod pipeline;
 pub mod pixel;
 
 #[doc(hidden)]
@@ -24,4 +25,5 @@ mod macros;
 
 pub use config::IniConfig;
 pub use output::{FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo};
+pub use pipeline::PipelineError;
 pub use pixel::ColorFormat;
