@@ -16,8 +16,13 @@ const pluginInfo = {
   },
   gif: {
     title: "GIF",
-    description: "広く対応、256 色制限",
-    features: ["広い互換性", "軽量なアニメーション", "256色制限"],
+    description: "広く対応、256 色制限、半透明は残らない",
+    features: [
+      "広い互換性",
+      "軽量なアニメーション",
+      "全フレームを通した色の和集合が 256 色以内の素材は無劣化",
+      "半透明は残らない",
+    ],
     color: "bg-blue-100 border-blue-300",
     textColor: "text-blue-800",
   },
