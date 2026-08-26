@@ -103,12 +103,14 @@ impl<'a> OutputInfo<'a> {
         }
     }
 
-    /// 画像データの生ポインタを取得する
+    /// 画像データの生ポインタを取得する (ホストが返さなければ`None`)
     ///
     /// # Safety
     /// 戻り値のポインタは次に外部関数を使うかホストへ処理を戻すまでのみ有効。
     pub unsafe fn get_video_raw(&self, frame: i32, format: u32) -> Option<*mut c_void> {
-        self.raw.func_get_video.map(|f| unsafe { f(frame, format) })
+        let f = self.raw.func_get_video?;
+        let ptr = unsafe { f(frame, format) };
+        (!ptr.is_null()).then_some(ptr)
     }
 
     /// BGRフォーマットのフレームデータをRGBに変換して取得
