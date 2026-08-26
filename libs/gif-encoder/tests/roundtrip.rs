@@ -888,6 +888,66 @@ fn the_smaller_of_the_two_clearing_candidates_wins() {
     );
 }
 
+/// 抜く候補が2つとも同じ矩形になる素材
+///
+/// 上半分が透過、下半分が画素ごとに違う色。パネルはその境目をまたいで現れ、
+/// 消えるフレームは境目の下の行を元の色へ戻したうえで、行の両端だけを塗り替える。
+///
+/// 矩形を丸ごと抜く候補は下の行を全部書き直し、描く直前へ戻す候補は両端の2画素
+/// しか書かない。どちらの外接矩形も同じ行なので、**広さは引き分け、圧縮後の
+/// 大きさだけが分かれる**。
+fn a_panel_whose_candidates_tie_on_area() -> Vec<Vec<u8>> {
+    const WIDTH: u32 = 16;
+    const HEIGHT: u32 = 4;
+    let color = ColorType::Rgba8;
+
+    let mut base = solid(WIDTH, HEIGHT, color, &[0, 0, 0, 0]);
+    for y in 2..HEIGHT {
+        for x in 0..WIDTH {
+            set_pixel(
+                &mut base,
+                WIDTH,
+                color,
+                x,
+                y,
+                &[(x * 8) as u8, (y * 16) as u8, 0x40, 0xFF],
+            );
+        }
+    }
+
+    // パネルは透過の行と不透明な行にまたがる
+    let mut panel = base.clone();
+    for y in 1..3 {
+        for x in 2..14 {
+            set_pixel(&mut panel, WIDTH, color, x, y, &[0x90, 0x30, 0x10, 0xFF]);
+        }
+    }
+
+    let mut gone = base.clone();
+    set_pixel(&mut gone, WIDTH, color, 2, 2, &[0x11, 0x22, 0x33, 0xFF]);
+    set_pixel(&mut gone, WIDTH, color, 13, 2, &[0x44, 0x55, 0x66, 0xFF]);
+
+    vec![base, panel, gone]
+}
+
+/// 広さが引き分けの抜く候補は、圧縮後の小さい方が採られる
+///
+/// 画素数は矩形の広さの目安にしかならず、透過ランがどれだけ伸びるかを写さない。
+#[test]
+fn the_clearing_candidates_are_compared_after_compression() {
+    let frames = a_panel_whose_candidates_tie_on_area();
+    let (bytes, _) = round_trip(16, 4, ColorType::Rgba8, &frames);
+
+    use gif::DisposalMethod::{Keep, Previous};
+    assert_eq!(
+        disposals(&bytes),
+        [Keep, Previous, Keep],
+        "圧縮後の小さい候補が採られていない"
+    );
+    // どちらの候補もこの矩形になる。分かれるのは中身だけ
+    assert_eq!(rects(&bytes)[2], (2, 2, 12, 1));
+}
+
 /// 抜いた矩形の中に、投入されたフレームが同じ色のまま残す不透明画素がある素材
 ///
 /// その画素は抜かれた画面では書き直しの対象になる。抜いた画面を作らずに
@@ -1749,6 +1809,52 @@ fn a_missing_or_extra_frame_is_rejected() {
             actual: 2
         })
     ));
+}
+
+/// 一定バイト数まで受け付け、それ以降は必ず失敗する書き出し先
+struct FailingWriter {
+    remaining: usize,
+}
+
+impl Write for FailingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.len() > self.remaining {
+            self.remaining = 0;
+            return Err(std::io::Error::other("書き出し失敗"));
+        }
+        self.remaining -= buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// 途中で切れたブロックの列に書き足すと読めないGIFになるため、失敗後は受け付けない
+///
+/// 溜める余地を無くすと2枚目の投入で書き出しが始まり、そこで失敗する。
+#[test]
+fn a_failed_write_poisons_the_encoder() {
+    let frames: Vec<Vec<u8>> = (0..3).map(|seed| noise(8 * 8 * 3, seed)).collect();
+    let config = Config {
+        max_spool_bytes: 0,
+        ..Config::default()
+    };
+    // ヘッダは通り、論理画面記述子かカラーテーブルで尽きる長さ
+    let writer = FailingWriter { remaining: 8 };
+    let mut encoder = Encoder::new(writer, 8, 8, 3, config).unwrap();
+
+    encoder.add_frame(&frames[0], delay_of(0)).unwrap();
+    assert!(matches!(
+        encoder.add_frame(&frames[1], delay_of(1)),
+        Err(Error::Io(_))
+    ));
+    assert!(matches!(
+        encoder.add_frame(&frames[2], delay_of(2)),
+        Err(Error::Poisoned)
+    ));
+    assert!(matches!(encoder.finish(), Err(Error::Poisoned)));
 }
 
 /// カラーテーブルの据え直しを見る素材の寸法
