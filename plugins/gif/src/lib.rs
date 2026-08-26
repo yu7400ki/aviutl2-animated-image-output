@@ -56,32 +56,28 @@ fn pixel_share(pixels: u64, total_pixels: u64) -> String {
 
     let percent = pixels as f64 * 100.0 / total_pixels as f64;
     if percent < 0.1 {
-        format!("{}画素 (全体の0.1%未満)", grouped)
+        format!("{}画素、全体の0.1%未満", grouped)
     } else {
-        format!("{}画素 (全体の{:.1}%)", grouped, percent)
+        format!("{}画素、全体の{:.1}%", grouped, percent)
     }
 }
 
-/// カラーテーブルの据え方の説明
-fn palette_message(palette: PaletteKind) -> String {
+/// カラーテーブルの据え方の説明。全フレームの色が載ったなら `None`
+fn palette_message(palette: PaletteKind) -> Option<String> {
     match palette {
-        PaletteKind::Exact { colors } => {
-            format!(
-                "パレット: 全フレームの色をそのまま載せました ({}色)",
-                colors
-            )
-        }
-        PaletteKind::ExactFromPrefix { colors } => format!(
+        PaletteKind::Exact { .. } => None,
+        PaletteKind::ExactFromPrefix { colors } => Some(format!(
             "パレット: 解析に使えるメモリを超えたため、先頭部分の色を載せました ({}色)",
             colors
-        ),
-        PaletteKind::Quantized { colors } => {
-            format!("パレット: 全フレームから減色しました ({}色)", colors)
-        }
-        PaletteKind::QuantizedFromPrefix { colors } => format!(
+        )),
+        PaletteKind::Quantized { colors } => Some(format!(
+            "パレット: 全フレームから減色しました ({}色)",
+            colors
+        )),
+        PaletteKind::QuantizedFromPrefix { colors } => Some(format!(
             "パレット: 解析に使えるメモリを超えたため、先頭部分だけから減色しました ({}色)",
             colors
-        ),
+        )),
     }
 }
 
@@ -96,7 +92,7 @@ fn binarization_messages(report: &Report, total_pixels: u64) -> Vec<(Severity, S
         messages.push((
             Severity::Info,
             format!(
-                "透過: GIFの透過は2値のため、薄い半透明の{}を完全な透過にしました",
+                "透過: 完全な透過にしました ({})",
                 pixel_share(report.binarized_to_transparent, total_pixels)
             ),
         ));
@@ -106,7 +102,7 @@ fn binarization_messages(report: &Report, total_pixels: u64) -> Vec<(Severity, S
         messages.push((
             Severity::Info,
             format!(
-                "透過: GIFの透過は2値のため、濃い半透明の{}を不透明にしました",
+                "透過: 不透明にしました ({})",
                 pixel_share(report.binarized_to_opaque, total_pixels)
             ),
         ));
@@ -115,54 +111,54 @@ fn binarization_messages(report: &Report, total_pixels: u64) -> Vec<(Severity, S
     messages
 }
 
-/// 据えたカラーテーブルが素材の色を覆えたかの説明
+/// 据えたカラーテーブルが素材の色を覆えなかったところの説明
 ///
-/// 黒への退避はテーブルの形でしかなく、深刻さは写した画素数との組で決まる。
-fn approximation_message(report: &Report, total_pixels: u64) -> (Severity, String) {
-    let binarized = report.binarized_to_transparent > 0 || report.binarized_to_opaque > 0;
+/// 近似と代替は失うものが違う。近似は色がずれるだけだが、代替は写す先が
+/// 無かった画素で、素材の色が画面に残らない。
+fn color_messages(report: &Report, total_pixels: u64) -> Vec<(Severity, String)> {
+    let mut messages = Vec::new();
 
-    match (report.black_fallback, report.approximated_pixels) {
-        (true, 0) => (
+    if report.approximated_pixels > 0 {
+        messages.push((
             Severity::Info,
-            "色の再現: 全フレームに不透明な画素がありませんでした".into(),
-        ),
-        (true, pixels) => (
+            format!(
+                "色の再現: 近い色へ置き換えました ({})",
+                pixel_share(report.approximated_pixels, total_pixels)
+            ),
+        ));
+    }
+
+    if report.substituted_pixels > 0 {
+        messages.push((
             Severity::Warn,
             format!(
-                "色の再現: 解析した範囲が完全な透過だったため、不透明な{}をすべて黒にしました",
-                pixel_share(pixels, total_pixels)
+                "色の再現: 表せない色を黒にしました ({})",
+                pixel_share(report.substituted_pixels, total_pixels)
             ),
-        ),
-        (false, 0) if binarized => (
-            Severity::Info,
-            "色の再現: 透過を2値にした以外は、色を変えずに出力しました".into(),
-        ),
-        (false, 0) => (
-            Severity::Info,
-            "色の再現: 全画素を元の色のまま出力しました".into(),
-        ),
-        (false, pixels) => (
-            Severity::Info,
-            format!(
-                "色の再現: {}をパレットの近い色へ置き換えました",
-                pixel_share(pixels, total_pixels)
-            ),
-        ),
+        ));
     }
+
+    messages
 }
 
 /// 出力の見え方が入力と変わったところを並べる
 ///
+/// 何も起きなければ1行も出さない。可逆で不透明でレートに収まる書き出しは
+/// 報せるところが無く、無言になる。
+///
 /// 透過の2値化は色を決めるより前に起きるので、色の再現より先に出す。
 fn report_messages(report: &Report, total_pixels: u64) -> Vec<(Severity, String)> {
-    let mut messages = vec![(Severity::Info, palette_message(report.palette))];
+    let mut messages: Vec<(Severity, String)> = palette_message(report.palette)
+        .map(|message| (Severity::Info, message))
+        .into_iter()
+        .collect();
     messages.extend(binarization_messages(report, total_pixels));
-    messages.push(approximation_message(report, total_pixels));
+    messages.extend(color_messages(report, total_pixels));
 
     if report.delay_clamped {
         messages.push((
             Severity::Warn,
-            "表示時間: GIFで表現できるのは50fpsまでのため、これを超える速さのフレームの表示時間を2/100秒へ引き上げました。素材より遅く再生されます".into(),
+            "表示時間: 素材より遅く再生されます (2/100秒へ引き上げ)".into(),
         ));
     }
 
@@ -368,18 +364,23 @@ mod tests {
     fn a_pixel_count_carries_its_share_of_the_whole() {
         assert_eq!(
             pixel_share(1_234_567, 10_000_000),
-            "1,234,567画素 (全体の12.3%)"
+            "1,234,567画素、全体の12.3%"
         );
-        assert_eq!(pixel_share(123, 1000), "123画素 (全体の12.3%)");
-        assert_eq!(pixel_share(1, 1_000_000), "1画素 (全体の0.1%未満)");
+        assert_eq!(pixel_share(123, 1000), "123画素、全体の12.3%");
+        assert_eq!(pixel_share(1, 1_000_000), "1画素、全体の0.1%未満");
         assert_eq!(pixel_share(4096, 0), "4,096画素");
+    }
+
+    /// 全フレームの色がそのまま載ったなら、パレットの説明は出ない
+    #[test]
+    fn a_palette_that_holds_every_color_is_not_reported() {
+        assert_eq!(palette_message(PaletteKind::Exact { colors: 198 }), None);
     }
 
     /// 据え方ごとに決まった説明が出て、色数は文面に載る
     #[test]
-    fn every_palette_kind_has_its_own_message() {
+    fn every_reported_palette_kind_has_its_own_message() {
         let kinds = [
-            PaletteKind::Exact { colors: 198 },
             PaletteKind::ExactFromPrefix { colors: 198 },
             PaletteKind::Quantized { colors: 198 },
             PaletteKind::QuantizedFromPrefix { colors: 198 },
@@ -388,7 +389,7 @@ mod tests {
         let messages: Vec<String> = kinds
             .iter()
             .map(|&palette| {
-                let message = palette_message(palette);
+                let message = palette_message(palette).expect("説明が無い");
                 assert!(
                     message.contains("198"),
                     "{palette:?} に色数が無い: {message}"
@@ -405,58 +406,71 @@ mod tests {
         }
     }
 
-    /// 先頭部分から据えたことと、据えたものが覆えたことは別に出る
+    /// 先頭部分から据えたことは、劣化が無くても出る
     #[test]
-    fn a_palette_from_a_prefix_can_still_be_lossless() {
+    fn a_palette_from_a_prefix_is_reported_even_when_lossless() {
         let report = Report {
             palette: PaletteKind::ExactFromPrefix { colors: 64 },
             ..clean_report()
         };
 
         assert_eq!(
-            approximation_message(&report, TOTAL_PIXELS),
-            (
+            report_messages(&report, TOTAL_PIXELS),
+            vec![(
                 Severity::Info,
-                "色の再現: 全画素を元の色のまま出力しました".into()
-            )
+                "パレット: 解析に使えるメモリを超えたため、先頭部分の色を載せました (64色)".into()
+            )]
         );
     }
 
-    /// 写した画素があれば、可逆の文面は出ずに画素数が出る
+    /// 近似した画素は、深刻さの無い1行になる
     #[test]
-    fn approximated_pixels_replace_the_lossless_message() {
+    fn approximated_pixels_are_reported_without_a_warning() {
         let report = Report {
             palette: PaletteKind::Quantized { colors: 256 },
             approximated_pixels: 4096,
             ..clean_report()
         };
 
-        let (severity, message) = approximation_message(&report, TOTAL_PIXELS);
-        assert_eq!(severity, Severity::Info);
-        assert!(message.contains("4,096画素"), "{message}");
-        assert!(!message.contains("元の色のまま"), "{message}");
+        let colors = color_messages(&report, TOTAL_PIXELS);
+        assert_eq!(
+            colors,
+            vec![(
+                Severity::Info,
+                "色の再現: 近い色へ置き換えました (4,096画素、全体の0.4%)".into()
+            )]
+        );
     }
 
-    /// 黒への退避は、写した画素があるときだけ警告になる
+    /// 代替した画素は、近似と別の行で警告になる
+    ///
+    /// 近い色へ寄せたのではなく、写す先が無くて色を失っている。
     #[test]
-    fn a_black_fallback_is_read_with_the_approximated_pixels() {
-        let harmless = Report {
-            black_fallback: true,
-            ..clean_report()
-        };
-        let (severity, message) = approximation_message(&harmless, TOTAL_PIXELS);
-        assert_eq!(severity, Severity::Info);
-        assert!(message.contains("不透明な画素がありません"), "{message}");
-
-        let damaging = Report {
-            black_fallback: true,
+    fn substituted_pixels_are_warned_apart_from_the_approximated_ones() {
+        let report = Report {
             approximated_pixels: 4096,
+            substituted_pixels: 8192,
             ..clean_report()
         };
-        let (severity, message) = approximation_message(&damaging, TOTAL_PIXELS);
-        assert_eq!(severity, Severity::Warn);
-        assert!(message.contains("4,096画素"), "{message}");
-        assert!(message.contains("黒"), "{message}");
+
+        let colors = color_messages(&report, TOTAL_PIXELS);
+        assert_eq!(colors.len(), 2);
+        assert_eq!(colors[0].0, Severity::Info);
+        assert_eq!(colors[1].0, Severity::Warn);
+        assert!(colors[1].1.contains("8,192画素"), "{colors:?}");
+        assert!(colors[1].1.contains("黒"), "{colors:?}");
+        assert!(!colors[1].1.contains("近い色"), "{colors:?}");
+    }
+
+    /// 写す先の黒を足しただけで、そこへ写した画素が無ければ何も出ない
+    #[test]
+    fn a_black_fallback_without_substituted_pixels_says_nothing() {
+        let report = Report {
+            black_fallback: true,
+            ..clean_report()
+        };
+
+        assert!(color_messages(&report, TOTAL_PIXELS).is_empty());
     }
 
     /// 2値化の向きごとに別の行が出る
@@ -476,63 +490,27 @@ mod tests {
         assert!(lines[1].1.contains("不透明"), "{lines:?}");
     }
 
-    /// 不透明へ上げただけの素材を「元の色のまま」と言わない
-    ///
-    /// アルファが128から254の間にしかない素材では、色の和集合が256色に
-    /// 収まってパレットは完全一致するが、アルファはすべて255へ動いている。
-    #[test]
-    fn raising_alpha_to_opaque_is_not_lossless() {
-        let report = Report {
-            palette: PaletteKind::Exact { colors: 190 },
-            binarized_to_opaque: 12_288,
-            ..clean_report()
-        };
-
-        let messages = messages(&report);
-        assert!(
-            !messages
-                .iter()
-                .any(|message| message.contains("元の色のまま")),
-            "{messages:?}"
-        );
-        assert!(
-            messages
-                .iter()
-                .any(|message| message.contains("不透明にしました")),
-            "{messages:?}"
-        );
-    }
-
     /// 2値化の説明は、それを前提にする色の再現より先に出る
     #[test]
     fn the_binarization_is_explained_before_the_colors() {
         let report = Report {
             binarized_to_transparent: 4096,
+            approximated_pixels: 4096,
             ..clean_report()
         };
 
         let messages = messages(&report);
-        assert_eq!(messages.len(), 3);
-        assert!(messages[1].starts_with("透過:"), "{messages:?}");
-        assert!(messages[2].starts_with("色の再現:"), "{messages:?}");
-        assert!(
-            messages[2].contains("透過を2値にした以外は"),
-            "{messages:?}"
-        );
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].starts_with("透過:"), "{messages:?}");
+        assert!(messages[1].starts_with("色の再現:"), "{messages:?}");
     }
 
-    /// 何も起きなければ、パレットと色の再現だけが出る
+    /// 何も起きなければ1行も出さない
+    ///
+    /// 可逆で不透明でレートに収まる書き出しは、報せるところが無い。
     #[test]
-    fn a_clean_run_reports_only_the_palette_and_the_colors() {
-        let messages = report_messages(&clean_report(), TOTAL_PIXELS);
-
-        assert_eq!(messages.len(), 2);
-        assert!(
-            messages
-                .iter()
-                .all(|(severity, _)| *severity == Severity::Info)
-        );
-        assert!(messages[1].1.contains("元の色のまま"), "{messages:?}");
+    fn a_clean_run_says_nothing() {
+        assert!(report_messages(&clean_report(), TOTAL_PIXELS).is_empty());
     }
 
     /// 遅延の切り上げは、再生が遅くなることまで書いた警告になる
@@ -543,14 +521,10 @@ mod tests {
             ..clean_report()
         };
 
-        let clamped: Vec<(Severity, String)> = report_messages(&report, TOTAL_PIXELS)
-            .into_iter()
-            .filter(|(_, message)| message.starts_with("表示時間:"))
-            .collect();
-
+        let clamped = report_messages(&report, TOTAL_PIXELS);
         assert_eq!(clamped.len(), 1);
         assert_eq!(clamped[0].0, Severity::Warn);
-        assert!(clamped[0].1.contains("50fps"), "{}", clamped[0].1);
+        assert!(clamped[0].1.starts_with("表示時間:"), "{}", clamped[0].1);
         assert!(
             clamped[0].1.contains("遅く再生されます"),
             "{}",
@@ -565,6 +539,7 @@ mod tests {
             rebuilds: 37,
             local_tables: 41,
             peak_spool_bytes: 987_654_321,
+            approximated_pixels: 4096,
             ..clean_report()
         };
 
