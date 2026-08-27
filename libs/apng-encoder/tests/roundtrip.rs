@@ -3,7 +3,7 @@
 use apng_encoder::{
     ColorReduction, ColorType, Config, DEFAULT_MAX_SPOOL_BYTES, Encoder, Error, FrameDelay,
 };
-use std::io::{self, Cursor, Write};
+use std::io::{self, Cursor, Seek, SeekFrom, Write};
 
 /// 決定的な擬似乱数でフレームの内容を作る
 fn frame_data(len: usize, seed: u32) -> Vec<u8> {
@@ -35,7 +35,7 @@ fn config(color_type: ColorType) -> Config {
 fn encode(width: u32, height: u32, color_type: ColorType, input: &[Vec<u8>]) -> Vec<u8> {
     let delay = FrameDelay::new(1001, 30000).unwrap();
     let mut encoder = Encoder::new(
-        Vec::new(),
+        Cursor::new(Vec::new()),
         width,
         height,
         input.len() as u32,
@@ -45,7 +45,7 @@ fn encode(width: u32, height: u32, color_type: ColorType, input: &[Vec<u8>]) -> 
     for data in input {
         encoder.add_frame(data, delay).unwrap();
     }
-    encoder.finish().unwrap()
+    encoder.finish().unwrap().into_inner()
 }
 
 struct DecodedFrame {
@@ -284,7 +284,7 @@ fn wide_frame_rgba() {
 fn num_plays_reaches_the_animation_control() {
     let input = frames(2, 2, ColorType::Rgba8, 1);
     let mut encoder = Encoder::new(
-        Vec::new(),
+        Cursor::new(Vec::new()),
         2,
         2,
         1,
@@ -297,7 +297,7 @@ fn num_plays_reaches_the_animation_control() {
     encoder
         .add_frame(&input[0], FrameDelay::new(1, 30).unwrap())
         .unwrap();
-    let bytes = encoder.finish().unwrap();
+    let bytes = encoder.finish().unwrap().into_inner();
 
     assert_eq!(decode(&bytes).0, 7);
 }
@@ -307,11 +307,12 @@ fn num_plays_reaches_the_animation_control() {
 fn out_of_range_delay_is_approximated() {
     let input = frames(2, 2, ColorType::Rgba8, 1);
     let bytes = {
-        let mut encoder = Encoder::new(Vec::new(), 2, 2, 1, config(ColorType::Rgba8)).unwrap();
+        let mut encoder =
+            Encoder::new(Cursor::new(Vec::new()), 2, 2, 1, config(ColorType::Rgba8)).unwrap();
         encoder
             .add_frame(&input[0], FrameDelay::new(1001, 120000).unwrap())
             .unwrap();
-        encoder.finish().unwrap()
+        encoder.finish().unwrap().into_inner()
     };
 
     let (_, decoded) = decode(&bytes);
@@ -323,7 +324,13 @@ fn out_of_range_delay_is_approximated() {
 #[test]
 fn oversized_image_is_rejected() {
     assert!(matches!(
-        Encoder::new(Vec::new(), u32::MAX, u32::MAX, 1, config(ColorType::Rgba8)),
+        Encoder::new(
+            Cursor::new(Vec::new()),
+            u32::MAX,
+            u32::MAX,
+            1,
+            config(ColorType::Rgba8)
+        ),
         Err(Error::ImageTooLarge {
             width: u32::MAX,
             height: u32::MAX
@@ -341,7 +348,7 @@ fn compression_level_changes_the_output_size() {
 
     let size = |compression_level| {
         let mut encoder = Encoder::new(
-            Vec::new(),
+            Cursor::new(Vec::new()),
             width,
             height,
             1,
@@ -354,7 +361,7 @@ fn compression_level_changes_the_output_size() {
         encoder
             .add_frame(&data, FrameDelay::new(1, 30).unwrap())
             .unwrap();
-        encoder.finish().unwrap().len()
+        encoder.finish().unwrap().into_inner().len()
     };
 
     let (low, middle, high) = (size(1), size(6), size(9));
@@ -371,6 +378,7 @@ fn compression_level_changes_the_output_size() {
 /// 一定バイト数まで受け付け、それ以降は必ず失敗する書き出し先
 struct FailingWriter {
     remaining: usize,
+    position: u64,
 }
 
 impl Write for FailingWriter {
@@ -380,11 +388,26 @@ impl Write for FailingWriter {
             return Err(io::Error::other("書き出し失敗"));
         }
         self.remaining -= buf.len();
+        self.position += buf.len() as u64;
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+/// 書き出した位置だけを追う。戻った先を書き換えても内容は残らない
+impl Seek for FailingWriter {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.position = match pos {
+            SeekFrom::Start(at) => at,
+            SeekFrom::Current(offset) | SeekFrom::End(offset) => self
+                .position
+                .checked_add_signed(offset)
+                .ok_or_else(|| io::Error::other("位置が範囲外"))?,
+        };
+        Ok(self.position)
     }
 }
 
@@ -396,7 +419,10 @@ fn a_failed_write_poisons_the_encoder() {
     let input = frames(8, 8, ColorType::Rgba8, 3);
     let delay = FrameDelay::new(1, 30).unwrap();
     // シグネチャ・IHDR・acTL・fcTLは通り、IDATの途中で失敗する長さ
-    let writer = FailingWriter { remaining: 100 };
+    let writer = FailingWriter {
+        remaining: 100,
+        position: 0,
+    };
     let mut encoder = Encoder::new(writer, 8, 8, 3, config(ColorType::Rgba8)).unwrap();
 
     encoder.add_frame(&input[0], delay).unwrap();
@@ -413,7 +439,8 @@ fn a_failed_write_poisons_the_encoder() {
 
 #[test]
 fn frame_of_the_wrong_size_is_rejected() {
-    let mut encoder = Encoder::new(Vec::new(), 4, 4, 1, config(ColorType::Rgba8)).unwrap();
+    let mut encoder =
+        Encoder::new(Cursor::new(Vec::new()), 4, 4, 1, config(ColorType::Rgba8)).unwrap();
     assert!(matches!(
         encoder.add_frame(&[0u8; 63], FrameDelay::new(1, 30).unwrap()),
         Err(Error::FrameSizeMismatch {
@@ -427,7 +454,8 @@ fn frame_of_the_wrong_size_is_rejected() {
 fn extra_frame_is_rejected() {
     let input = frames(2, 2, ColorType::Rgba8, 1);
     let delay = FrameDelay::new(1, 30).unwrap();
-    let mut encoder = Encoder::new(Vec::new(), 2, 2, 1, config(ColorType::Rgba8)).unwrap();
+    let mut encoder =
+        Encoder::new(Cursor::new(Vec::new()), 2, 2, 1, config(ColorType::Rgba8)).unwrap();
     encoder.add_frame(&input[0], delay).unwrap();
 
     assert!(matches!(
@@ -442,7 +470,8 @@ fn extra_frame_is_rejected() {
 #[test]
 fn missing_frame_is_rejected_on_finish() {
     let input = frames(2, 2, ColorType::Rgba8, 1);
-    let mut encoder = Encoder::new(Vec::new(), 2, 2, 3, config(ColorType::Rgba8)).unwrap();
+    let mut encoder =
+        Encoder::new(Cursor::new(Vec::new()), 2, 2, 3, config(ColorType::Rgba8)).unwrap();
     encoder
         .add_frame(&input[0], FrameDelay::new(1, 30).unwrap())
         .unwrap();
@@ -460,19 +489,19 @@ fn missing_frame_is_rejected_on_finish() {
 fn invalid_parameters_are_rejected() {
     let rgba = config(ColorType::Rgba8);
     assert!(matches!(
-        Encoder::new(Vec::new(), 0, 4, 1, rgba),
+        Encoder::new(Cursor::new(Vec::new()), 0, 4, 1, rgba),
         Err(Error::InvalidDimensions {
             width: 0,
             height: 4
         })
     ));
     assert!(matches!(
-        Encoder::new(Vec::new(), 4, 4, 0, rgba),
+        Encoder::new(Cursor::new(Vec::new()), 4, 4, 0, rgba),
         Err(Error::InvalidFrameCount)
     ));
     assert!(matches!(
         Encoder::new(
-            Vec::new(),
+            Cursor::new(Vec::new()),
             4,
             4,
             1,
@@ -1420,12 +1449,19 @@ fn reduce_config(color_type: ColorType, max_spool_bytes: usize) -> Config {
 /// 符号化した結果と、溜めたバイト数の最大値を返す
 fn encode_with(width: u32, height: u32, config: Config, input: &[Vec<u8>]) -> (Vec<u8>, usize) {
     let delay = FrameDelay::new(1001, 30000).unwrap();
-    let mut encoder = Encoder::new(Vec::new(), width, height, input.len() as u32, config).unwrap();
+    let mut encoder = Encoder::new(
+        Cursor::new(Vec::new()),
+        width,
+        height,
+        input.len() as u32,
+        config,
+    )
+    .unwrap();
     for data in input {
         encoder.add_frame(data, delay).unwrap();
     }
     let peak = encoder.peak_spool_bytes();
-    (encoder.finish().unwrap(), peak)
+    (encoder.finish().unwrap().into_inner(), peak)
 }
 
 /// IHDRが示す出力の色種別
@@ -2088,7 +2124,14 @@ fn reduction_of(
     input: &[Vec<u8>],
 ) -> Option<ColorReduction> {
     let delay = FrameDelay::new(1001, 30000).unwrap();
-    let mut encoder = Encoder::new(Vec::new(), width, height, input.len() as u32, config).unwrap();
+    let mut encoder = Encoder::new(
+        Cursor::new(Vec::new()),
+        width,
+        height,
+        input.len() as u32,
+        config,
+    )
+    .unwrap();
     for data in input {
         encoder.add_frame(data, delay).unwrap();
     }
@@ -2229,13 +2272,14 @@ fn the_default_spool_limit_holds_a_realistic_clip() {
         ..config(ColorType::Rgba8)
     };
     let delay = FrameDelay::new(1001, 30000).unwrap();
-    let mut encoder = Encoder::new(Vec::new(), WIDTH, HEIGHT, COUNT as u32, config).unwrap();
+    let mut encoder =
+        Encoder::new(Cursor::new(Vec::new()), WIDTH, HEIGHT, COUNT as u32, config).unwrap();
     for data in &input {
         encoder.add_frame(data, delay).unwrap();
     }
     let reduction = encoder.color_reduction();
     let peak = encoder.peak_spool_bytes();
-    let bytes = encoder.finish().unwrap();
+    let bytes = encoder.finish().unwrap().into_inner();
 
     // 打ち切らずに溜めきれば、抱えた量は全フレームの画素を下回らない
     assert!(

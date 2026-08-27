@@ -11,7 +11,7 @@ use crate::over;
 use crate::palette::Palette;
 use crate::spool::{Spool, Spooled};
 use anim_core::{FrameDelay, Rect, append_pixels, crop, paste};
-use std::io::Write;
+use std::io::{Seek, Write};
 use std::ops::RangeInclusive;
 
 /// [`Config::compression_level`] に指定できる範囲
@@ -223,7 +223,7 @@ impl Streaming {
 ///
 /// 溜めるかどうかに関わらず、直前のフレームとそれを描く前のキャンバスの2面を常に抱える
 /// (1920x1080のRGBA8で約16.6MB)。溜めたぶんを貼り直す間は、キャンバスをもう1面加える。
-pub struct Encoder<W: Write> {
+pub struct Encoder<W: Write + Seek> {
     /// チャンクを並べる書き出し先
     chunks: ChunkWriter<W>,
     /// キャンバスの大きさと入力フレームのバイト並び
@@ -246,7 +246,7 @@ pub struct Encoder<W: Write> {
     peak_spool_bytes: usize,
 }
 
-impl<W: Write> Encoder<W> {
+impl<W: Write + Seek> Encoder<W> {
     /// `num_frames` フレームを受け付ける状態にする
     ///
     /// 出力の色種別が最初から決まっていれば、この時点でシグネチャとヘッダを書き出す。
@@ -434,7 +434,7 @@ impl<W: Write> Encoder<W> {
 /// [`Encoder`] から [`Stage`] 以外を借りたもの
 ///
 /// 段階ごとの値は引数で受け取る。フレーム1つを処理する判断と書き出しを担う。
-struct Parts<'a, W: Write> {
+struct Parts<'a, W: Write + Seek> {
     chunks: &'a mut ChunkWriter<W>,
     layout: &'a Layout,
     codec: &'a mut Codec,
@@ -446,7 +446,7 @@ struct Parts<'a, W: Write> {
     frames_accepted: u32,
 }
 
-impl<W: Write> Parts<'_, W> {
+impl<W: Write + Seek> Parts<'_, W> {
     fn write_header(&mut self, output: Output, palette: Option<&Palette>) -> Result<(), Error> {
         self.chunks.write_signature()?;
 
@@ -864,7 +864,7 @@ mod tests {
     use crate::codec::PROBE_FRAMES;
     use crate::testing::noise;
     use flate2::read::ZlibDecoder;
-    use std::io::Read;
+    use std::io::{Cursor, Read};
 
     const WIDTH: u32 = 64;
     const HEIGHT: u32 = 48;
@@ -964,14 +964,20 @@ mod tests {
     }
 
     fn encode(input: &[Vec<u8>], config: Config) -> Vec<u8> {
-        let mut encoder =
-            Encoder::new(Vec::new(), WIDTH, HEIGHT, input.len() as u32, config).unwrap();
+        let mut encoder = Encoder::new(
+            Cursor::new(Vec::new()),
+            WIDTH,
+            HEIGHT,
+            input.len() as u32,
+            config,
+        )
+        .unwrap();
         for frame in input {
             encoder
                 .add_frame(frame, FrameDelay::new(1, 30).unwrap())
                 .unwrap();
         }
-        encoder.finish().unwrap()
+        encoder.finish().unwrap().into_inner()
     }
 
     fn rgb_config() -> Config {
@@ -1231,8 +1237,14 @@ mod tests {
         let input = vec![speckled, uniform(0x30), uniform(0x50), uniform(0x70)];
         assert_eq!(input.len(), PROBE_FRAMES as usize);
 
-        let mut encoder =
-            Encoder::new(Vec::new(), WIDTH, HEIGHT, input.len() as u32, rgba_config()).unwrap();
+        let mut encoder = Encoder::new(
+            Cursor::new(Vec::new()),
+            WIDTH,
+            HEIGHT,
+            input.len() as u32,
+            rgba_config(),
+        )
+        .unwrap();
         let mut recorded = Vec::new();
         let mut totals = (0u64, 0u64);
         for frame in &input {
@@ -1246,7 +1258,7 @@ mod tests {
             ));
             totals = probed;
         }
-        let bytes = encoder.finish().unwrap();
+        let bytes = encoder.finish().unwrap().into_inner();
 
         let bodies = body_lengths(&bytes);
         assert_eq!(bodies.len(), input.len());
@@ -1289,7 +1301,7 @@ mod tests {
     }
 
     /// 書き出しへ移ったエンコーダが持つ間合い
-    fn pacing_of<W: Write>(encoder: &Encoder<W>) -> &BlendPacing {
+    fn pacing_of<W: Write + Seek>(encoder: &Encoder<W>) -> &BlendPacing {
         match &encoder.stage {
             Stage::Streaming(streaming) => &streaming.blend_pacing,
             Stage::Deciding { .. } => panic!("書き出しへ移っている"),
@@ -1320,7 +1332,7 @@ mod tests {
         let delay = FrameDelay::new(1, 30).unwrap();
 
         let mut encoder = Encoder::new(
-            Vec::new(),
+            Cursor::new(Vec::new()),
             WIDTH,
             HEIGHT,
             input.len() as u32 + 1,
