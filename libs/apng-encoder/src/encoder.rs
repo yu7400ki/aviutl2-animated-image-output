@@ -47,15 +47,17 @@ pub struct Config {
     /// 入力の色種別のまま書き出す。PNGの色種別はファイル全体で1つなので、収まるかは
     /// 最後のフレームまで決まらない。有効にすると、決まるまでのフレームをエンコーダ内部に
     /// 溜める。
+    ///
+    /// 出力が小さくなるとは限らない。アルファを持たない出力へ落とした場合、溜めた区間は
+    /// 捨てる判断を経ずに書き出されるため、その区間のぶんだけ大きくなることがある。
     pub reduce_color: bool,
     /// 溜めたフレームが抱えるメモリの上限バイト数 ([`DEFAULT_MAX_SPOOL_BYTES`] が目安)
     ///
     /// クロップ済みの画素データに、フレームごとの管理領域を加えた概算で数える。
     /// 超える場合は色種別を落とすのをやめ、入力の色種別のまま書き出す。
     ///
-    /// アルファを持たない出力へ落とした場合、溜めた区間は捨てる判断を経ずに
-    /// 書き出される。上限に達して落とすのをやめた場合も、入力がRGB8ならその区間の
-    /// ぶんだけ書き出しが大きくなることがある。
+    /// 落とすのをやめた先がアルファを持たなければ、そこまでに溜めた区間も捨てる判断を
+    /// 経ずに書き出される。
     pub max_spool_bytes: usize,
 }
 
@@ -794,8 +796,7 @@ impl<W: Write> Parts<'_, W> {
 
     /// フレームから `rect` を切り出してフィルタして圧縮する
     ///
-    /// この経路を通るのは出力が決まった後のフレームだけで、その表現は入力と同じか
-    /// アルファを落としたものになる。
+    /// この経路を通るのは出力が決まった後のフレームだけで、その表現は入力と同じになる。
     fn compress_rect(&mut self, data: &[u8], rect: Rect, output: Output) -> Candidate {
         debug_assert_ne!(output, Output::Indexed8);
 
@@ -1139,17 +1140,22 @@ mod tests {
 
     /// 溜めたフレームで固めた戦略は、書き出しへ移った後も変わらない
     ///
-    /// 色数が跳ねた時点で溜めたぶんがまとめて圧縮されるため、そこでプローブが
-    /// 尽きる。以降のフレームは書き出し経路を通る。
+    /// 色数が跳ねたフレームまでが溜まってまとめて圧縮されるため、そこでプローブが
+    /// 尽きる。それより後のフレームだけが書き出し経路を通る。
     #[test]
     fn the_strategy_fixed_by_spooled_frames_stays_fixed() {
+        /// 色数が跳ねて色種別が確定するフレームの位置
+        ///
+        /// ここまでの [`PROBE_FRAMES`] フレームを溜めたぶんの圧縮でプローブが尽きる。
+        const COMMIT: u32 = PROBE_FRAMES;
+
         let config = Config {
             color_type: ColorType::Rgba8,
             reduce_color: true,
             ..Config::default()
         };
 
-        let mut input: Vec<Vec<u8>> = (0..PROBE_FRAMES)
+        let mut input: Vec<Vec<u8>> = (0..COMMIT)
             .map(|seed| with_alpha(&flat_frame(seed)))
             .collect();
         input.extend((0..4).map(|seed| with_alpha(&detailed_frame(seed))));
@@ -1157,12 +1163,12 @@ mod tests {
         let bytes = encode(&input, config);
         let types = filter_types(&bytes, 4);
         assert_eq!(types.len(), input.len());
-        for (index, frame) in types.iter().enumerate().skip(PROBE_FRAMES as usize) {
+        for (index, frame) in types.iter().enumerate().skip(COMMIT as usize + 1) {
             assert!(frame.iter().all(|&f| f == 0), "フレーム {index}: {frame:?}");
         }
     }
 
-    /// アルファを保つ設定
+    /// RGBA8を入力する設定
     fn rgba_config() -> Config {
         Config {
             color_type: ColorType::Rgba8,
