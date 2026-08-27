@@ -449,6 +449,68 @@ fn disposals(bytes: &[u8]) -> Vec<gif::DisposalMethod> {
         .collect()
 }
 
+/// 出力のブロックを先頭からたどって読み出したもの
+struct Scanned {
+    /// グローバルカラーテーブルのバイト列
+    global_table: Vec<u8>,
+    /// フレームごとに画像データが宣言するLZW最小符号長
+    min_code_sizes: Vec<u8>,
+}
+
+/// ブロックの区切りを長さの宣言だけでたどる
+///
+/// 画像データのバイトには画像記述子やヘッダと同じ値が現れるため、目印を探す
+/// 読み方では区切りを取り違える。
+fn scan(bytes: &[u8]) -> Scanned {
+    let entries_of = |packed: u8| 2usize << (packed & 0x07);
+    assert_eq!(&bytes[..6], b"GIF89a", "ヘッダが違う");
+    let packed = bytes[10];
+    assert_eq!(
+        packed & 0x80,
+        0x80,
+        "グローバルカラーテーブルを持つ宣言が無い"
+    );
+
+    let mut at = 13;
+    let global_table = bytes[at..at + entries_of(packed) * 3].to_vec();
+    at += global_table.len();
+
+    let mut min_code_sizes = Vec::new();
+    loop {
+        match bytes[at] {
+            // 終端
+            0x3B => {
+                assert_eq!(at + 1, bytes.len(), "終端の後にバイトが残っている");
+                return Scanned {
+                    global_table,
+                    min_code_sizes,
+                };
+            }
+            // 拡張ブロック
+            0x21 => at = skip_sub_blocks(bytes, at + 2),
+            // 画像記述子
+            0x2C => {
+                let packed = bytes[at + 9];
+                at += 10;
+                if packed & 0x80 != 0 {
+                    at += entries_of(packed) * 3;
+                }
+                min_code_sizes.push(bytes[at]);
+                at = skip_sub_blocks(bytes, at + 1);
+            }
+            found => panic!("{at} バイト目に知らないブロック {found:#04X} がある"),
+        }
+    }
+}
+
+/// サブブロックの列を読み飛ばし、ブロック終端の次の位置を返す
+fn skip_sub_blocks(bytes: &[u8], mut at: usize) -> usize {
+    while bytes[at] != 0 {
+        at += 1 + usize::from(bytes[at]);
+    }
+    at + 1
+}
+
 /// 1画素だけの画像
 #[test]
 fn a_single_pixel_frame_survives_both_decoders() {
@@ -475,6 +537,49 @@ fn frames_with_padded_color_tables_survive_both_decoders() {
             })
             .collect();
         round_trip(32, 32, ColorType::Rgb8, &[data]);
+    }
+}
+
+/// 低色数の素材でも、グローバルカラーテーブルは256エントリで書かれる
+///
+/// 最小符号長はそのフレームで使った最大の添字から決まるので、大きさの欄が
+/// 256エントリを示していても符号は広がらない。
+#[test]
+fn a_low_color_frame_pads_the_global_table_without_widening_the_codes() {
+    for (colors, min_code_size) in [
+        (2usize, 2u8),
+        (3, 2),
+        (4, 2),
+        (5, 3),
+        (8, 3),
+        (9, 4),
+        (16, 4),
+    ] {
+        let data: Vec<u8> = (0..32 * 32)
+            .flat_map(|i| {
+                let value = (i % colors) as u8;
+                [value, value.wrapping_mul(7), value.wrapping_mul(13)]
+            })
+            .collect();
+        let (bytes, report) = round_trip(32, 32, ColorType::Rgb8, &[data]);
+        assert_eq!(
+            report.palette,
+            PaletteKind::Exact {
+                colors: colors as u16
+            },
+            "{colors}色"
+        );
+
+        let scanned = scan(&bytes);
+        assert_eq!(scanned.global_table.len(), 768, "{colors}色");
+        // 透過ラン用のスロットが最後の色の次に載り、その先が埋め草になる
+        assert!(
+            scanned.global_table[(colors + 1) * 3..]
+                .iter()
+                .all(|&byte| byte == 0),
+            "{colors}色の埋め草が黒でない"
+        );
+        assert_eq!(scanned.min_code_sizes, [min_code_size], "{colors}色");
     }
 }
 
