@@ -3,9 +3,18 @@ use apng_encoder::COMPRESSION_LEVELS;
 use win32_dialog::{
     Dialog, MessageBox,
     layout::{FlexLayout, JustifyContent, SizeValue, labeled},
-    widget::{Button, CheckBox, ComboBox, Number},
+    widget::{Button, CheckBox, ComboBox, Label, Number},
 };
 use windows::Win32::Foundation::HWND;
+
+/// 色数の削減のチェックボックスに出す名前
+const REDUCE_COLOR_LABEL: &str = "色数を削減する";
+
+/// 色数の削減に添える但し書き
+///
+/// 有効にした書き出しは、全フレームの色が256色に収まらなければ失敗する。
+/// 何が起きうるかを、設定する時点で読めるようにする。
+const REDUCE_COLOR_NOTE: &str = "256色に収まらないと出力に失敗します";
 
 pub fn show_config_dialog(
     parent_hwnd: HWND,
@@ -28,7 +37,8 @@ pub fn show_config_dialog(
             *COMPRESSION_LEVELS.end() as i32,
         );
 
-    let reduce_color_checkbox = CheckBox::new("色数の最適化").checked(default_config.reduce_color);
+    let reduce_color_checkbox =
+        CheckBox::new(REDUCE_COLOR_LABEL).checked(default_config.reduce_color);
 
     let dialog = Dialog::new("APNG出力設定");
     let handle = dialog.handle();
@@ -71,7 +81,12 @@ pub fn show_config_dialog(
         .with_layout(labeled("ループ回数 (0=無限ループ)", repeat_input.clone()))
         .with_layout(labeled("カラーフォーマット", color_combobox.clone()))
         .with_layout(labeled(&compression_label(), compression_input.clone()))
-        .with_widget(reduce_color_checkbox.clone())
+        .with_layout(
+            FlexLayout::column()
+                .with_gap(3.0)
+                .with_widget(reduce_color_checkbox.clone())
+                .with_widget(Label::new(REDUCE_COLOR_NOTE)),
+        )
         .with_layout(
             FlexLayout::row()
                 .with_gap(10.0)
@@ -116,4 +131,18 @@ fn compression_error_message() -> String {
         COMPRESSION_LEVELS.start(),
         COMPRESSION_LEVELS.end()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 色数の削減は、失敗しうることを設定する時点で示す
+    ///
+    /// 有効にした書き出しは、色数が収まらなければファイルを1つも残さずに終わる。
+    #[test]
+    fn the_reduce_color_setting_states_what_can_go_wrong() {
+        assert!(REDUCE_COLOR_NOTE.contains("256色"), "{REDUCE_COLOR_NOTE}");
+        assert!(REDUCE_COLOR_NOTE.contains("失敗"), "{REDUCE_COLOR_NOTE}");
+    }
 }
