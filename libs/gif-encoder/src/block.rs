@@ -1,5 +1,6 @@
 //! ブロックの書き出し
 
+use anim_core::MAX_COLORS;
 use std::io::{self, Write};
 
 /// データストリームの先頭に置く識別子とバージョン
@@ -20,6 +21,10 @@ const TRAILER: u8 = 0x3B;
 const BLOCK_TERMINATOR: u8 = 0x00;
 /// 原色1つあたり8bitを表す色分解能
 const COLOR_RESOLUTION: u8 = 7;
+/// グローバルカラーテーブルのバイト数
+const GLOBAL_TABLE_BYTES: usize = MAX_COLORS * 3;
+/// [`MAX_COLORS`] エントリを表すカラーテーブルの大きさの欄
+const GLOBAL_TABLE_SIZE: u8 = 7;
 /// ループ回数を持つアプリケーション拡張の識別子と認証コード
 const NETSCAPE: &[u8; 11] = b"NETSCAPE2.0";
 /// ループ回数を運ぶサブブロックの先頭に置く値
@@ -38,21 +43,30 @@ pub(crate) fn header<W: Write>(writer: &mut W) -> io::Result<()> {
 
 /// 論理画面記述子を書く
 ///
-/// `table_size` はグローバルカラーテーブルの大きさの欄。背景色の添字と
+/// グローバルカラーテーブルを持つ宣言を立てる。その大きさの欄は
+/// [`global_color_table`] が書く [`MAX_COLORS`] エントリを表す。背景色の添字と
 /// アスペクト比、Sortフラグは0で、色分解能は8bitを表す7で固定する。
 pub(crate) fn logical_screen_descriptor<W: Write>(
     writer: &mut W,
     width: u16,
     height: u16,
-    table_size: u8,
 ) -> io::Result<()> {
-    let packed = 0x80 | COLOR_RESOLUTION << 4 | table_size;
+    let packed = 0x80 | COLOR_RESOLUTION << 4 | GLOBAL_TABLE_SIZE;
     writer.write_all(&width.to_le_bytes())?;
     writer.write_all(&height.to_le_bytes())?;
     writer.write_all(&[packed, 0, 0])
 }
 
-/// カラーテーブルを書く
+/// グローバルカラーテーブルを書く
+///
+/// 常に [`MAX_COLORS`] エントリぶんを書き、`bytes` に足りない分は黒で埋める。
+pub(crate) fn global_color_table<W: Write>(writer: &mut W, bytes: &[u8]) -> io::Result<()> {
+    const PADDING: [u8; GLOBAL_TABLE_BYTES] = [0; GLOBAL_TABLE_BYTES];
+    writer.write_all(bytes)?;
+    writer.write_all(&PADDING[bytes.len()..])
+}
+
+/// ローカルカラーテーブルを書く
 pub(crate) fn color_table<W: Write>(writer: &mut W, bytes: &[u8]) -> io::Result<()> {
     writer.write_all(bytes)
 }
@@ -148,13 +162,26 @@ mod tests {
         assert_eq!(written(header), b"GIF89a");
     }
 
+    /// 論理画面記述子のカラーテーブルの大きさの欄は256エントリで固定
     #[test]
     fn the_logical_screen_descriptor_carries_the_fixed_fields() {
-        let bytes = written(|out| logical_screen_descriptor(out, 0x0102, 0x0304, 7));
+        let bytes = written(|out| logical_screen_descriptor(out, 0x0102, 0x0304));
         assert_eq!(bytes, [0x02, 0x01, 0x04, 0x03, 0b1111_0111, 0x00, 0x00]);
+    }
 
-        let bytes = written(|out| logical_screen_descriptor(out, 1, 1, 0));
-        assert_eq!(bytes[4], 0b1111_0000, "色分解能かSortフラグが違う");
+    /// グローバルカラーテーブルは色数によらず768バイトで、余りは黒
+    #[test]
+    fn the_global_color_table_is_always_padded_to_256_entries() {
+        for colors in [1usize, 2, 5, 128, 256] {
+            let table: Vec<u8> = (0..colors * 3).map(|at| (at + 1) as u8).collect();
+            let bytes = written(|out| global_color_table(out, &table));
+            assert_eq!(bytes.len(), 768, "{colors}色");
+            assert_eq!(bytes[..table.len()], table, "{colors}色");
+            assert!(
+                bytes[table.len()..].iter().all(|&byte| byte == 0),
+                "{colors}色の埋め草が黒でない"
+            );
+        }
     }
 
     /// 設定値の再生回数からループ数の欄が決まる

@@ -668,13 +668,8 @@ impl<W: Write + Seek> Parts<'_, W> {
     /// ヘッダ・論理画面記述子・グローバルカラーテーブル・ループ回数を書く
     fn write_head(&mut self, table: &ColorTable) -> Result<(), Error> {
         block::header(self.writer)?;
-        block::logical_screen_descriptor(
-            self.writer,
-            self.layout.width,
-            self.layout.height,
-            table.size_field(),
-        )?;
-        block::color_table(self.writer, table.bytes())?;
+        block::logical_screen_descriptor(self.writer, self.layout.width, self.layout.height)?;
+        block::global_color_table(self.writer, table.bytes())?;
         block::netscape(self.writer, self.num_plays)?;
         Ok(())
     }
