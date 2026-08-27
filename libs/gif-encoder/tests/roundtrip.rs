@@ -2436,8 +2436,8 @@ fn fill_block(frame: &mut [u8], at: (u32, u32), size: (u32, u32), pixel: &[u8]) 
 
 /// 保留中のフレームの矩形を広げる符号化と、色表からの逃げが重なる素材
 ///
-/// 保留中のフレームの外で不透明な物が消えるので矩形を広げることになり、同じ
-/// フレームで色が入れ替わって逃げ道へ踏み切る。
+/// 帯の色が入れ替わるフレームが逃げ道へ踏み切り、その次のフレームで不透明な物が
+/// 消える。矩形を広げられるのは、逃げた側のフレームになる。
 fn a_widened_rect_across_an_escape(frames: usize) -> Vec<Vec<u8>> {
     /// 消える物の色
     const OBJECT: [u8; 4] = [0x00, 0xFF, 0x00, 0xFF];
@@ -2450,7 +2450,7 @@ fn a_widened_rect_across_an_escape(frames: usize) -> Vec<Vec<u8>> {
             let mut frame = transparent.clone();
             // 塗る色を先頭フレームの色へ入れておく
             fill_block(&mut frame, (48, 8), (4, 4), &PAINT);
-            if index < ESCAPES_AT {
+            if index <= ESCAPES_AT {
                 fill_block(&mut frame, (32, 32), (8, 8), &OBJECT);
             }
             if index >= 1 {
@@ -2469,9 +2469,8 @@ fn a_widened_rect_across_an_escape(frames: usize) -> Vec<Vec<u8>> {
 
 /// 広げた矩形は、保留中のフレームを符号化したテーブルで符号化し直す
 ///
-/// 逃げた先の色表は変わった画素だけから作るので、保留中のフレームが載せた色は
-/// 入っていない。現在の色表で符号化し直すと、その色が最近傍へずれて画面から
-/// 消える。
+/// 保留中のフレームは自分の色表へ逃げており、その添字はその色表を引くもの。
+/// 現在の色表で符号化し直すと、書き出す色表と添字の組み合わせが崩れる。
 #[test]
 fn a_widened_rect_keeps_the_table_that_encoded_the_pending_frame() {
     const FRAMES: usize = ESCAPES_AT + 4;
@@ -2485,7 +2484,7 @@ fn a_widened_rect_keeps_the_table_that_encoded_the_pending_frame() {
     let (bytes, report) = encode_with(SCENE_WIDTH, SCENE_HEIGHT, config, &frames).unwrap();
     assert!(report.local_tables > 0, "色表から逃げていない");
 
-    let widened = rects(&bytes)[ESCAPES_AT - 1];
+    let widened = rects(&bytes)[ESCAPES_AT];
     assert!(
         widened.2 > 4 && widened.3 > 4,
         "保留中のフレームの矩形が広がっていない: {widened:?}"
@@ -2494,12 +2493,13 @@ fn a_widened_rect_keeps_the_table_that_encoded_the_pending_frame() {
     // 広げた矩形は廃棄方法が矩形を抜くフレームなので、続くフレームの画面は
     // 抜いた先の扱いがデコーダで割れる。突き合わせるのはこのフレームだけ
     let frame_len = (SCENE_WIDTH * SCENE_HEIGHT) as usize * 4;
-    let at = frame_len * (ESCAPES_AT - 1);
-    let mut screens = vec![compose(&decode_with_gif(&bytes))[ESCAPES_AT - 1].clone()];
+    let at = frame_len * ESCAPES_AT;
+    let mut screens = vec![compose(&decode_with_gif(&bytes))[ESCAPES_AT].clone()];
     if let Some(raw) = decode_with_ffmpeg(&bytes) {
         screens.push(raw[at..at + frame_len].to_vec());
     }
 
+    let band = a_widened_rect_across_an_escape(FRAMES)[ESCAPES_AT].clone();
     for screen in &screens {
         for y in 0..4 {
             for x in 0..4 {
@@ -2509,6 +2509,17 @@ fn a_widened_rect_keeps_the_table_that_encoded_the_pending_frame() {
                     "広げた矩形の中で色がずれている"
                 );
             }
+        }
+        // 入れ替わった帯は矩形の中にある。逃げた色表はこのフレームの色を
+        // 量子化したものなので、どの画素も入力の近くへ落ちる
+        for x in 0..SCENE_WIDTH {
+            let at = (x as usize + CROWD_ROW as usize * SCENE_WIDTH as usize) * 4;
+            let written = pixel_at(screen, x, CROWD_ROW);
+            let worst = (0..4)
+                .map(|axis| written[axis].abs_diff(band[at + axis]))
+                .max()
+                .expect("4軸");
+            assert!(worst <= 8, "広げた矩形の中で帯の色がずれている: {worst}");
         }
     }
 }
