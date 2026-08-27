@@ -8,7 +8,7 @@ use crate::delta::Delta;
 use crate::error::Error;
 use crate::layout::{ColorType, Layout, Output};
 use crate::over;
-use crate::palette::{PLTE_LEN, Palette, TRNS_LEN};
+use crate::palette::{PLTE_PLACEHOLDER, Palette, TRNS_PLACEHOLDER};
 use anim_core::{Colors, FrameDelay, Rect, crop};
 use std::io::{Seek, Write};
 use std::ops::RangeInclusive;
@@ -465,13 +465,13 @@ impl<W: Write + Seek> Parts<'_, W> {
 
         self.write_header(Output::Indexed8)?;
         let plte = self.chunks.position()?;
-        self.chunks.write(*b"PLTE", &[0u8; PLTE_LEN])?;
+        self.chunks.write(*b"PLTE", &PLTE_PLACEHOLDER)?;
         // アルファを持たない入力にはアルファが現れないため、tRNS自体が要らない
         let trns = match self.layout.input {
             ColorType::Rgb8 => None,
             ColorType::Rgba8 => {
                 let at = self.chunks.position()?;
-                self.chunks.write(*b"tRNS", &[u8::MAX; TRNS_LEN])?;
+                self.chunks.write(*b"tRNS", &TRNS_PLACEHOLDER)?;
                 Some(at)
             }
         };

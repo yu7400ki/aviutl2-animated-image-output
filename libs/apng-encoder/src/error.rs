@@ -59,7 +59,10 @@ impl fmt::Display for Error {
                 write!(f, "チャンク長がPNGの上限を超えました: {len} バイト")
             }
             Error::ColorLimitExceeded { frame } => {
-                write!(f, "色数がパレットに収まりません: フレーム {frame}")
+                write!(
+                    f,
+                    "色数がパレットに収まりません: フレーム {frame} (色数の削減を無効にすると、カラーフォーマットのまま書き出せます)"
+                )
             }
             Error::Io(e) => write!(f, "書き出しに失敗しました: {e}"),
             Error::Poisoned => write!(f, "書き出しに失敗したエンコーダは再利用できません"),

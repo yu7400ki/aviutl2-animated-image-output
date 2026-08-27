@@ -13,6 +13,28 @@ pub(crate) const PLTE_LEN: usize = MAX_COLORS * 3;
 /// 理由は [`PLTE_LEN`] と同じ。
 pub(crate) const TRNS_LEN: usize = MAX_COLORS;
 
+/// 書き戻す前のPLTEに置く詰め物
+///
+/// 全エントリをマゼンタにする。書き戻しに至らずに終わったファイルを寛容な
+/// デコーダが読むと画面がマゼンタで埋まり、書き上がっていないことが見て分かる。
+pub(crate) const PLTE_PLACEHOLDER: [u8; PLTE_LEN] = plte_placeholder();
+
+/// tRNSの詰め物
+///
+/// 全エントリを不透明にする。[`PLTE_PLACEHOLDER`] を画面へ出すために要る。
+pub(crate) const TRNS_PLACEHOLDER: [u8; TRNS_LEN] = [u8::MAX; TRNS_LEN];
+
+const fn plte_placeholder() -> [u8; PLTE_LEN] {
+    let mut plte = [0u8; PLTE_LEN];
+    let mut entry = 0;
+    while entry < PLTE_LEN {
+        plte[entry] = u8::MAX;
+        plte[entry + 2] = u8::MAX;
+        entry += 3;
+    }
+    plte
+}
+
 /// PLTEとtRNSを引く添字の表
 ///
 /// 添字は色を見つけた順に振る。全フレームを見終わる前に添字を焼くため、

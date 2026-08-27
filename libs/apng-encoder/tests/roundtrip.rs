@@ -1764,6 +1764,138 @@ fn a_color_beyond_the_palette_poisons_the_encoder() {
     assert!(matches!(encoder.finish(), Err(Error::Poisoned)));
 }
 
+/// 型で見つけた最初のチャンクのデータ部
+///
+/// 終端していないバイト列も読めるよう、デコーダを通さずに走査する。
+fn raw_chunk(bytes: &[u8], kind: &[u8; 4]) -> Vec<u8> {
+    let mut offset = 8;
+    while offset + 12 <= bytes.len() {
+        let len = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        if &bytes[offset + 4..offset + 8] == kind {
+            return bytes[offset + 8..offset + 8 + len].to_vec();
+        }
+        offset += 12 + len;
+    }
+    panic!("チャンクが必要: {}", String::from_utf8_lossy(kind));
+}
+
+/// 書き戻す前のPLTEに並ぶマゼンタ
+fn magenta_entries() -> Vec<u8> {
+    (0..MAX_PALETTE_COLORS)
+        .flat_map(|_| [u8::MAX, 0x00, u8::MAX])
+        .collect()
+}
+
+/// 賭けに負けた書き出しは、書き戻す前のマゼンタのパレットを残す
+///
+/// 場所を確保したPLTEは [`Encoder::finish`] まで書き戻されない。詰め物が黒だと
+/// 寛容なデコーダが先頭フレームを真っ黒な絵として描いてしまう。
+#[test]
+fn a_color_beyond_the_palette_leaves_a_magenta_palette() {
+    let base = palette_blend_frame(1);
+    let burst = with_color_burst(&base);
+    let delay = FrameDelay::new(1001, 30000).unwrap();
+    let mut writer = Cursor::new(Vec::new());
+
+    let mut encoder = Encoder::new(
+        &mut writer,
+        BLEND_WIDTH,
+        BLEND_HEIGHT,
+        3,
+        reduce_config(ColorType::Rgba8),
+    )
+    .unwrap();
+    encoder.add_frame(&base, delay).unwrap();
+    assert!(matches!(
+        encoder.add_frame(&burst, delay),
+        Err(Error::ColorLimitExceeded { frame: 1 })
+    ));
+    drop(encoder);
+
+    let bytes = writer.into_inner();
+    assert_eq!(raw_chunk(&bytes, b"PLTE"), magenta_entries());
+    assert!(
+        raw_chunk(&bytes, b"tRNS")
+            .iter()
+            .all(|&alpha| alpha == u8::MAX)
+    );
+    assert!(!chunk_types(&bytes).iter().any(|kind| kind == b"IEND"));
+}
+
+/// 先頭からの絶対位置へのシークだけが失敗する書き出し先
+///
+/// その向きのシークはPLTEとtRNSの書き戻しでしか起きないため、全フレームを
+/// 書き終えた後の書き戻しで失敗する。
+struct RewriteFails(Cursor<Vec<u8>>);
+
+impl Write for RewriteFails {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl Seek for RewriteFails {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        match pos {
+            SeekFrom::Start(_) => Err(io::Error::other("書き戻し失敗")),
+            pos => self.0.seek(pos),
+        }
+    }
+}
+
+/// パレットの書き戻しに失敗したら、終端せずにエラーを返す
+///
+/// 全フレームを書き終えた後の失敗なので、黙って成功すると詰め物のパレットを
+/// 引く、IENDの無いファイルが残る。tRNSを持たないRGB8の入力ではPLTEが唯一の
+/// 書き戻しになる。
+#[test]
+fn a_failure_while_settling_the_palette_is_reported() {
+    let cases = [
+        (
+            ColorType::Rgba8,
+            palette_frame as fn(usize, usize) -> Vec<u8>,
+        ),
+        (ColorType::Rgb8, palette_frame_rgb),
+    ];
+
+    for (color_type, frame) in cases {
+        let input = vec![frame(8, 0), frame(8, 1)];
+        let delay = FrameDelay::new(1001, 30000).unwrap();
+        let mut writer = RewriteFails(Cursor::new(Vec::new()));
+
+        let mut encoder = Encoder::new(
+            &mut writer,
+            REDUCE_WIDTH,
+            REDUCE_HEIGHT,
+            input.len() as u32,
+            reduce_config(color_type),
+        )
+        .unwrap();
+        for data in &input {
+            encoder.add_frame(data, delay).unwrap();
+        }
+        assert!(
+            matches!(encoder.finish(), Err(Error::Io(_))),
+            "{color_type:?}"
+        );
+
+        let bytes = writer.0.into_inner();
+        assert_eq!(
+            raw_chunk(&bytes, b"PLTE"),
+            magenta_entries(),
+            "{color_type:?}"
+        );
+        assert!(
+            !chunk_types(&bytes).iter().any(|kind| kind == b"IEND"),
+            "{color_type:?}"
+        );
+    }
+}
+
 /// アルファを持つ色はtRNSに載り、画素は元のまま戻る
 #[test]
 fn a_palette_keeps_the_alpha_of_every_color() {
