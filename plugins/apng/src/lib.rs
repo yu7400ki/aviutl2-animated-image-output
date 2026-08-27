@@ -37,11 +37,6 @@ fn color_reduction_message(reduction: ColorReduction) -> String {
         ColorReduction::Palette { colors } => {
             format!("色数の最適化: パレットに置き換えました ({}色)", colors)
         }
-        ColorReduction::AlphaDropped => "色数の最適化: アルファを削除しました".into(),
-        ColorReduction::AlphaRequired => "色数の最適化: 透過があるためアルファを残しました".into(),
-        ColorReduction::AlphaKept => {
-            "色数の最適化: アルファを削除すると大きくなるため残しました".into()
-        }
         ColorReduction::Kept => {
             "色数の最適化: 色数が多いため、カラーフォーマットのまま出力しました".into()
         }
@@ -235,9 +230,6 @@ mod tests {
                 ColorReduction::Palette { colors: 198 },
                 "パレットに置き換え",
             ),
-            (ColorReduction::AlphaDropped, "アルファを削除しました"),
-            (ColorReduction::AlphaRequired, "透過があるため"),
-            (ColorReduction::AlphaKept, "削除すると大きくなるため"),
             (ColorReduction::Kept, "色数が多いため"),
             (ColorReduction::Abandoned, "メモリを超えたため"),
         ];

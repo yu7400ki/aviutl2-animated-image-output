@@ -20,25 +20,6 @@ fn region_rows<'a>(
     })
 }
 
-/// 切り出し済みの領域の行を、`prev` の同じ位置の行と組にして上から順に返す
-fn cropped_rows<'a>(
-    prev: &'a [u8],
-    region: &'a [u8],
-    stride: usize,
-    rect: Rect,
-) -> impl Iterator<Item = (&'a [u8], &'a [u8])> {
-    let head = rect.y as usize * stride + rect.x as usize * RGBA;
-    let row_len = rect.width as usize * RGBA;
-    debug_assert_eq!(region.len(), row_len * rect.height as usize);
-    region
-        .chunks_exact(row_len)
-        .enumerate()
-        .map(move |(y, row)| {
-            let start = head + y * stride;
-            (&prev[start..start + row_len], row)
-        })
-}
-
 /// 行の組を上から順に潰して `out` へ追記する
 fn pack_over_rows<'a>(rows: impl Iterator<Item = (&'a [u8], &'a [u8])>, out: &mut Vec<u8>) -> bool {
     const TRANSPARENT: [u8; RGBA] = [0; RGBA];
@@ -84,21 +65,6 @@ pub(crate) fn pack_over(
 ) -> bool {
     out.reserve(rect.width as usize * rect.height as usize * RGBA);
     pack_over_rows(region_rows(prev, curr, stride, rect), out)
-}
-
-/// 切り出し済みの領域を [`pack_over`] と同じ規則で潰して `out` へ追記する
-///
-/// `region` は `rect` を画素表現を変えずに切り出したもので、`prev` はその切り出し元と
-/// 同じ配置のRGBA8であること。
-pub(crate) fn pack_over_cropped(
-    prev: &[u8],
-    region: &[u8],
-    stride: usize,
-    rect: Rect,
-    out: &mut Vec<u8>,
-) -> bool {
-    out.reserve(region.len());
-    pack_over_rows(cropped_rows(prev, region, stride, rect), out)
 }
 
 #[cfg(test)]

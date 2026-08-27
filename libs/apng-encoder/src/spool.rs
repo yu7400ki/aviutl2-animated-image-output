@@ -1,6 +1,6 @@
 //! 出力の色種別が決まるまでフレームを溜めておく領域
 
-use anim_core::{Colors, FrameDelay, Rect, crop, has_transparency};
+use anim_core::{Colors, FrameDelay, Rect, crop};
 
 /// 溜めたフレーム1つ
 pub(crate) struct Spooled {
@@ -20,8 +20,6 @@ pub(crate) struct Spool {
     len: usize,
     /// 抱えられるメモリの上限バイト数
     limit: usize,
-    /// 不透明でない画素を見つけたか
-    transparent: bool,
     /// 溜めた領域に現れた色の和集合
     colors: Colors,
 }
@@ -32,7 +30,6 @@ impl Spool {
             frames: Vec::new(),
             len: 0,
             limit,
-            transparent: false,
             colors: Colors::new(),
         }
     }
@@ -52,23 +49,11 @@ impl Spool {
             .is_some_and(|total| total <= self.limit)
     }
 
-    /// 不透明でない画素をこれまでに見つけたか
-    ///
-    /// 一度真になったら戻らないため、以降の走査は要らない。
-    pub(crate) fn transparent(&self) -> bool {
-        self.transparent
-    }
-
     /// 色の和集合がパレットに収まる数を超えたか
     ///
     /// 一度真になったら戻らないため、以降の走査は要らない。
     pub(crate) fn colors_exceeded(&self) -> bool {
         self.colors.exceeded()
-    }
-
-    /// 溜めたフレームを投入した順に見る
-    pub(crate) fn frames(&self) -> &[Spooled] {
-        &self.frames
     }
 
     /// 溜めたフレームを投入した順に、色の和集合と合わせて取り出す
@@ -81,7 +66,7 @@ impl Spool {
         std::mem::replace(self, Spool::new(self.limit)).into_parts()
     }
 
-    /// `data` から `rect` を切り出して溜め、その領域のアルファと色を調べる
+    /// `data` から `rect` を切り出して溜め、その領域の色を調べる
     ///
     /// 矩形の外は直前のフレームから変わっていないため、走査は矩形の中だけで足りる。
     pub(crate) fn push(
@@ -95,9 +80,6 @@ impl Spool {
         let mut region = Vec::new();
         crop(data, rect, stride, bpp, bpp, &mut region);
 
-        if bpp == 4 && !self.transparent {
-            self.transparent = has_transparency(&region);
-        }
         self.colors.observe(&region, bpp);
 
         self.len += region.len() + FRAME_OVERHEAD;
@@ -175,35 +157,5 @@ mod tests {
     #[test]
     fn an_overflowing_request_does_not_fit() {
         assert!(!Spool::new(usize::MAX).can_hold(usize::MAX));
-    }
-
-    #[test]
-    fn transparency_latches_once_it_is_seen() {
-        let mut spool = Spool::new(usize::MAX);
-        spool.push(&frame(0xFF), whole(), delay(), STRIDE, 4);
-        assert!(!spool.transparent());
-
-        spool.push(&frame(0x80), whole(), delay(), STRIDE, 4);
-        assert!(spool.transparent());
-
-        spool.push(&frame(0xFF), whole(), delay(), STRIDE, 4);
-        assert!(spool.transparent());
-    }
-
-    /// 矩形の外にあるアルファは走査されない
-    #[test]
-    fn only_the_cropped_region_is_scanned() {
-        let mut data = frame(0xFF);
-        data[3] = 0x40;
-        let rect = Rect {
-            x: 1,
-            y: 0,
-            width: 3,
-            height: 2,
-        };
-
-        let mut spool = Spool::new(usize::MAX);
-        spool.push(&data, rect, delay(), STRIDE, 4);
-        assert!(!spool.transparent());
     }
 }

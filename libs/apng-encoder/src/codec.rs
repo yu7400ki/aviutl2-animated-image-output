@@ -159,11 +159,6 @@ impl Codec {
         self.pool.give(buffer);
     }
 
-    /// フィルタ戦略がまだ固まっていないか
-    pub(crate) fn is_probing(&self) -> bool {
-        self.choice.fixed.is_none()
-    }
-
     /// プローブが積んだ、戦略ごとの圧縮後バイト数の合計
     #[cfg(test)]
     pub(crate) fn probe_totals(&self) -> (u64, u64) {
