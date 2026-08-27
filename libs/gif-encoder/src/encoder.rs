@@ -99,21 +99,15 @@ pub struct Report {
 /// 含むので、リングに留まるのは `LOOKAHEAD - 1` フレーム。
 const LOOKAHEAD: usize = 8;
 
-/// グローバルカラーテーブルから逃げるかどうかを分ける誤差の床
+/// 逃げるかどうかを分ける誤差の床
 ///
-/// 単位は二乗距離 (RGB各軸の差の二乗和) の平均。入力が変わった画素をグローバル
+/// 単位は二乗距離 (RGB各軸の差の二乗和) の平均。入力が変わった画素を今引いている
 /// カラーテーブルへ写し、その二乗距離の平均がこれを超えたフレームは自分の色表を
-/// 運ぶ。この値は `private/bench` の全素材で決める。
-const BENCH_TUNED_ESCAPE_FLOOR: u64 = 256;
+/// 作る。この値は `private/bench` の全素材で決める。
+const BENCH_TUNED_ESCAPE_FLOOR: u64 = 192;
 
 /// グローバルカラーテーブルを量子化するときにヒストグラムへ積む画素
-const GLOBAL_QUANTIZE_MATERIAL: Material = Material::Changed;
-
-/// 逃げた色表をフレームをまたいで持ち続けるか
-///
-/// 持ち続けるなら、逃げるかどうかの判定も持ち続けた色表に対して行う。床の
-/// 意味が「グローバルからの隔たり」から「持ち続けた色表からの隔たり」へ変わる。
-const ESCAPED_TABLE_IS_HELD: bool = false;
+const GLOBAL_QUANTIZE_MATERIAL: Material = Material::Whole;
 
 /// 描く直前へ戻す候補を試すのをやめるまでの連敗数
 const RESTORE_LOSS_STREAK: u32 = 6;
@@ -200,10 +194,9 @@ enum Current {
 
 /// グローバルカラーテーブルと、そこから逃げたフレームの色表
 ///
-/// 逃げた色表は [`ESCAPED_TABLE_IS_HELD`] が偽ならそのフレーム1枚のもので、
-/// 次のフレームは再びグローバルから判定する。真なら床を再び超えるまで同じ
-/// 色表を引く。保留中のフレームは自分が逃げた色表で符号化されているため、
-/// 書き終えるまでその色表を持つ。
+/// 逃げた色表は床を再び超えるまで引き継がれ、超えたフレームがその場で作り直す。
+/// 引き継ぐ間は逃げの判定もその色表に対して行う。保留中のフレームは自分が
+/// 符号化された色表で書き出されるため、書き終えるまでその色表を持つ。
 struct Palettes {
     /// グローバルカラーテーブル
     global: Palette,
@@ -256,11 +249,16 @@ impl Palettes {
 
     /// 保留中のフレームが逃げた色表を、書き出し位置のフレームでも引く
     ///
-    /// 逃げた色表が無ければグローバルのまま。逃げの判定はこの後で行うため、
-    /// 引く先を決めてから誤差を測ることになる。
+    /// 逃げた色表が無ければグローバルのまま。写す先として黒しか持たない色表も
+    /// 引かない。引けばこのフレームの書く画素が残らず色を失う。逃げの判定は
+    /// この後で行うため、引く先を決めてから誤差を測ることになる。
     fn hold(&mut self) {
         debug_assert!(matches!(self.current, Current::Global), "既に逃げている");
-        if self.held.is_some() {
+        if self
+            .held
+            .as_ref()
+            .is_some_and(|held| !held.black_fallback())
+        {
             self.current = Current::Held;
         }
     }
@@ -386,7 +384,7 @@ fn escape_colors(
     }
 }
 
-/// このフレームだけの色表を作る
+/// このフレームの色から色表を作る
 ///
 /// 相異なる色が [`QUANTIZED_COLORS`] までならその色をそのまま載せ、超えるときは
 /// 同じ色をヒストグラムへ積んで量子化する。
@@ -717,10 +715,8 @@ impl<W: Write + Seek> Parts<'_, W> {
             self.settle(&mut palettes.global, ring, previous, pixels)?;
         }
 
-        // 逃げた色表を持ち続ける構成では、まずその色表で写して誤差を測る
-        if ESCAPED_TABLE_IS_HELD {
-            palettes.hold();
-        }
+        // 逃げた色表は床を再び超えるまで引き継ぐ。まずその色表で写して誤差を測る
+        palettes.hold();
         let mut mapped = canvas.render(previous, pixels, palettes.current_mut(), rendered);
         // 色で埋まったテーブルは透過添字を持たない。標識を書く先が無いフレームは
         // 表現できないため、閉じて透過添字を取り直す
@@ -1050,23 +1046,52 @@ mod tests {
         );
     }
 
-    /// 逃げた色表は1フレームで手放され、次のフレームはグローバルへ戻る
+    /// 逃げた色表は次のフレームへ引き継がれ、逃げないフレームで手放される
     #[test]
-    fn an_escaped_table_lasts_a_single_frame() {
+    fn an_escaped_table_is_carried_until_a_frame_stops_escaping() {
         let mut palettes = Palettes::new(table_of(&[1, 2, 3]));
         palettes.escape(table_of(&[4, 5, 6]));
         assert_eq!(palettes.current().color_at(0), 0xFF06_0504);
 
         palettes.retire();
+        palettes.hold();
         assert_eq!(
             palettes.current().color_at(0),
-            0xFF03_0201,
-            "次のフレームが逃げた色表を引きずっている"
+            0xFF06_0504,
+            "次のフレームが逃げた色表を引き継いでいない"
         );
         assert_eq!(
             palettes.earlier_mut().color_at(0),
             0xFF06_0504,
             "保留中のフレームの色表が失われている"
+        );
+
+        palettes.retire();
+        palettes.retire();
+        assert_eq!(
+            palettes.current().color_at(0),
+            0xFF03_0201,
+            "グローバルカラーテーブルへ戻れていない"
+        );
+    }
+
+    /// 写す先として黒しか持たない色表は引き継がない
+    ///
+    /// 引き継げば、そのフレームが書く画素は残らず色を失う。
+    #[test]
+    fn a_table_with_nowhere_to_map_is_not_carried() {
+        let mut palettes = Palettes::new(table_of(&[1, 2, 3]));
+        let mut empty = Palette::new();
+        empty.settle(&[]);
+        assert!(empty.black_fallback(), "写す先を持ってしまっている");
+
+        palettes.escape(empty);
+        palettes.retire();
+        palettes.hold();
+        assert_eq!(
+            palettes.current().color_at(0),
+            0xFF03_0201,
+            "黒しか持たない色表を引き継いでいる"
         );
     }
 

@@ -2258,9 +2258,11 @@ fn a_pixel_that_never_changes_keeps_its_color_across_an_escape() {
         .collect();
 
     let (bytes, report) = encode(SCENE_WIDTH, SCENE_HEIGHT, color, &frames, 0).unwrap();
+    // 逃げた色表は以降のフレームが引き継ぐので、運ぶのは逃げた位置から最後まで
     assert_eq!(
-        report.local_tables, 1,
-        "色表を運んだのは色の入れ替わった1フレームだけではない"
+        report.local_tables,
+        (FRAMES - ESCAPES_AT) as u32,
+        "色表を運んだのは色の入れ替わったフレームからではない"
     );
 
     let expected = [MARKER[0], MARKER[1], MARKER[2], u8::MAX];
@@ -2480,7 +2482,7 @@ fn a_widened_rect_keeps_the_table_that_encoded_the_pending_frame() {
     // 添字を書いた時点ではなく書き出す時点で数えるため、抜いた矩形の中で
     // 書き直した画素も報告に載る
     assert_eq!(
-        report.approximated_pixels, 484,
+        report.approximated_pixels, 188,
         "書き出した候補の画素を数えていない"
     );
 
@@ -2646,7 +2648,11 @@ fn a_uniform_drift_escapes_where_counting_badly_mapped_pixels_would_not() {
             colors: ESCAPE_BASE_COLORS as u16
         }
     );
-    assert_eq!(report.local_tables, 1, "一様なドリフトで逃げていない");
+    assert_eq!(
+        report.local_tables,
+        (frames.len() - ESCAPE_AT) as u32,
+        "一様なドリフトで逃げていない"
+    );
 
     // 逃げたフレームの、入力が変わった画素だけを見る
     let table = global_colors(&bytes, ESCAPE_BASE_COLORS as usize);
@@ -2669,7 +2675,11 @@ fn an_escaped_frame_whose_colors_fit_is_written_losslessly() {
     let frames = drifting_scene(color);
 
     let (bytes, report) = encode(ESCAPE_WIDTH, ESCAPE_HEIGHT, color, &frames, 0).unwrap();
-    assert_eq!(report.local_tables, 1, "色表へ逃げていない");
+    assert_eq!(
+        report.local_tables,
+        (frames.len() - ESCAPE_AT) as u32,
+        "色表へ逃げていない"
+    );
 
     let screen = &compose(&decode_with_gif(&bytes))[ESCAPE_AT];
     for (at, pixel) in frames[ESCAPE_AT].chunks_exact(3).enumerate().skip(2) {
@@ -2713,7 +2723,11 @@ fn an_escaped_frame_with_too_many_colors_is_quantized_on_its_own() {
     frames.resize(ESCAPE_AT + 3, escape_crowded(color));
 
     let (bytes, report) = encode(ESCAPE_WIDTH, ESCAPE_HEIGHT, color, &frames, 0).unwrap();
-    assert_eq!(report.local_tables, 1, "色表へ逃げていない");
+    assert_eq!(
+        report.local_tables,
+        (frames.len() - ESCAPE_AT) as u32,
+        "色表へ逃げていない"
+    );
 
     let input = &frames[ESCAPE_AT];
     let screen = &compose(&decode_with_gif(&bytes))[ESCAPE_AT];
@@ -2758,7 +2772,11 @@ fn an_escaped_table_writes_the_unchanged_pixels_as_transparent() {
     frames.resize(ESCAPE_AT + 2, far);
 
     let (bytes, report) = encode(ESCAPE_WIDTH, ESCAPE_HEIGHT, color, &frames, 0).unwrap();
-    assert_eq!(report.local_tables, 1, "色表へ逃げていない");
+    assert_eq!(
+        report.local_tables,
+        (frames.len() - ESCAPE_AT) as u32,
+        "色表へ逃げていない"
+    );
     assert!(
         scan(&bytes).transparent[ESCAPE_AT].is_some(),
         "逃げた色表が透過添字を宣言していない"
