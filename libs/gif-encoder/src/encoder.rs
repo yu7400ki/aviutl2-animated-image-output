@@ -60,8 +60,9 @@ pub struct Report {
     pub palette: PaletteKind,
     /// ローカルカラーテーブルを書いたフレーム数
     ///
-    /// グローバルカラーテーブルで写しきれずに逃げたフレームは、自分の色表を
-    /// 運ぶ。GIFには前のフレームの色表を参照する手段が無い。
+    /// グローバルカラーテーブルで写しきれなかったフレームは色表へ逃げ、その
+    /// 色表は誤差が床を再び超えるまで後続のフレームへ引き継がれる。GIFには前の
+    /// フレームの色表を参照する手段が無いため、引き継いだフレームも運び直す。
     pub local_tables: u32,
     /// 完全一致が無く最近傍へ写した画素数
     ///
@@ -1046,9 +1047,12 @@ mod tests {
         );
     }
 
-    /// 逃げた色表は次のフレームへ引き継がれ、逃げないフレームで手放される
+    /// 逃げた色表は次のフレームへ引き継がれる
+    ///
+    /// 引き継ぐ意思を示さないフレームが来れば手放す。[`Encoder`] は色表を持つ
+    /// 限り引き継ぐので、手放すのは黒しか持たない色表を捨てるときに限られる。
     #[test]
-    fn an_escaped_table_is_carried_until_a_frame_stops_escaping() {
+    fn an_escaped_table_is_carried_into_the_next_frame() {
         let mut palettes = Palettes::new(table_of(&[1, 2, 3]));
         palettes.escape(table_of(&[4, 5, 6]));
         assert_eq!(palettes.current().color_at(0), 0xFF06_0504);
@@ -1071,7 +1075,7 @@ mod tests {
         assert_eq!(
             palettes.current().color_at(0),
             0xFF03_0201,
-            "グローバルカラーテーブルへ戻れていない"
+            "引き継がないフレームが来ても手放せていない"
         );
     }
 
