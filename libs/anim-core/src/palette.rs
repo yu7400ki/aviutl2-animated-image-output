@@ -54,6 +54,22 @@ impl Table {
             values: vec![0; TABLE_LEN].into_boxed_slice(),
         }
     }
+
+    /// 色の添字。表に無ければ `None`
+    fn lookup(&self, color: u32) -> Option<u8> {
+        let mut slot = slot_of(color);
+        loop {
+            let value = self.values[slot];
+            // 表に必ず残る空きに当たれば、その色はどこにも入っていない
+            if value == 0 {
+                return None;
+            }
+            if self.keys[slot] == color {
+                return Some((value - 1) as u8);
+            }
+            slot = (slot + 1) & TABLE_MASK;
+        }
+    }
 }
 
 /// 全フレームに現れた色の和集合
@@ -119,6 +135,28 @@ impl Colors {
                 return;
             }
         }
+    }
+
+    /// 色を1つ数える。上限を超えて入らなければ偽を返す
+    ///
+    /// 入らなかった時点で [`Colors::exceeded`] が立つ。
+    pub fn observe_color(&mut self, color: u32) -> bool {
+        if self.exceeded {
+            return false;
+        }
+        if !self.insert(color) {
+            self.exceeded = true;
+            return false;
+        }
+        true
+    }
+
+    /// 数えた色の添字。数えていなければ `None`
+    ///
+    /// 添字は見つけた順で、[`Colors::observe_color`] が色を足すたびに末尾へ伸びる。
+    /// [`Colors::into_indexed`] が振り直す添字とは並べ替えのぶん違う。
+    pub fn index_of(&self, color: u32) -> Option<u8> {
+        self.table.lookup(color)
     }
 
     /// 色を1つ覚える。上限を超えて入らなければ偽を返す
@@ -210,18 +248,7 @@ impl Indexed {
 
     /// 色の添字。この対応に無ければ `None`
     fn lookup(&self, color: u32) -> Option<u8> {
-        let mut slot = slot_of(color);
-        loop {
-            let value = self.table.values[slot];
-            // 表に必ず残る空きに当たれば、その色はどこにも入っていない
-            if value == 0 {
-                return None;
-            }
-            if self.table.keys[slot] == color {
-                return Some((value - 1) as u8);
-            }
-            slot = (slot + 1) & TABLE_MASK;
-        }
+        self.table.lookup(color)
     }
 }
 
@@ -354,5 +381,50 @@ mod tests {
         assert_eq!(reds, [0x10, 0x10, 0x20, 0x30]);
         assert_eq!(indexed.colors()[0] >> 24, 0xFF);
         assert_eq!(indexed.colors()[1] >> 24, 0x80);
+    }
+
+    /// 1色ずつ数えた色は、見つけた順の添字で引ける
+    #[test]
+    fn a_color_counted_on_its_own_is_looked_up_by_the_order_it_was_found() {
+        let mut colors = Colors::new();
+        for color in [0x30u32, 0x10, 0x30, 0x20] {
+            assert!(colors.observe_color(color));
+        }
+
+        assert_eq!(colors.count(), 3, "同じ色を二重に数えている");
+        assert_eq!(colors.index_of(0x30), Some(0));
+        assert_eq!(colors.index_of(0x10), Some(1));
+        assert_eq!(colors.index_of(0x20), Some(2));
+        assert_eq!(colors.index_of(0x40), None);
+    }
+
+    /// 上限を超えた色は入らず、そこまでに数えた色は引けたまま残る
+    #[test]
+    fn a_color_beyond_the_limit_is_refused() {
+        let mut colors = Colors::new();
+        for index in 0..MAX_COLORS as u32 {
+            assert!(colors.observe_color(index), "{index} 色目が入らない");
+        }
+
+        assert!(!colors.observe_color(MAX_COLORS as u32));
+        assert!(colors.exceeded());
+        assert_eq!(colors.index_of(MAX_COLORS as u32), None);
+        assert_eq!(colors.index_of(0), Some(0));
+        assert_eq!(
+            colors.index_of(MAX_COLORS as u32 - 1),
+            Some((MAX_COLORS - 1) as u8)
+        );
+    }
+
+    /// 画素列から数えた色も、1色ずつ数えた色と同じ表に載る
+    #[test]
+    fn the_two_ways_of_counting_share_one_table() {
+        let mut colors = Colors::new();
+        colors.observe(&rgba(&[[1, 2, 3, 0xFF]]), 4);
+        assert!(colors.observe_color(pack::<3>(&[4, 5, 6])));
+
+        assert_eq!(colors.index_of(pack::<3>(&[1, 2, 3])), Some(0));
+        assert_eq!(colors.index_of(pack::<3>(&[4, 5, 6])), Some(1));
+        assert_eq!(colors.into_indexed(|_| ()).colors().len(), 2);
     }
 }
