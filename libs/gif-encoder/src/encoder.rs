@@ -10,7 +10,7 @@ use crate::frame::{Canvas, Screen};
 use crate::layout::{ColorType, Layout};
 use crate::lzw;
 use crate::normalize::{self, Binarized, TRANSPARENT, pack};
-use crate::quantize::{Material, material};
+use crate::quantize::{Histogram, Material, material};
 use crate::ring::Ring;
 use crate::table::{ColorTable, Palette, QUANTIZED_COLORS};
 use anim_core::{Colors, FrameDelay, Rect};
@@ -268,34 +268,84 @@ impl Palettes {
     }
 }
 
-/// このフレームだけの色表を作る
+/// 逃げたフレームが書きうる画素の色を、見つけた順に渡す
 ///
-/// 材料は入力が変わった画素の色。相異なる色が [`QUANTIZED_COLORS`] までなら
-/// その色をそのまま載せ、超えるときはこのフレームの変わった画素を量子化する。
-fn escape_table(layout: &Layout, previous: &[u8], pixels: &[u8]) -> Palette {
+/// 入力が変わった画素は入力の色。`disposed` は廃棄方法が抜く矩形で、その中の
+/// 持ち越し画素は画面に残っている色を書き直すことになる。透過標識は色を
+/// 持たないため渡さない。`observe` が偽を返した時点で走査をやめる。
+///
+/// `rendered` は現在のテーブルで写した描画後の色。持ち越し画素の位置では
+/// 画面の色がそのまま入っている。
+fn escape_colors(
+    layout: &Layout,
+    previous: &[u8],
+    pixels: &[u8],
+    rendered: &[u8],
+    disposed: Option<Rect>,
+    mut observe: impl FnMut(u32) -> bool,
+) {
     let bpp = layout.bytes_per_pixel;
-    let mut distinct = Colors::new();
-    let mut overflowed = false;
-    for (at, pixel) in pixels.chunks_exact(bpp).enumerate() {
-        let at = at * bpp;
-        if !previous.is_empty() && previous[at..at + bpp] == *pixel {
+    let carried =
+        |at: usize| !previous.is_empty() && previous[at..at + bpp] == pixels[at..at + bpp];
+    let mut take = |color: u32| color == TRANSPARENT || observe(color);
+
+    for (index, pixel) in pixels.chunks_exact(bpp).enumerate() {
+        let at = index * bpp;
+        if carried(at) {
             continue;
         }
-        let color = pack(pixel, bpp);
-        if color == TRANSPARENT {
-            continue;
-        }
-        if !distinct.observe_color(color) || usize::from(distinct.count()) > QUANTIZED_COLORS {
-            overflowed = true;
-            break;
+        if !take(pack(pixel, bpp)) {
+            return;
         }
     }
+
+    let Some(rect) = disposed else {
+        return;
+    };
+    for y in 0..rect.height as usize {
+        let row = (rect.y as usize + y) * layout.stride + rect.x as usize * bpp;
+        for x in 0..rect.width as usize {
+            let at = row + x * bpp;
+            if !carried(at) {
+                continue;
+            }
+            if !take(pack(&rendered[at..at + bpp], bpp)) {
+                return;
+            }
+        }
+    }
+}
+
+/// このフレームだけの色表を作る
+///
+/// 相異なる色が [`QUANTIZED_COLORS`] までならその色をそのまま載せ、超えるときは
+/// 同じ色をヒストグラムへ積んで量子化する。
+fn escape_table(
+    layout: &Layout,
+    previous: &[u8],
+    pixels: &[u8],
+    rendered: &[u8],
+    disposed: Option<Rect>,
+) -> Palette {
+    let mut distinct = Colors::new();
+    let mut overflowed = false;
+    escape_colors(layout, previous, pixels, rendered, disposed, |color| {
+        if !distinct.observe_color(color) || usize::from(distinct.count()) > QUANTIZED_COLORS {
+            overflowed = true;
+            return false;
+        }
+        true
+    });
 
     if !overflowed {
         return Palette::from_colors(distinct.into_indexed(|_| ()).colors());
     }
 
-    let histogram = material(layout, Material::Changed, previous, std::iter::once(pixels));
+    let mut histogram = Histogram::new();
+    escape_colors(layout, previous, pixels, rendered, disposed, |color| {
+        histogram.observe_color(color, 1);
+        true
+    });
     Palette::from_colors(&histogram.quantize(QUANTIZED_COLORS))
 }
 
@@ -614,7 +664,16 @@ impl<W: Write + Seek> Parts<'_, W> {
                 !palettes.global.is_open(),
                 "書き戻していないテーブルから逃げている"
             );
-            palettes.escape(escape_table(self.layout, previous, pixels));
+            let disposed = pending.as_ref().and_then(|waiting| {
+                (!canvas.kept().expressible(rendered)).then(|| canvas.widen(waiting.rect, rendered))
+            });
+            palettes.escape(escape_table(
+                self.layout,
+                previous,
+                pixels,
+                rendered,
+                disposed,
+            ));
             mapped = canvas.render(previous, pixels, palettes.current(), rendered);
         }
         palettes.current().note_approximated(mapped.approximated);
@@ -920,7 +979,7 @@ mod tests {
         let previous = [1u8, 2, 3, 9, 9, 9];
         let pixels = [1u8, 2, 3, 4, 5, 6];
 
-        let mut table = escape_table(&layout, &previous, &pixels);
+        let mut table = escape_table(&layout, &previous, &pixels, &pixels, None);
         assert_eq!(table.colors(), 1, "変わっていない画素まで載せている");
         assert!(matches!(table.map(&[4, 5, 6], 3).fit, Fit::Exact));
         assert!(table.transparent().is_some(), "透過スロットが無い");
@@ -935,7 +994,7 @@ mod tests {
             .flat_map(|i| [(i % 20) as u8 * 12, (i / 20) as u8 * 12, 0x40])
             .collect();
 
-        let table = escape_table(&layout, &[], &pixels);
+        let table = escape_table(&layout, &[], &pixels, &pixels, None);
         assert_eq!(table.colors() as usize, QUANTIZED_COLORS);
         assert_eq!(table.transparent(), Some(QUANTIZED_COLORS as u8));
     }

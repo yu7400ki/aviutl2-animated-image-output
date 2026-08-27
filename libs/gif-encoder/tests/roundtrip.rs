@@ -310,10 +310,9 @@ fn round_trip_config(
         .map(|data| expected_rgba(data, color_type))
         .collect();
 
-    // 透過添字はエントリを占有しないため、全画素透過の素材でもテーブルは
-    // 透過添字を持つ。写す先の黒が要るのは、非透過色を1つも持たない色表が
-    // できたときだけ
-    assert!(!report.black_fallback, "写す先の黒を足している");
+    // 埋め草の黒へ落ちた画素は素材の色を失う。テーブルが黒を持つかどうかは
+    // 形の話で、往復で見たいのは色を失った画素が無いこと
+    assert_eq!(report.substituted_pixels, 0, "素材の色を失った画素がある");
 
     let decoded = decode_with_gif(&bytes);
     assert_eq!(
@@ -1439,16 +1438,11 @@ fn a_transparent_pixel_after_a_full_opaque_table_forces_an_escape() {
         color_type: color,
         ..Config::default()
     };
-    let (bytes, report) = encode_with(WIDTH, HEIGHT, config, &frames).unwrap();
+    // 逃げた色表は抜かれる矩形の中の持ち越し画素の色まで載せるので、書き直す
+    // 画素は元の色の近くへ戻る
+    let (bytes, report) = round_trip_config(WIDTH, HEIGHT, config, &frames, 4);
     assert_eq!(report.palette, PaletteKind::Quantized { colors: 256 });
     assert_eq!(report.local_tables, 2, "逃げた色表を書いていない");
-    // 変わった画素がどれも透過標識なので、逃げた色表は非透過色を1つも持たない。
-    // 抜いた矩形で書き直す持ち越しの画素は、写す先として足した黒へ落ちる
-    assert!(report.black_fallback, "写す先の黒を足していない");
-    assert!(
-        report.substituted_pixels > 0,
-        "黒へ落ちた画素を数えていない"
-    );
 
     // グラフィック制御拡張のバイトで見る。透過は色表ではなくここが宣言する
     let declared = scan(&bytes).transparent;
