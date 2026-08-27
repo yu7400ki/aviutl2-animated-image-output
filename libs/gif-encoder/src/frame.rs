@@ -788,7 +788,7 @@ mod tests {
     fn the_canvas_takes_the_color_that_was_written() {
         /// 先に据えたテーブルにだけある色
         const CARRIED: [u8; 4] = [0xFF, 0x00, 0xFF, 0xFF];
-        /// 据え直したテーブルが持つ唯一の非透過色
+        /// 逃げた色表が持つ唯一の非透過色
         const SETTLED: [u8; 4] = [0x10, 0x20, 0x30, 0xFF];
 
         let first: Vec<u8> = CARRIED.repeat((WIDTH * HEIGHT) as usize);
@@ -797,7 +797,7 @@ mod tests {
         canvas.render(&[], &first, &mut palette_of(&[&first], 4), &mut rendered);
         start(&mut canvas, &rendered);
 
-        // 入力が変わらない画素は、据え直した後も持ち越される
+        // 入力が変わらない画素は、色表が入れ替わっても持ち越される
         let mut palette = palette_of(&[&SETTLED[..]], 4);
         canvas.render(&first, &first, &mut palette, &mut rendered);
         assert_eq!(rendered, first, "持ち越しがテーブルを通っている");

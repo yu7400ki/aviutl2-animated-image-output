@@ -2180,7 +2180,7 @@ fn a_write_that_fails_after_a_frame_leaves_the_stream_unterminated() {
     );
 }
 
-/// カラーテーブルの据え直しを見る素材の寸法
+/// グローバルカラーテーブルからの逃げ道を見る素材の寸法
 const SCENE_WIDTH: u32 = 64;
 const SCENE_HEIGHT: u32 = 64;
 
@@ -2281,7 +2281,7 @@ const BLINK_AT: (u32, u32) = (0, 0);
 /// 場面転換を跨いで瞬く画素を持つ素材
 ///
 /// 瞬く色は先頭区間で割り当てるので、閉じたテーブルにそのまま載っている。
-/// 動く点が毎フレームその色を書くため、据え直しの時点では直近の出力に現れている。
+/// 動く点が毎フレームその色を書くため、逃げるフレームでも直近の出力に現れている。
 fn blinking_scene(frames: usize, blink_back_at: usize) -> Vec<Vec<u8>> {
     /// 瞬く画素が戻ってくる色
     const BLINK: [u8; 3] = [0xFF, 0x00, 0xFF];
