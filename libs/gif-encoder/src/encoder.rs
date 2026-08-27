@@ -109,6 +109,12 @@ const BENCH_TUNED_ESCAPE_FLOOR: u64 = 256;
 /// グローバルカラーテーブルを量子化するときにヒストグラムへ積む画素
 const GLOBAL_QUANTIZE_MATERIAL: Material = Material::Changed;
 
+/// 逃げた色表をフレームをまたいで持ち続けるか
+///
+/// 持ち続けるなら、逃げるかどうかの判定も持ち続けた色表に対して行う。床の
+/// 意味が「グローバルからの隔たり」から「持ち続けた色表からの隔たり」へ変わる。
+const ESCAPED_TABLE_IS_HELD: bool = false;
+
 /// 描く直前へ戻す候補を試すのをやめるまでの連敗数
 const RESTORE_LOSS_STREAK: u32 = 6;
 
@@ -182,18 +188,29 @@ struct Pending {
     written: Written,
 }
 
+/// 書き出し位置のフレームが引く色表
+enum Current {
+    /// グローバルカラーテーブル
+    Global,
+    /// 保留中のフレームと同じ、逃げた色表
+    Held,
+    /// このフレームで作った色表
+    Own(Palette),
+}
+
 /// グローバルカラーテーブルと、そこから逃げたフレームの色表
 ///
-/// 逃げた色表はそのフレーム1枚のもので、次のフレームは再びグローバルから
-/// 判定する。保留中のフレームは自分が逃げた色表で符号化されているため、
+/// 逃げた色表は [`ESCAPED_TABLE_IS_HELD`] が偽ならそのフレーム1枚のもので、
+/// 次のフレームは再びグローバルから判定する。真なら床を再び超えるまで同じ
+/// 色表を引く。保留中のフレームは自分が逃げた色表で符号化されているため、
 /// 書き終えるまでその色表を持つ。
 struct Palettes {
     /// グローバルカラーテーブル
     global: Palette,
-    /// 書き出し位置のフレームが逃げた先。逃げていなければ `None`
-    escaped: Option<Palette>,
     /// 保留中のフレームが逃げた先。逃げていなければ `None`
     held: Option<Palette>,
+    /// 書き出し位置のフレームが引く色表
+    current: Current,
     /// 手放した色表が最近傍へ写した画素数の合計
     retired_approximated: u64,
     /// 手放した色表が埋め草へ置いた画素数の合計
@@ -206,8 +223,8 @@ impl Palettes {
     fn new(global: Palette) -> Self {
         Palettes {
             global,
-            escaped: None,
             held: None,
+            current: Current::Global,
             retired_approximated: 0,
             retired_substituted: 0,
             retired_fallback: false,
@@ -215,43 +232,88 @@ impl Palettes {
     }
 
     /// 書き出し位置のフレームを符号化するテーブル
-    fn current(&mut self) -> &mut Palette {
-        self.escaped.as_mut().unwrap_or(&mut self.global)
+    fn current(&self) -> &Palette {
+        match &self.current {
+            Current::Global => &self.global,
+            Current::Held => self.held.as_ref().expect("持ち続ける色表が無い"),
+            Current::Own(palette) => palette,
+        }
+    }
+
+    /// 書き出し位置のフレームを符号化するテーブル
+    fn current_mut(&mut self) -> &mut Palette {
+        match &mut self.current {
+            Current::Global => &mut self.global,
+            Current::Held => self.held.as_mut().expect("持ち続ける色表が無い"),
+            Current::Own(palette) => palette,
+        }
     }
 
     /// 保留中のフレームを符号化したテーブル
-    fn earlier(&mut self) -> &mut Palette {
+    fn earlier_mut(&mut self) -> &mut Palette {
         self.held.as_mut().unwrap_or(&mut self.global)
+    }
+
+    /// 保留中のフレームが逃げた色表を、書き出し位置のフレームでも引く
+    ///
+    /// 逃げた色表が無ければグローバルのまま。逃げの判定はこの後で行うため、
+    /// 引く先を決めてから誤差を測ることになる。
+    fn hold(&mut self) {
+        debug_assert!(matches!(self.current, Current::Global), "既に逃げている");
+        if self.held.is_some() {
+            self.current = Current::Held;
+        }
     }
 
     /// 書き出し位置のフレームをこの色表へ逃がす
     fn escape(&mut self, palette: Palette) {
-        debug_assert!(self.escaped.is_none(), "1フレームで2度逃げている");
-        self.escaped = Some(palette);
+        debug_assert!(
+            !matches!(self.current, Current::Own(_)),
+            "1フレームで2度逃げている"
+        );
+        self.current = Current::Own(palette);
     }
 
     /// 符号化した画素の集計を、そのフレームを符号化したテーブルへ渡す
     fn note_written(&mut self, written: &Written) {
-        let palette = self.earlier();
+        let palette = self.earlier_mut();
         palette.note_approximated(written.approximated);
         palette.note_substituted(written.substituted);
     }
 
     /// 保留中のフレームを書き終えたので、その色表を手放す
     ///
-    /// 書き出し位置のフレームが逃げた色表は、そのまま保留中のものへ移る。
+    /// 書き出し位置のフレームが作った色表は、そのまま保留中のものへ移る。
+    /// 持ち続けている色表は誰も手放さず、次のフレームへそのまま渡る。
     fn retire(&mut self) {
+        match std::mem::replace(&mut self.current, Current::Global) {
+            Current::Held => {}
+            Current::Global => self.release(),
+            Current::Own(palette) => {
+                self.release();
+                self.held = Some(palette);
+            }
+        }
+    }
+
+    /// 保留中のフレームの色表を手放し、集計を畳む
+    fn release(&mut self) {
         if let Some(held) = self.held.take() {
             self.retired_approximated += held.approximated();
             self.retired_substituted += held.substituted();
             self.retired_fallback |= held.black_fallback();
         }
-        self.held = self.escaped.take();
     }
 
-    /// 逃げた色表の集計を畳む
+    /// 手放していない逃げた色表の集計を畳む
+    ///
+    /// 持ち続けている色表は [`Self::held`] にだけ在るので、二重には数えない。
     fn escaped_total(&self, of: impl Fn(&Palette) -> u64) -> u64 {
-        self.escaped.as_ref().map_or(0, &of) + self.held.as_ref().map_or(0, &of)
+        let own = match &self.current {
+            Current::Own(palette) => of(palette),
+            Current::Global | Current::Held => 0,
+        };
+        own + self.held.as_ref().map_or(0, &of)
     }
 
     /// 手放したものも含め、最近傍へ写した画素数
@@ -272,8 +334,7 @@ impl Palettes {
     fn black_fallback(&self) -> bool {
         self.retired_fallback
             || self.global.black_fallback()
-            || self.escaped.as_ref().is_some_and(Palette::black_fallback)
-            || self.held.as_ref().is_some_and(Palette::black_fallback)
+            || self.escaped_total(|palette| u64::from(palette.black_fallback())) > 0
     }
 }
 
@@ -656,7 +717,11 @@ impl<W: Write + Seek> Parts<'_, W> {
             self.settle(&mut palettes.global, ring, previous, pixels)?;
         }
 
-        let mut mapped = canvas.render(previous, pixels, &mut palettes.global, rendered);
+        // 逃げた色表を持ち続ける構成では、まずその色表で写して誤差を測る
+        if ESCAPED_TABLE_IS_HELD {
+            palettes.hold();
+        }
+        let mut mapped = canvas.render(previous, pixels, palettes.current_mut(), rendered);
         // 色で埋まったテーブルは透過添字を持たない。標識を書く先が無いフレームは
         // 表現できないため、閉じて透過添字を取り直す
         if palettes.global.is_open() && self.lacks_transparent(&palettes.global, rendered, ring) {
@@ -665,9 +730,9 @@ impl<W: Write + Seek> Parts<'_, W> {
         }
 
         // 変わった画素の誤差が床を超えたフレームと、透過添字の要るフレームは、
-        // このフレームだけの色表へ逃げる
+        // 自分の色表へ逃げる
         if mapped.mean_error_exceeds(BENCH_TUNED_ESCAPE_FLOOR)
-            || self.lacks_transparent(&palettes.global, rendered, ring)
+            || self.lacks_transparent(palettes.current(), rendered, ring)
         {
             debug_assert!(
                 !palettes.global.is_open(),
@@ -683,16 +748,24 @@ impl<W: Write + Seek> Parts<'_, W> {
                 rendered,
                 disposed,
             ));
-            mapped = canvas.render(previous, pixels, palettes.current(), rendered);
+            mapped = canvas.render(previous, pixels, palettes.current_mut(), rendered);
         }
-        palettes.current().note_approximated(mapped.approximated);
-        palettes.current().note_substituted(mapped.substituted);
+        palettes
+            .current_mut()
+            .note_approximated(mapped.approximated);
+        palettes.current_mut().note_substituted(mapped.substituted);
 
         let (delay, clamped) = self.hundredths.next(delay);
         *self.delay_clamped |= clamped;
         match pending.take() {
             None => {
-                let laid = lay_out(canvas.kept(), rendered, palettes.current(), indices, delay);
+                let laid = lay_out(
+                    canvas.kept(),
+                    rendered,
+                    palettes.current_mut(),
+                    indices,
+                    delay,
+                );
                 canvas.start(rendered);
                 *pending = Some(laid);
             }
@@ -840,7 +913,13 @@ fn choose_disposal(
     pacing: &mut RestorePacing,
 ) -> (u8, Pending) {
     if canvas.kept().expressible(rendered) {
-        let laid = lay_out(canvas.kept(), rendered, palettes.current(), indices, delay);
+        let laid = lay_out(
+            canvas.kept(),
+            rendered,
+            palettes.current_mut(),
+            indices,
+            delay,
+        );
         return (DISPOSAL_DO_NOT_DISPOSE, laid);
     }
 
@@ -862,7 +941,7 @@ fn choose_disposal(
             restored,
             composite,
             widened,
-            palettes.earlier(),
+            palettes.earlier_mut(),
             indices,
             delay,
         );
@@ -876,12 +955,12 @@ fn choose_disposal(
     );
 
     let previous = disposed.previous();
-    let cleared = lay_out(background, rendered, palettes.current(), indices, delay);
+    let cleared = lay_out(background, rendered, palettes.current_mut(), indices, delay);
     if !previous.expressible(rendered) || !pacing.should_try() {
         return (DISPOSAL_RESTORE_TO_BACKGROUND, cleared);
     }
 
-    let restored = lay_out(previous, rendered, palettes.current(), indices, delay);
+    let restored = lay_out(previous, rendered, palettes.current_mut(), indices, delay);
     let taken = restored.body.len() < cleared.body.len();
     pacing.record(taken);
     if taken {
@@ -958,7 +1037,7 @@ mod tests {
         palettes.global.note_approximated(3);
 
         palettes.escape(table_of(&[4, 5, 6]));
-        palettes.current().note_approximated(5);
+        palettes.current_mut().note_approximated(5);
         assert_eq!(palettes.approximated(), 8);
 
         // 逃げた色表は保留中のフレームのものになり、その次で手放される
@@ -985,7 +1064,7 @@ mod tests {
             "次のフレームが逃げた色表を引きずっている"
         );
         assert_eq!(
-            palettes.earlier().color_at(0),
+            palettes.earlier_mut().color_at(0),
             0xFF06_0504,
             "保留中のフレームの色表が失われている"
         );
