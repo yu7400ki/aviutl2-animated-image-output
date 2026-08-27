@@ -181,4 +181,14 @@ impl Layout for FlexLayout {
         }
         Ok(())
     }
+
+    fn texts(&self) -> Vec<String> {
+        self.items
+            .iter()
+            .flat_map(|item| match item {
+                LayoutItem::Widget(widget) => widget.text().into_iter().collect(),
+                LayoutItem::Layout(layout) => layout.texts(),
+            })
+            .collect()
+    }
 }

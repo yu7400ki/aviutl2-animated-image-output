@@ -39,6 +39,11 @@ pub trait Widget {
     /// メソッドを安全に呼び出せる。
     fn on_command(&self, _code: u16) {}
 
+    /// コントロールが画面へ出す文字列。文字列を持たないコントロールは `None`
+    fn text(&self) -> Option<String> {
+        None
+    }
+
     /// ウィンドウ破棄の直前に呼ばれる。HWNDから最終状態を取り込み、HWNDを手放す。
     /// これによりダイアログが閉じた後も各getterがユーザーの入力値を返せる。
     fn cache_state(&self);

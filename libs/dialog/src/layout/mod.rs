@@ -20,6 +20,9 @@ pub trait Layout {
     /// レイアウト結果に従ってコントロールを生成する。
     /// `offset`は親からの累積位置(論理px)。
     fn create(&self, ctx: &mut CreateCtx, offset: (f32, f32)) -> Result<()>;
+
+    /// 並べたコントロールが画面へ出す文字列を、並び順に集める
+    fn texts(&self) -> Vec<String>;
 }
 
 /// Layoutの中に入れられるアイテム(WidgetかLayoutのどちらか)

@@ -1,7 +1,9 @@
 mod config;
 mod dialog;
 
-use apng_encoder::{ColorReduction, ColorType, Config as EncoderConfig, Encoder, FrameDelay};
+use apng_encoder::{
+    ColorReduction, ColorType, Config as EncoderConfig, Encoder, Error as EncoderError, FrameDelay,
+};
 use aviutl2::{
     FileFilter, IniConfig, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
     register_logger, register_output_plugin,
@@ -44,6 +46,23 @@ fn color_reduction_message(reduction: ColorReduction) -> String {
     }
 }
 
+/// エンコーダのエラーの説明
+///
+/// 設定を変えれば避けられるものには、その道を添える。エンコーダは色数が溢れた
+/// 事実だけを言い、どの設定を切れば書き出せるかはここが知っている。
+fn encoder_error_message(error: &EncoderError) -> String {
+    match error {
+        EncoderError::ColorLimitExceeded { .. } => {
+            format!(
+                "{} (「{}」を無効にすると出力できます)",
+                error,
+                dialog::REDUCE_COLOR_LABEL
+            )
+        }
+        error => error.to_string(),
+    }
+}
+
 /// 1フレームの表示時間 (scale / rate 秒) を求める
 fn frame_delay(scale: i32, rate: i32) -> std::result::Result<FrameDelay, String> {
     let scale = to_u32(scale, "フレームレートのスケール")?;
@@ -53,12 +72,8 @@ fn frame_delay(scale: i32, rate: i32) -> std::result::Result<FrameDelay, String>
 
 /// `path` を作って `write` へ渡し、失敗したら書きかけのファイルを消す
 ///
-/// 出力プラグインに部分的な成功は無い。途中で失敗したAPNGはIENDを持たないが、
-/// 寛容なデコーダは書けたところまでを絵として描くため、残せば出来上がったものと
-/// 見分けがつかない。
-///
-/// `write` はファイルを持ったまま呼ばれ、戻るときに閉じる。開いたままのファイルは
-/// 消せない。
+/// `write` はファイルを持ったまま呼ばれ、戻るときに閉じる。開いたまま消すと
+/// 削除は最後のハンドルが閉じるまで効かないため、閉じてから消す。
 fn write_or_discard<F>(path: &Path, write: F) -> std::result::Result<(), String>
 where
     F: FnOnce(File) -> std::result::Result<(), String>,
@@ -88,7 +103,9 @@ fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
         .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
 
         info.encode_frames(config.color_format, |frame_data| {
-            encoder.add_frame(&frame_data, delay)
+            encoder
+                .add_frame(&frame_data, delay)
+                .map_err(|e| encoder_error_message(&e))
         })
         .map_err(|e| e.to_string())?;
 
@@ -97,7 +114,7 @@ fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
 
         encoder
             .finish()
-            .map_err(|e| format!("エンコーダー終了エラー: {}", e))?
+            .map_err(|e| format!("エンコーダー終了エラー: {}", encoder_error_message(&e)))?
             .into_inner()
             .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
 
@@ -234,6 +251,25 @@ mod tests {
                 pos => self.0.seek(pos),
             }
         }
+    }
+
+    /// 色数が溢れたエラーは、溢れたフレームと、切れば出力できる設定を指す
+    ///
+    /// 設定の名前はダイアログと同じものを引くため、項目名を変えても離れない。
+    #[test]
+    fn the_color_limit_error_points_at_the_setting_to_turn_off() {
+        let message = encoder_error_message(&EncoderError::ColorLimitExceeded { frame: 42 });
+
+        assert!(message.contains("フレーム 42"), "{message}");
+        assert!(message.contains(dialog::REDUCE_COLOR_LABEL), "{message}");
+    }
+
+    /// 設定で避けられないエラーは、エンコーダの説明のまま届く
+    #[test]
+    fn an_unavoidable_error_keeps_the_encoder_wording() {
+        let error = EncoderError::InvalidFrameDelay;
+
+        assert_eq!(encoder_error_message(&error), error.to_string());
     }
 
     /// 書き出しに成功したら、出力先のファイルはそのまま残る

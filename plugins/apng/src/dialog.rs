@@ -8,13 +8,36 @@ use win32_dialog::{
 use windows::Win32::Foundation::HWND;
 
 /// 色数の削減のチェックボックスに出す名前
-const REDUCE_COLOR_LABEL: &str = "色数を削減する";
+pub(crate) const REDUCE_COLOR_LABEL: &str = "色数を削減する";
 
 /// 色数の削減に添える但し書き
 ///
 /// 有効にした書き出しは、全フレームの色が256色に収まらなければ失敗する。
-/// 何が起きうるかを、設定する時点で読めるようにする。
 const REDUCE_COLOR_NOTE: &str = "256色に収まらないと出力に失敗します";
+
+/// 設定項目を縦へ並べる
+///
+/// 色数の削減だけは、名前の下に但し書きを添える。
+fn settings_layout(
+    repeat_input: &Number,
+    color_combobox: &ComboBox,
+    compression_input: &Number,
+    reduce_color_checkbox: &CheckBox,
+) -> FlexLayout {
+    FlexLayout::column()
+        .with_width(SizeValue::Points(300.0))
+        .with_padding(15.0)
+        .with_gap(10.0)
+        .with_layout(labeled("ループ回数 (0=無限ループ)", repeat_input.clone()))
+        .with_layout(labeled("カラーフォーマット", color_combobox.clone()))
+        .with_layout(labeled(&compression_label(), compression_input.clone()))
+        .with_layout(
+            FlexLayout::column()
+                .with_gap(3.0)
+                .with_widget(reduce_color_checkbox.clone())
+                .with_widget(Label::new(REDUCE_COLOR_NOTE)),
+        )
+}
 
 pub fn show_config_dialog(
     parent_hwnd: HWND,
@@ -74,27 +97,20 @@ pub fn show_config_dialog(
         move || handle.cancel()
     });
 
-    let layout = FlexLayout::column()
-        .with_width(SizeValue::Points(300.0))
-        .with_padding(15.0)
-        .with_gap(10.0)
-        .with_layout(labeled("ループ回数 (0=無限ループ)", repeat_input.clone()))
-        .with_layout(labeled("カラーフォーマット", color_combobox.clone()))
-        .with_layout(labeled(&compression_label(), compression_input.clone()))
-        .with_layout(
-            FlexLayout::column()
-                .with_gap(3.0)
-                .with_widget(reduce_color_checkbox.clone())
-                .with_widget(Label::new(REDUCE_COLOR_NOTE)),
-        )
-        .with_layout(
-            FlexLayout::row()
-                .with_gap(10.0)
-                .with_padding_rect(0.0, 0.0, 5.0, 0.0)
-                .with_justify_content(JustifyContent::End)
-                .with_widget(ok_button)
-                .with_widget(cancel_button),
-        );
+    let layout = settings_layout(
+        &repeat_input,
+        &color_combobox,
+        &compression_input,
+        &reduce_color_checkbox,
+    )
+    .with_layout(
+        FlexLayout::row()
+            .with_gap(10.0)
+            .with_padding_rect(0.0, 0.0, 5.0, 0.0)
+            .with_justify_content(JustifyContent::End)
+            .with_widget(ok_button)
+            .with_widget(cancel_button),
+    );
 
     let accepted = dialog
         .with_layout(layout)
@@ -136,12 +152,31 @@ fn compression_error_message() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use win32_dialog::layout::Layout;
 
-    /// 色数の削減は、失敗しうることを設定する時点で示す
+    /// 色数の削減は、有効にすると何が起きるかをダイアログへ出す
     ///
-    /// 有効にした書き出しは、色数が収まらなければファイルを1つも残さずに終わる。
+    /// 名前だけでは、書き出しが失敗しうる設定であることが読めない。
     #[test]
-    fn the_reduce_color_setting_states_what_can_go_wrong() {
+    fn the_reduce_color_setting_shows_what_can_go_wrong_on_the_dialog() {
+        let texts = settings_layout(
+            &Number::new(),
+            &ComboBox::new(vec!["透過無し"]),
+            &Number::new(),
+            &CheckBox::new(REDUCE_COLOR_LABEL),
+        )
+        .texts();
+
+        let checkbox = texts
+            .iter()
+            .position(|text| text == REDUCE_COLOR_LABEL)
+            .expect("色数の削減のチェックボックスが要る");
+        assert_eq!(
+            texts.get(checkbox + 1).map(String::as_str),
+            Some(REDUCE_COLOR_NOTE),
+            "{texts:?}"
+        );
+
         assert!(REDUCE_COLOR_NOTE.contains("256色"), "{REDUCE_COLOR_NOTE}");
         assert!(REDUCE_COLOR_NOTE.contains("失敗"), "{REDUCE_COLOR_NOTE}");
     }

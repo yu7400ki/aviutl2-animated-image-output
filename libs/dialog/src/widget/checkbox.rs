@@ -149,6 +149,10 @@ impl Widget for CheckBox {
         }
     }
 
+    fn text(&self) -> Option<String> {
+        Some(self.0.borrow().label.clone())
+    }
+
     fn cache_state(&self) {
         let checked = self.is_checked();
         let mut inner = self.0.borrow_mut();

@@ -151,6 +151,10 @@ impl Widget for Button {
         }
     }
 
+    fn text(&self) -> Option<String> {
+        Some(self.0.borrow().label.clone())
+    }
+
     fn cache_state(&self) {
         self.0.borrow_mut().hwnd = None;
     }

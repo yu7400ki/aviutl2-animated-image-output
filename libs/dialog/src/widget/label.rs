@@ -107,6 +107,10 @@ impl Widget for Label {
         Ok(Vec::new())
     }
 
+    fn text(&self) -> Option<String> {
+        Some(self.0.borrow().text.clone())
+    }
+
     fn cache_state(&self) {
         self.0.borrow_mut().hwnd = None;
     }
