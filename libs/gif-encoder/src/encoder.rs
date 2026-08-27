@@ -14,7 +14,7 @@ use crate::spool::{Ring, Spool, Spooled};
 use crate::table::{ColorTable, Palette, QUANTIZED_COLORS};
 use anim_core::{FrameDelay, Rect, paste};
 use std::borrow::Cow;
-use std::io::Write;
+use std::io::{Seek, Write};
 
 /// [`Config::max_spool_bytes`] の目安となる値
 ///
@@ -335,7 +335,7 @@ struct Writing {
 /// グローバルカラーテーブルを全フレームの色の和集合から据えるため、投入された
 /// フレームは色が決まるまでエンコーダ内部に溜まる。決まった後も、先読みリングの
 /// ぶんだけ書き出しが遅れる。
-pub struct Encoder<W: Write> {
+pub struct Encoder<W: Write + Seek> {
     writer: W,
     layout: Layout,
     stage: Stage,
@@ -366,7 +366,7 @@ pub struct Encoder<W: Write> {
     peak_spool_bytes: usize,
 }
 
-impl<W: Write> Encoder<W> {
+impl<W: Write + Seek> Encoder<W> {
     /// `width` x `height` の `num_frames` フレームを `writer` へ書き出す
     ///
     /// # Errors
@@ -560,7 +560,7 @@ impl<W: Write> Encoder<W> {
 /// [`Encoder`] から [`Stage`] 以外を借りたもの
 ///
 /// 段階ごとの値は引数で受け取る。フレーム1つを処理する判断と書き出しを担う。
-struct Parts<'a, W: Write> {
+struct Parts<'a, W: Write + Seek> {
     writer: &'a mut W,
     layout: &'a Layout,
     palette_kind: &'a mut Option<PaletteKind>,
@@ -575,7 +575,7 @@ struct Parts<'a, W: Write> {
     frames_accepted: u32,
 }
 
-impl<W: Write> Parts<'_, W> {
+impl<W: Write + Seek> Parts<'_, W> {
     /// 溜めているフレームへ1つ加え、色が決まったら溜めたぶんを流す
     fn spool_frame(
         &mut self,
@@ -972,6 +972,7 @@ fn encode_on(
 mod tests {
     use super::*;
     use anim_core::Colors;
+    use std::io::Cursor;
 
     /// 1色だけのテーブル
     fn table_of(pixel: &[u8; 3]) -> Palette {
@@ -1026,7 +1027,7 @@ mod tests {
             ..Config::default()
         };
         let mut encoder = Encoder::new(
-            Vec::new(),
+            Cursor::new(Vec::new()),
             REBUILD_WIDTH,
             REBUILD_HEIGHT,
             frames.len() as u32,
@@ -1130,7 +1131,7 @@ mod tests {
             color_type: ColorType::Rgba8,
             ..Config::default()
         };
-        let mut encoder = Encoder::new(Vec::new(), 32, 4, count, config).unwrap();
+        let mut encoder = Encoder::new(Cursor::new(Vec::new()), 32, 4, count, config).unwrap();
         let delay = FrameDelay::new(1, 30).unwrap();
         for frame in moving_sprite(count) {
             encoder.add_frame(&frame, delay).unwrap();

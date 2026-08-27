@@ -9,7 +9,7 @@ use gif_encoder::{
     ColorType, Config, DEFAULT_MAX_SPOOL_BYTES, Encoder, Error, FrameDelay, PaletteKind, Report,
 };
 use std::cell::RefCell;
-use std::io::Write;
+use std::io::{Cursor, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
@@ -57,11 +57,18 @@ fn encode_with(
     config: Config,
     frames: &[Vec<u8>],
 ) -> Result<(Vec<u8>, Report), Error> {
-    let mut encoder = Encoder::new(Vec::new(), width, height, frames.len() as u32, config)?;
+    let mut encoder = Encoder::new(
+        Cursor::new(Vec::new()),
+        width,
+        height,
+        frames.len() as u32,
+        config,
+    )?;
     for (index, data) in frames.iter().enumerate() {
         encoder.add_frame(data, delay_of(index))?;
     }
-    encoder.finish()
+    let (writer, report) = encoder.finish()?;
+    Ok((writer.into_inner(), report))
 }
 
 /// 入力を正規化し、RGBA8へ展開する
@@ -1495,12 +1502,19 @@ fn the_number_of_plays_reaches_the_decoder() {
 
 /// フレームごとの遅延を指定して1x1のフレーム列を符号化する
 fn encode_delays(frames: &[Vec<u8>], delays: &[FrameDelay]) -> (Vec<u8>, Report) {
-    let mut encoder =
-        Encoder::new(Vec::new(), 1, 1, frames.len() as u32, Config::default()).unwrap();
+    let mut encoder = Encoder::new(
+        Cursor::new(Vec::new()),
+        1,
+        1,
+        frames.len() as u32,
+        Config::default(),
+    )
+    .unwrap();
     for (data, delay) in frames.iter().zip(delays) {
         encoder.add_frame(data, *delay).unwrap();
     }
-    encoder.finish().unwrap()
+    let (writer, report) = encoder.finish().unwrap();
+    (writer.into_inner(), report)
 }
 
 /// 色だけが違う1x1のフレームを `count` 枚
@@ -1603,19 +1617,19 @@ fn zero_and_oversized_dimensions_are_rejected() {
     for (width, height) in [(0, 1), (1, 0), (65536, 1), (1, 65536)] {
         assert!(
             matches!(
-                Encoder::new(Vec::new(), width, height, 1, config),
+                Encoder::new(Cursor::new(Vec::new()), width, height, 1, config),
                 Err(Error::InvalidDimensions { .. })
             ),
             "{width}x{height}"
         );
     }
-    assert!(Encoder::new(Vec::new(), 65535, 1, 1, config).is_ok());
+    assert!(Encoder::new(Cursor::new(Vec::new()), 65535, 1, 1, config).is_ok());
 }
 
 #[test]
 fn a_frame_count_of_zero_is_rejected() {
     assert!(matches!(
-        Encoder::new(Vec::new(), 1, 1, 0, Config::default()),
+        Encoder::new(Cursor::new(Vec::new()), 1, 1, 0, Config::default()),
         Err(Error::InvalidFrameCount)
     ));
 }
@@ -1820,7 +1834,7 @@ fn a_transparent_pixel_beyond_256_opaque_colors_takes_the_transparent_slot() {
 #[test]
 fn a_frame_of_the_wrong_length_is_rejected() {
     let config = Config::default();
-    let mut encoder = Encoder::new(Vec::new(), 4, 4, 1, config).unwrap();
+    let mut encoder = Encoder::new(Cursor::new(Vec::new()), 4, 4, 1, config).unwrap();
     assert!(matches!(
         encoder.add_frame(&[0; 47], delay_of(0)),
         Err(Error::FrameSizeMismatch {
@@ -1833,7 +1847,7 @@ fn a_frame_of_the_wrong_length_is_rejected() {
 #[test]
 fn a_missing_or_extra_frame_is_rejected() {
     let config = Config::default();
-    let encoder = Encoder::new(Vec::new(), 1, 1, 1, config).unwrap();
+    let encoder = Encoder::new(Cursor::new(Vec::new()), 1, 1, 1, config).unwrap();
     assert!(matches!(
         encoder.finish(),
         Err(Error::FrameCountMismatch {
@@ -1842,7 +1856,7 @@ fn a_missing_or_extra_frame_is_rejected() {
         })
     ));
 
-    let mut encoder = Encoder::new(Vec::new(), 1, 1, 1, config).unwrap();
+    let mut encoder = Encoder::new(Cursor::new(Vec::new()), 1, 1, 1, config).unwrap();
     encoder.add_frame(&[1, 2, 3], delay_of(0)).unwrap();
     assert!(matches!(
         encoder.add_frame(&[1, 2, 3], delay_of(1)),
@@ -1859,6 +1873,7 @@ fn a_missing_or_extra_frame_is_rejected() {
 /// 返さないため、途中で切れたブロックの列はこの控えからしか見られない。
 struct FailingWriter {
     remaining: usize,
+    position: u64,
     written: Rc<RefCell<Vec<u8>>>,
 }
 
@@ -1868,6 +1883,7 @@ impl FailingWriter {
         let written = Rc::new(RefCell::new(Vec::new()));
         let writer = FailingWriter {
             remaining: budget,
+            position: 0,
             written: Rc::clone(&written),
         };
         (writer, written)
@@ -1881,12 +1897,34 @@ impl Write for FailingWriter {
             return Err(std::io::Error::other("書き出し失敗"));
         }
         self.remaining -= buf.len();
-        self.written.borrow_mut().extend_from_slice(buf);
+        let mut written = self.written.borrow_mut();
+        let at = self.position as usize;
+        if written.len() < at + buf.len() {
+            written.resize(at + buf.len(), 0);
+        }
+        written[at..at + buf.len()].copy_from_slice(buf);
+        self.position += buf.len() as u64;
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+impl Seek for FailingWriter {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let end = self.written.borrow().len() as i64;
+        let at = match pos {
+            SeekFrom::Start(at) => at as i64,
+            SeekFrom::End(offset) => end + offset,
+            SeekFrom::Current(offset) => self.position as i64 + offset,
+        };
+        if at < 0 {
+            return Err(std::io::Error::other("負の位置へのシーク"));
+        }
+        self.position = at as u64;
+        Ok(self.position)
     }
 }
 
