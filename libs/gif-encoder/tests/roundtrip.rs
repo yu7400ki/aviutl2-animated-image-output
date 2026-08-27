@@ -725,25 +725,32 @@ fn a_table_that_never_overflows_is_written_back_at_the_end() {
     const HEIGHT: u32 = 2;
     let color = ColorType::Rgb8;
 
-    // 2枚目で新しい色が現れる。書き戻した色は見つけた順に並ぶ
-    let first = solid(WIDTH, HEIGHT, color, &[0x10, 0x20, 0x30]);
+    // 先頭フレームが2色を値の降順で見せ、以降のフレームも降順で足す。
+    // 値で並べ替えたテーブルとはフレームの中でもフレームを跨いでも並びが違う
+    let mut first = solid(WIDTH, HEIGHT, color, &[0x10, 0x20, 0x30]);
+    set_pixel(&mut first, WIDTH, color, 0, 0, &[0x70, 0x80, 0x90]);
     let mut second = first.clone();
     set_pixel(&mut second, WIDTH, color, 1, 1, &[0x40, 0x50, 0x60]);
     let mut third = second.clone();
-    set_pixel(&mut third, WIDTH, color, 2, 0, &[0x70, 0x80, 0x90]);
+    set_pixel(&mut third, WIDTH, color, 2, 0, &[0x20, 0x30, 0x40]);
 
     let (bytes, report) = round_trip(WIDTH, HEIGHT, color, &[first, second, third]);
-    assert_eq!(report.palette, PaletteKind::Exact { colors: 3 });
+    assert_eq!(report.palette, PaletteKind::Exact { colors: 4 });
 
     let table = scan(&bytes).global_table;
     assert_eq!(table.len(), 768, "確保した大きさが変わっている");
     assert_eq!(
-        table[..9],
-        [0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90],
+        table[..12],
+        [
+            0x70, 0x80, 0x90, // 先頭フレームの (0,0)
+            0x10, 0x20, 0x30, // 先頭フレームの残り
+            0x40, 0x50, 0x60, // 2枚目
+            0x20, 0x30, 0x40, // 3枚目
+        ],
         "見つけた順に色が並んでいない"
     );
     assert!(
-        table[9..].iter().all(|&byte| byte == 0),
+        table[12..].iter().all(|&byte| byte == 0),
         "余りが黒で埋まっていない"
     );
 }
