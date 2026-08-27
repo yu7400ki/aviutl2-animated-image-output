@@ -2512,3 +2512,261 @@ fn a_widened_rect_keeps_the_table_that_encoded_the_pending_frame() {
         }
     }
 }
+
+/// 逃げ道を見る素材の寸法
+const ESCAPE_WIDTH: u32 = 32;
+const ESCAPE_HEIGHT: u32 = 32;
+
+/// 逃げ道を見る素材が先頭フレームに置く色数
+///
+/// 次のフレームが足す2色で上限を超える数。空きが残らないので、閉じた
+/// グローバルカラーテーブルは先頭フレームの色そのままになる。
+const ESCAPE_BASE_COLORS: u32 = 255;
+
+/// グローバルカラーテーブルから逃げるフレーム
+const ESCAPE_AT: usize = 9;
+
+/// 一様なドリフトが1フレームで動く距離
+///
+/// 動かすのは青だけで、動かす前の色が最近傍のまま残る。どの画素の二乗距離も
+/// `DRIFT_STEP * DRIFT_STEP` になる。
+const DRIFT_STEP: u8 = 17;
+
+/// 悪く写った画素を数える引き金が見ていた二乗距離の閾値
+const BAD_PIXEL_TOLERANCE: u32 = 20 * 20;
+
+/// 青が0の対角線上に [`ESCAPE_BASE_COLORS`] 色を並べたフレーム
+fn escape_base(color_type: ColorType) -> Vec<u8> {
+    let bpp = color_type.bytes_per_pixel();
+    let mut frame = Vec::with_capacity((ESCAPE_WIDTH * ESCAPE_HEIGHT) as usize * bpp);
+    for at in 0..ESCAPE_WIDTH * ESCAPE_HEIGHT {
+        let value = (at % ESCAPE_BASE_COLORS) as u8;
+        frame.extend_from_slice(&[value, value, 0, 0xFF][..bpp]);
+    }
+    frame
+}
+
+/// テーブルを閉じさせる2色を先頭の2画素へ置いたフレーム
+///
+/// 足りない色が2色あると上限を超え、その場で量子化へ移る。どちらも黒の近くに
+/// あるので、最近傍へ写しても誤差は床に届かない。
+fn escape_settled(color_type: ColorType) -> Vec<u8> {
+    let bpp = color_type.bytes_per_pixel();
+    let mut frame = escape_base(color_type);
+    for (x, blue) in [(0u32, 1u8), (1, 2)] {
+        set_pixel(
+            &mut frame,
+            ESCAPE_WIDTH,
+            color_type,
+            x,
+            0,
+            &[0, 0, blue, 0xFF][..bpp],
+        );
+    }
+    frame
+}
+
+/// 先頭フレームの色を持つ画素を、青の方向へ [`DRIFT_STEP`] だけ動かしたフレーム
+///
+/// 動くのは3画素目からで、変わった画素の色数は [`ESCAPE_BASE_COLORS`] に収まる。
+fn escape_drifted(color_type: ColorType) -> Vec<u8> {
+    let bpp = color_type.bytes_per_pixel();
+    let mut frame = escape_settled(color_type);
+    for at in 2..(ESCAPE_WIDTH * ESCAPE_HEIGHT) as usize {
+        frame[at * bpp + 2] += DRIFT_STEP;
+    }
+    frame
+}
+
+/// ドリフトする素材のフレーム列
+fn drifting_scene(color_type: ColorType) -> Vec<Vec<u8>> {
+    let mut frames = vec![escape_base(color_type)];
+    frames.resize(ESCAPE_AT, escape_settled(color_type));
+    frames.resize(ESCAPE_AT + 3, escape_drifted(color_type));
+    frames
+}
+
+/// グローバルカラーテーブルの先頭 `colors` 色
+fn global_colors(bytes: &[u8], colors: usize) -> Vec<[u8; 3]> {
+    scan(bytes)
+        .global_table
+        .chunks_exact(3)
+        .take(colors)
+        .map(|entry| [entry[0], entry[1], entry[2]])
+        .collect()
+}
+
+/// `frame` の各画素を `table` の最近傍へ写したときの二乗距離
+fn nearest_errors(frame: &[u8], color_type: ColorType, table: &[[u8; 3]]) -> Vec<u32> {
+    let bpp = color_type.bytes_per_pixel();
+    frame
+        .chunks_exact(bpp)
+        .map(|pixel| {
+            table
+                .iter()
+                .map(|entry| {
+                    (0..3)
+                        .map(|axis| {
+                            let difference = i32::from(pixel[axis]) - i32::from(entry[axis]);
+                            (difference * difference) as u32
+                        })
+                        .sum()
+                })
+                .min()
+                .expect("色表が空")
+        })
+        .collect()
+}
+
+/// 一様なドリフトは逃げを立て、悪く写った画素を数える引き金では立たない
+///
+/// 全画素が同じだけずれるので二乗距離の平均は床を超える。どの画素の二乗距離も
+/// [`BAD_PIXEL_TOLERANCE`] の内側にあるので、閾値を超えた画素を数える引き金は
+/// 1画素も拾えない。
+#[test]
+fn a_uniform_drift_escapes_where_counting_badly_mapped_pixels_would_not() {
+    let color = ColorType::Rgb8;
+    let frames = drifting_scene(color);
+
+    let (bytes, report) = encode(ESCAPE_WIDTH, ESCAPE_HEIGHT, color, &frames, 0).unwrap();
+    assert_eq!(
+        report.palette,
+        PaletteKind::Quantized {
+            colors: ESCAPE_BASE_COLORS as u16
+        }
+    );
+    assert_eq!(report.local_tables, 1, "一様なドリフトで逃げていない");
+
+    // 逃げたフレームの、入力が変わった画素だけを見る
+    let table = global_colors(&bytes, ESCAPE_BASE_COLORS as usize);
+    let errors = nearest_errors(&frames[ESCAPE_AT], color, &table);
+    let step = u32::from(DRIFT_STEP) * u32::from(DRIFT_STEP);
+    assert!(
+        errors[2..].iter().all(|&error| error == step),
+        "ドリフトの二乗距離が一様でない"
+    );
+    assert!(
+        step <= BAD_PIXEL_TOLERANCE,
+        "ドリフトが閾値を超えており、画素を数える引き金でも立つ"
+    );
+}
+
+/// 変わった画素の色数が上限に収まるフレームは、可逆な色表で書かれる
+#[test]
+fn an_escaped_frame_whose_colors_fit_is_written_losslessly() {
+    let color = ColorType::Rgb8;
+    let frames = drifting_scene(color);
+
+    let (bytes, report) = encode(ESCAPE_WIDTH, ESCAPE_HEIGHT, color, &frames, 0).unwrap();
+    assert_eq!(report.local_tables, 1, "色表へ逃げていない");
+
+    let screen = &compose(&decode_with_gif(&bytes))[ESCAPE_AT];
+    for (at, pixel) in frames[ESCAPE_AT].chunks_exact(3).enumerate().skip(2) {
+        assert_eq!(
+            &screen[at * 4..at * 4 + 3],
+            pixel,
+            "{at} 番目の画素が入力と一致しない"
+        );
+    }
+}
+
+/// 逃げるフレームに置く、上限を超える色数
+const ESCAPE_MANY_COLORS: u32 = 300;
+
+/// グローバルカラーテーブルから遠い [`ESCAPE_MANY_COLORS`] 色で埋めたフレーム
+fn escape_crowded(color_type: ColorType) -> Vec<u8> {
+    let bpp = color_type.bytes_per_pixel();
+    let mut frame = Vec::with_capacity((ESCAPE_WIDTH * ESCAPE_HEIGHT) as usize * bpp);
+    for at in 0..ESCAPE_WIDTH * ESCAPE_HEIGHT {
+        let index = at % ESCAPE_MANY_COLORS;
+        let pixel = [
+            (index % 60) as u8 * 4,
+            0,
+            0x80 + (index / 60) as u8 * 8,
+            0xFF,
+        ];
+        frame.extend_from_slice(&pixel[..bpp]);
+    }
+    frame
+}
+
+/// 変わった画素の色数が上限を超えるフレームは、そのフレームだけで量子化する
+///
+/// 逃げた色表はグローバルカラーテーブルの色を1つも引き継がないので、置いた色の
+/// 近くだけに255色を割ける。
+#[test]
+fn an_escaped_frame_with_too_many_colors_is_quantized_on_its_own() {
+    let color = ColorType::Rgb8;
+    let mut frames = vec![escape_base(color)];
+    frames.resize(ESCAPE_AT, escape_settled(color));
+    frames.resize(ESCAPE_AT + 3, escape_crowded(color));
+
+    let (bytes, report) = encode(ESCAPE_WIDTH, ESCAPE_HEIGHT, color, &frames, 0).unwrap();
+    assert_eq!(report.local_tables, 1, "色表へ逃げていない");
+
+    let input = &frames[ESCAPE_AT];
+    let screen = &compose(&decode_with_gif(&bytes))[ESCAPE_AT];
+    let table = global_colors(&bytes, ESCAPE_BASE_COLORS as usize);
+    let far = nearest_errors(input, color, &table);
+    assert!(
+        far.iter().all(|&error| error > BAD_PIXEL_TOLERANCE),
+        "置いた色がグローバルカラーテーブルの近くにある"
+    );
+
+    let mut worst = 0;
+    let mut exact = 0;
+    for (at, pixel) in input.chunks_exact(3).enumerate() {
+        let written = &screen[at * 4..at * 4 + 3];
+        let difference = (0..3)
+            .map(|axis| pixel[axis].abs_diff(written[axis]))
+            .max()
+            .expect("3軸");
+        worst = worst.max(difference);
+        exact += usize::from(difference == 0);
+    }
+    assert!(worst <= 8, "そのフレームの量子化にしては遠い: {worst}");
+    assert!(
+        exact < input.len() / 3,
+        "色数が上限を超えているのに全画素が一致している"
+    );
+}
+
+/// 逃げた色表は透過スロットを持ち、矩形の中の未変更画素は透過ランになる
+#[test]
+fn an_escaped_table_writes_the_unchanged_pixels_as_transparent() {
+    /// グローバルカラーテーブルの対角線から遠い色
+    const FAR: [u8; 4] = [0x00, 0xFF, 0x00, 0xFF];
+    let color = ColorType::Rgba8;
+
+    let mut frames = vec![escape_base(color)];
+    frames.resize(ESCAPE_AT, escape_settled(color));
+    let mut far = escape_settled(color);
+    for at in [(4u32, 4u32), (9, 7)] {
+        set_pixel(&mut far, ESCAPE_WIDTH, color, at.0, at.1, &FAR);
+    }
+    frames.resize(ESCAPE_AT + 2, far);
+
+    let (bytes, report) = encode(ESCAPE_WIDTH, ESCAPE_HEIGHT, color, &frames, 0).unwrap();
+    assert_eq!(report.local_tables, 1, "色表へ逃げていない");
+    assert!(
+        scan(&bytes).transparent[ESCAPE_AT].is_some(),
+        "逃げた色表が透過添字を宣言していない"
+    );
+
+    let frame = &decode_with_gif(&bytes).frames[ESCAPE_AT];
+    assert_eq!(frame.rect(), (4, 4, 6, 4));
+
+    // 矩形の中で透過になった画素は、変えた2画素を除いた全部
+    let opaque: Vec<usize> = frame
+        .rgba
+        .chunks_exact(4)
+        .enumerate()
+        .filter(|(_, pixel)| pixel[3] != 0)
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(
+        opaque,
+        [0, 3 * 6 + 5],
+        "透過ランが変わった画素まで覆っている"
+    );
+}
