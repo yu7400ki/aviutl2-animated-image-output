@@ -1656,27 +1656,58 @@ fn the_palette_chunks_are_padded_to_a_fixed_number_of_entries() {
     assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
 }
 
+/// 見つけた順が値の昇順とも降順とも食い違う色を敷いたRGBA8のフレーム
+///
+/// 先頭の画素から順に現れる色の並びが、どちらの向きの並べ替えとも一致しない。
+fn unordered_palette_frame() -> Vec<u8> {
+    const REDS: [u8; 4] = [0x30, 0x10, 0x40, 0x20];
+
+    (0..REDUCE_PIXELS)
+        .flat_map(|pixel| [REDS[pixel % REDS.len()], 0x00, 0x00, 0xFF])
+        .collect()
+}
+
 /// 添字は色を見つけた順に振る
 ///
 /// 全フレームを見終わる前に添字を焼くため、明るさなどでは並べ替えられない。
 #[test]
 fn the_palette_follows_the_order_the_colors_were_found() {
-    let input = vec![palette_frame(4, 0)];
+    let input = vec![unordered_palette_frame()];
     let bytes = encode_reduced(ColorType::Rgba8, &input);
 
-    assert_eq!(plte(&bytes)[..12], [0, 0, 0, 1, 0, 0, 2, 0, 0, 3, 0, 0]);
+    let plte = plte(&bytes);
+    let reds: Vec<u8> = plte[..12].iter().step_by(3).copied().collect();
+    assert_eq!(reds, [0x30, 0x10, 0x40, 0x20]);
+    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
 }
 
 /// 色数が上限を1つ超えると、パレットをやめて入力の色種別へ落とす
 #[test]
 fn one_color_over_the_limit_gives_up_the_palette() {
-    let within = vec![palette_frame(MAX_PALETTE_COLORS, 0)];
-    let bytes = encode_reduced(ColorType::Rgba8, &within);
-    assert_reduced_roundtrip(&bytes, &within, png::ColorType::Indexed);
+    let cases = [
+        (
+            ColorType::Rgb8,
+            palette_frame_rgb as fn(usize, usize) -> Vec<u8>,
+            png::ColorType::Rgb,
+        ),
+        (ColorType::Rgba8, palette_frame, png::ColorType::Rgba),
+    ];
 
-    let beyond = vec![palette_frame(MAX_PALETTE_COLORS + 1, 0)];
-    let bytes = encode_reduced(ColorType::Rgba8, &beyond);
-    assert_reduced_roundtrip(&bytes, &beyond, png::ColorType::Rgba);
+    for (color_type, frame, kept) in cases {
+        let within = vec![frame(MAX_PALETTE_COLORS, 0)];
+        let bytes = encode_reduced(color_type, &within);
+        assert_eq!(
+            output_color_type(&bytes),
+            png::ColorType::Indexed,
+            "{color_type:?}"
+        );
+        assert_composites_to(&bytes, REDUCE_WIDTH, color_type, &within);
+
+        let beyond = vec![frame(MAX_PALETTE_COLORS + 1, 0)];
+        let bytes = encode_reduced(color_type, &beyond);
+        assert_eq!(output_color_type(&bytes), kept, "{color_type:?}");
+        assert_composites_to(&bytes, REDUCE_WIDTH, color_type, &beyond);
+    }
 }
 
 /// 先頭フレームで賭けた後に色数が溢れたら、そのフレームを指して失敗する

@@ -166,8 +166,9 @@ impl Encoding {
 
     /// blend_op=OVERの候補で、変化しなかった画素を潰す書き方
     ///
-    /// 潰した画素はアルファを0で書き、キャンバスをそのまま残す。重ねる先が無い
-    /// 出力と、アルファが0の色に添字が振られていないパレットでは `None` を返す。
+    /// 潰した画素はアルファを0で書き、キャンバスをそのまま残す。RGBA8の出力は
+    /// 完全に透明な画素をいつでも書け、パレット参照はアルファが0の色に添字が
+    /// 振られてから書ける。
     fn collapse(&self) -> Option<Collapse<'_>> {
         match self {
             Encoding::Direct(Output::Rgba8) => Some(Collapse::Transparent),
