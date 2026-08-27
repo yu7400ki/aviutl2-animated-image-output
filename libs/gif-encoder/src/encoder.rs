@@ -230,10 +230,7 @@ impl Palettes {
         self.escaped = Some(palette);
     }
 
-    /// 書き出す候補が決まったので、その集計を符号化したテーブルへ渡す
-    ///
-    /// 廃棄方法は候補を複数符号化して1つだけ採るため、採った候補の画素だけを
-    /// テーブルが数える。
+    /// 符号化した画素の集計を、そのフレームを符号化したテーブルへ渡す
     fn note_written(&mut self, written: &Written) {
         let palette = self.earlier();
         palette.note_approximated(written.approximated);
@@ -539,8 +536,7 @@ impl<W: Write + Seek> Encoder<W> {
         parts.drain(ring, writing)?;
         if let Some(pending) = writing.pending.take() {
             // 次のフレームが無く、廃棄方法が変えられるキャンバスの続きも無い
-            writing.palettes.note_written(&pending.written);
-            parts.write_pending(pending, DISPOSAL_DO_NOT_DISPOSE)?;
+            parts.write_pending(&mut writing.palettes, pending, DISPOSAL_DO_NOT_DISPOSE)?;
         }
         parts.settle_exact(&writing.palettes.global)?;
 
@@ -711,8 +707,7 @@ impl<W: Write + Seek> Parts<'_, W> {
                     pacing,
                 );
                 let disposed = waiting.rect;
-                palettes.note_written(&waiting.written);
-                self.write_pending(waiting, disposal)?;
+                self.write_pending(palettes, waiting, disposal)?;
                 canvas.advance(disposal, disposed, rendered, laid.rect);
                 *pending = Some(laid);
             }
@@ -797,7 +792,16 @@ impl<W: Write + Seek> Parts<'_, W> {
     }
 
     /// 保留していたフレームを `disposal` で書き出す
-    fn write_pending(&mut self, pending: Pending, disposal: u8) -> Result<(), Error> {
+    ///
+    /// 符号化した画素の集計をテーブルへ渡すのはここだけ。採らなかった廃棄方法の
+    /// 候補は書き出されないまま集計ごと捨てられる。
+    fn write_pending(
+        &mut self,
+        palettes: &mut Palettes,
+        pending: Pending,
+        disposal: u8,
+    ) -> Result<(), Error> {
+        palettes.note_written(&pending.written);
         block::graphic_control(self.writer, disposal, pending.delay, pending.transparent)?;
         block::image_descriptor(
             self.writer,

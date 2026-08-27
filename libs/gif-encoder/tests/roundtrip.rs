@@ -2477,6 +2477,12 @@ fn a_widened_rect_keeps_the_table_that_encoded_the_pending_frame() {
     };
     let (bytes, report) = encode_with(SCENE_WIDTH, SCENE_HEIGHT, config, &frames).unwrap();
     assert!(report.local_tables > 0, "色表から逃げていない");
+    // 添字を書いた時点ではなく書き出す時点で数えるため、抜いた矩形の中で
+    // 書き直した画素も報告に載る
+    assert_eq!(
+        report.approximated_pixels, 484,
+        "書き出した候補の画素を数えていない"
+    );
 
     let widened = rects(&bytes)[ESCAPES_AT];
     assert!(
