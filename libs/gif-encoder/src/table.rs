@@ -2,19 +2,19 @@
 
 use crate::normalize::{TRANSPARENT, pack};
 use crate::quantize::Nearest;
-use anim_core::{Colors, Indexed, MAX_COLORS};
+use anim_core::{Colors, MAX_COLORS};
 
 /// 写す先が1つも残らないテーブルへ足す色
 ///
 /// カラーテーブルは2エントリ未満を書けず、埋め草はどのみち黒になる。
-/// その埋め草を写す先にすれば、透過だけの区間から据えたテーブルでも
+/// その埋め草を写す先にすれば、透過だけの窓から閉じたテーブルでも
 /// 不透明な画素を写せる。
 const OPAQUE_BLACK: u32 = 0xFF00_0000;
 
-/// 量子化したテーブルに載せる非透過色の上限
+/// 閉じたテーブルに載せる非透過色の上限
 ///
-/// 量子化の経路では1色多く載せるより透過ランを取る方が常に得なので、
-/// 透過スロットを必ず1つ残す。
+/// 閉じるときは1色多く載せるより透過ランを取る方が常に得なので、
+/// 透過添字の余地を必ず1つ残す。
 pub(crate) const QUANTIZED_COLORS: usize = MAX_COLORS - 1;
 
 /// カラーテーブルが持てる最小のエントリ数
@@ -32,13 +32,17 @@ pub(crate) struct ColorTable {
 impl ColorTable {
     /// `colors` を並べ、エントリ数を2の冪へ切り上げる
     ///
-    /// `colors` は `R | G<<8 | B<<16 | A<<24` で詰めた色を添字順に並べたもので、
-    /// 1色以上 [`MAX_COLORS`] 以下であること。パディングは黒で埋める。
-    pub(crate) fn new(colors: &[u32]) -> Self {
-        assert!(!colors.is_empty(), "カラーテーブルは1色以上必要");
+    /// `colors` は `R | G<<8 | B<<16 | A<<24` で詰めた色を添字順に並べたもの。
+    /// `transparent` の添字はそのどれでもないため、そこまで届く大きさにする。
+    /// パディングは黒で埋める。
+    ///
+    /// # Panics
+    /// 色数が [`MAX_COLORS`] を超えているとき。
+    pub(crate) fn new(colors: &[u32], transparent: Option<u8>) -> Self {
         assert!(colors.len() <= MAX_COLORS, "色数が上限を超えている");
 
-        let entries = colors.len().max(MIN_ENTRIES).next_power_of_two();
+        let reach = transparent.map_or(0, |index| usize::from(index) + 1);
+        let entries = colors.len().max(reach).max(MIN_ENTRIES).next_power_of_two();
         let mut bytes = vec![0; entries * 3];
         for (entry, color) in bytes.chunks_exact_mut(3).zip(colors) {
             entry.copy_from_slice(&color.to_le_bytes()[..3]);
@@ -95,24 +99,34 @@ pub(crate) struct Kept {
     pub(crate) last_used: u32,
 }
 
-/// 据えたカラーテーブルと、そこへ色を写す対応
-pub(crate) struct Palette {
-    /// 和集合の色から添字を引く対応
-    indexed: Indexed,
-    /// 添字順に並べたテーブルの色
-    entries: Vec<u32>,
-    /// 書き出すカラーテーブル
-    table: ColorTable,
-    /// このテーブルの透過インデックス
-    transparent: Option<u8>,
+/// 閉じたテーブルが持つ、完全一致が外れた色の写し方
+struct Settled {
     /// 完全一致が外れた色を写す先
     nearest: Nearest,
+    /// 写す先として足した [`OPAQUE_BLACK`] の添字
+    fallback: Option<u8>,
+}
+
+/// カラーテーブルと、そこへ色を写す対応
+///
+/// 添字は色を見つけた順に振り、一度振った添字は動かさない。開いている間は
+/// 色を足せて完全一致だけを引き、閉じた後は足せなくなる代わりに最近傍へも写す。
+///
+/// 透過添字はエントリを占有しない。まだ色の割り当たっていない最小の添字を、
+/// フレームごとにグラフィック制御拡張で宣言する。
+pub(crate) struct Palette {
+    /// 色から添字を引く対応
+    lookup: Colors,
+    /// 添字順に並べた色
+    entries: Vec<u32>,
+    /// 閉じたテーブルの写し方。開いている間は `None`
+    settled: Option<Settled>,
+    /// 透過標識を一度でも見たか
+    transparent_seen: bool,
     /// 完全一致が無く最近傍へ写した画素数
     approximated: u64,
     /// 写す先が無く埋め草へ置いた画素数
     substituted: u64,
-    /// 写す先として足した [`OPAQUE_BLACK`] の添字
-    fallback: Option<u8>,
     /// グローバルカラーテーブルではなく、フレームごとに書く色表か
     local: bool,
     /// エントリごとの、最後に添字を出力へ書いたフレーム番号 (0は一度も無い)
@@ -122,121 +136,120 @@ pub(crate) struct Palette {
 }
 
 impl Palette {
-    /// 色の和集合をカラーテーブルへ据える
-    ///
-    /// 透過標識が和集合にあるなら、そのエントリがそのまま透過インデックスになる。
-    /// 素材自身の透過画素と未変更画素のランはどちらも「キャンバスを書き換えない」
-    /// という同じ意味なので、スロットを分けない。標識が無いときだけ透過ラン用の
-    /// スロットを1つ足す。
-    ///
-    /// `reserve_transparent` は、和集合が [`MAX_COLORS`] を埋めていてもスロットを
-    /// 取るかを決める。取るときは最後に見つけた色を1つ落とす。落とした色の画素は
-    /// 最近傍へ写り、[`Palette::approximated`] に数えられる。
-    ///
-    /// # Panics
-    /// 色数が [`MAX_COLORS`] を超えているとき。
-    pub(crate) fn from_colors(colors: Colors, reserve_transparent: bool) -> Self {
-        // GIFは添字の局所性に無関心なので、見つけた順のまま添字を振る
-        let mut entries = colors.into_indexed(|_| ()).colors().to_vec();
-        if !entries.contains(&TRANSPARENT) {
-            if reserve_transparent && entries.len() == MAX_COLORS {
-                entries.pop();
-            }
-            if entries.len() < MAX_COLORS {
-                entries.push(TRANSPARENT);
-            }
+    /// 色が1つも入っていない、開いたテーブル
+    pub(crate) fn new() -> Self {
+        Palette {
+            lookup: Colors::new(),
+            entries: Vec::new(),
+            settled: None,
+            transparent_seen: false,
+            approximated: 0,
+            substituted: 0,
+            local: false,
+            last_used: Vec::new(),
+            frame: 0,
         }
-        Palette::new(entries)
-    }
-
-    /// 量子化した色をカラーテーブルへ据える
-    ///
-    /// 透過スロットを必ず1つ足す。素材自身の透過画素と未変更画素のランは
-    /// どちらも「キャンバスを書き換えない」という同じ意味なので、
-    /// [`Palette::from_colors`] と同じくスロットを分けない。
-    ///
-    /// # Panics
-    /// `colors` が空か、[`QUANTIZED_COLORS`] を超えているとき。
-    pub(crate) fn from_quantized(colors: &[u32]) -> Self {
-        assert!(!colors.is_empty(), "量子化した色が1つも無い");
-        assert!(colors.len() <= QUANTIZED_COLORS, "透過スロットが取れない");
-
-        let mut entries = colors.to_vec();
-        entries.push(TRANSPARENT);
-        Palette::new(entries)
     }
 
     /// 維持したエントリと残差の色でテーブルを据え直す
     ///
-    /// 非透過色は255色までに抑え、透過スロットを1つ確保する。維持したエントリの
-    /// 最終使用は据え直した後も引き継ぐ。据え直したテーブルはフレームごとに
-    /// 書き出される ([`Palette::promote_to_global`] を通したものを除く)。
+    /// 非透過色は [`QUANTIZED_COLORS`] までに抑え、透過添字の余地を残す。
+    /// 維持したエントリの最終使用は据え直した後も引き継ぐ。据え直したテーブルは
+    /// フレームごとに書き出される。
     ///
     /// # Panics
     /// 非透過色が1つも残らないとき。
     pub(crate) fn from_rebuilt(kept: &[Kept], residual: &[u32]) -> Self {
-        let mut entries: Vec<u32> = kept.iter().map(|entry| entry.color).collect();
-        entries.extend_from_slice(residual);
-        entries.truncate(QUANTIZED_COLORS);
-        assert!(!entries.is_empty(), "据え直したテーブルに非透過色が無い");
-        entries.push(TRANSPARENT);
+        let mut palette = Palette::new();
+        let colors = kept
+            .iter()
+            .map(|entry| entry.color)
+            .chain(residual.iter().copied());
+        for color in colors {
+            if palette.entries.len() == QUANTIZED_COLORS {
+                break;
+            }
+            palette.push(color);
+        }
+        assert!(
+            !palette.entries.is_empty(),
+            "据え直したテーブルに非透過色が無い"
+        );
 
-        let mut palette = Palette::new(entries);
         palette.local = true;
+        palette.settle(&[]);
         for entry in kept {
-            if let Some(index) = palette.indexed.index_of(&entry.color.to_le_bytes(), 4) {
-                palette.last_used[index as usize] = entry.last_used;
+            if let Some(index) = palette.lookup.index_of(entry.color) {
+                palette.last_used[usize::from(index)] = entry.last_used;
             }
         }
         palette
     }
 
-    /// 添字順に並べた色からテーブルと引く対応を作る
+    /// まだ色を足せるか
+    pub(crate) fn is_open(&self) -> bool {
+        self.settled.is_none()
+    }
+
+    /// このフレームで新しく要る色をまとめて足す。上限に収まらなければ何も足さない
     ///
-    /// 引く対応はテーブルのエントリそのものから作る。書き出す色がすべて完全一致で
-    /// 引けるので、写した後の色を写し直しても最近傍へ落ちない。
-    fn new(mut entries: Vec<u32>) -> Self {
-        let black_fallback = entries.iter().all(|&color| color == TRANSPARENT);
-        if black_fallback {
-            entries.push(OPAQUE_BLACK);
+    /// 走査するのは直前のフレームから変わった画素だけで、`previous` が空なら
+    /// 全画素。変わっていない画素の色は、その画素が最後に変わったフレームで
+    /// 既に足されている。
+    ///
+    /// 透過標識は添字を占めないが、見た後の上限は透過添字のぶん1つ縮む。
+    ///
+    /// # Panics
+    /// 閉じたテーブルのとき。
+    pub(crate) fn admit(&mut self, bpp: usize, previous: &[u8], frame: &[u8]) -> bool {
+        assert!(self.is_open(), "閉じたテーブルへ色を足そうとしている");
+
+        let mut fresh = Colors::new();
+        for (at, pixel) in frame.chunks_exact(bpp).enumerate() {
+            let at = at * bpp;
+            if !previous.is_empty() && previous[at..at + bpp] == *pixel {
+                continue;
+            }
+
+            let color = pack(pixel, bpp);
+            if color == TRANSPARENT {
+                self.transparent_seen = true;
+                continue;
+            }
+            if self.lookup.index_of(color).is_some() {
+                continue;
+            }
+            if !fresh.observe_color(color) || !self.fits(fresh.count()) {
+                return false;
+            }
+        }
+        if !self.fits(fresh.count()) {
+            return false;
         }
 
-        let bytes: Vec<u8> = entries
-            .iter()
-            .flat_map(|color| color.to_le_bytes())
-            .collect();
-        let mut observed = Colors::new();
-        observed.observe(&bytes, 4);
+        for &color in fresh.into_indexed(|_| ()).colors() {
+            self.push(color);
+        }
+        true
+    }
 
-        // 別々の箱が同じ平均色に落ちることがあり、その重複はここで畳まれる
-        let indexed = observed.into_indexed(|_| ());
-        let entries = indexed.colors().to_vec();
-        let transparent = entries
-            .iter()
-            .position(|&color| color == TRANSPARENT)
-            .map(|index| index as u8);
-        let fallback = black_fallback.then(|| {
-            entries
-                .iter()
-                .position(|&color| color == OPAQUE_BLACK)
-                .expect("足した埋め草がテーブルに無い") as u8
+    /// 量子化した色を足してテーブルを閉じる
+    ///
+    /// 既に振った添字は動かないため、閉じる前に書いたフレームが指す色は変わらない。
+    /// 非透過色が1つも無いときだけ、写す先として [`OPAQUE_BLACK`] を添字0へ置く。
+    pub(crate) fn settle(&mut self, quantized: &[u32]) {
+        for &color in quantized {
+            self.push(color);
+        }
+
+        let fallback = self.entries.is_empty().then(|| {
+            self.push(OPAQUE_BLACK);
+            0
         });
-        let table = ColorTable::new(&entries);
-        let nearest = Nearest::new(&entries);
-
-        Palette {
-            last_used: vec![0; entries.len()],
-            indexed,
-            entries,
-            table,
-            transparent,
-            nearest,
-            approximated: 0,
-            substituted: 0,
+        self.settled = Some(Settled {
+            nearest: Nearest::new(&self.entries),
             fallback,
-            local: false,
-            frame: 0,
-        }
+        });
     }
 
     /// これから処理するフレーム番号を覚える
@@ -247,17 +260,25 @@ impl Palette {
     }
 
     /// 添字を出力へ書いたことを覚える
+    ///
+    /// 透過添字は色を持たないため、最終使用を数えない。
     pub(crate) fn mark_used(&mut self, index: u8) {
-        self.last_used[index as usize] = self.frame;
+        debug_assert!(
+            usize::from(index) < self.entries.len() || Some(index) == self.transparent(),
+            "割り当て済みの色でも透過添字でもない添字"
+        );
+        if let Some(used) = self.last_used.get_mut(usize::from(index)) {
+            *used = self.frame;
+        }
     }
 
-    /// 直近 `window` フレームの出力で使った非透過エントリ
+    /// 直近 `window` フレームの出力で使ったエントリ
     pub(crate) fn recently_used(&self, window: u32) -> Vec<Kept> {
         let oldest = self.frame.saturating_sub(window);
         self.entries
             .iter()
             .zip(&self.last_used)
-            .filter(|&(&color, &used)| color != TRANSPARENT && used > 0 && used >= oldest)
+            .filter(|&(_, &used)| used > 0 && used >= oldest)
             .map(|(&color, &used)| Kept {
                 color,
                 last_used: used,
@@ -267,16 +288,17 @@ impl Palette {
 
     /// このフレームに書くローカルカラーテーブル。グローバルのままなら `None`
     pub(crate) fn local_table(&self) -> Option<ColorTable> {
-        self.local.then(|| self.table.clone())
+        self.local
+            .then(|| ColorTable::new(&self.entries, self.transparent()))
     }
 
-    /// フレームごとではなく、グローバルカラーテーブルとして書くテーブルにする
-    ///
-    /// 据え直したテーブルは既に書いたフレームと組み合わないためフレームごとに
-    /// 書くが、まだ1フレームも符号化していないなら、そのテーブルをそのまま
-    /// グローバルへ据えられる。
-    pub(crate) fn promote_to_global(&mut self) {
-        self.local = false;
+    /// グローバルカラーテーブルへ書く、割り当て済みの色のバイト列
+    pub(crate) fn global_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.entries.len() * 3);
+        for color in &self.entries {
+            bytes.extend_from_slice(&color.to_le_bytes()[..3]);
+        }
+        bytes
     }
 
     /// 最近傍へ写した画素を数に加える
@@ -289,9 +311,9 @@ impl Palette {
         self.substituted += count;
     }
 
-    /// 透過でないエントリの数
+    /// 割り当て済みの色数
     pub(crate) fn colors(&self) -> u16 {
-        (self.entries.len() - usize::from(self.transparent.is_some())) as u16
+        self.entries.len() as u16
     }
 
     /// 完全一致が無く最近傍へ写した画素数
@@ -306,62 +328,87 @@ impl Palette {
 
     /// 非透過色が1つも無く、写す先として黒を足したか
     pub(crate) fn black_fallback(&self) -> bool {
-        self.fallback.is_some()
+        self.settled
+            .as_ref()
+            .is_some_and(|settled| settled.fallback.is_some())
     }
 
     /// 添字が指す色
     ///
     /// # Panics
-    /// このテーブルに無い添字のとき。
+    /// 色の割り当たっていない添字のとき。
     pub(crate) fn color_at(&self, index: u8) -> u32 {
-        self.entries[index as usize]
+        self.entries[usize::from(index)]
     }
 
-    /// 書き出すカラーテーブル
-    pub(crate) fn table(&self) -> &ColorTable {
-        &self.table
-    }
-
-    /// キャンバスを書き換えない添字。持たないテーブルでは `None`
+    /// キャンバスを書き換えない添字。色で埋まったテーブルでは `None`
     pub(crate) fn transparent(&self) -> Option<u8> {
-        self.transparent
+        (self.entries.len() < MAX_COLORS).then_some(self.entries.len() as u8)
     }
 
     /// 画素の色を写す先と、そこまでの誤差
     ///
     /// `pixel` は1画素 `bpp` バイトが並んでいること。まず完全一致を引き、外れた
-    /// ときだけ最近傍探索へ落とす。量子化したテーブルにも素材の色がそのまま
+    /// ときだけ最近傍探索へ落とす。閉じたテーブルにも素材の色がそのまま
     /// 載ることがあり、可逆の経路では全画素が完全一致で解決する。
     ///
-    /// 透過のエントリは最近傍の候補にならない。素材自身の透過画素は完全一致で
-    /// 引け、透過ラン用に足したスロットはキャンバスと一致する画素にだけ置く
-    /// もので、どちらも色を近似する相手ではない。
+    /// 透過標識は透過添字への完全一致になる。素材自身の透過画素と未変更画素の
+    /// ランはどちらも「キャンバスを書き換えない」という同じ意味なので、
+    /// スロットを分けない。
     ///
     /// 非透過エントリが [`OPAQUE_BLACK`] の埋め草しか無いテーブルでは、最近傍は
     /// 必ずその埋め草になる。そこへ落ちた画素は近似ではなく代替として返す。
+    ///
+    /// # Panics
+    /// 透過添字を持たないテーブルへ透過標識を渡したとき。開いたテーブルへ
+    /// 割り当てていない色を渡したとき。
     pub(crate) fn map(&mut self, pixel: &[u8], bpp: usize) -> Mapped {
-        if let Some(index) = self.indexed.index_of(pixel, bpp) {
+        let color = pack(pixel, bpp);
+        if color == TRANSPARENT {
+            return Mapped {
+                index: self.transparent().expect("透過標識を書く添字が無い"),
+                fit: Fit::Exact,
+            };
+        }
+        if let Some(index) = self.lookup.index_of(color) {
             return Mapped {
                 index,
                 fit: Fit::Exact,
             };
         }
 
-        let color = pack(pixel, bpp);
-        // 標識がここへ落ちるのは透過を表現できないテーブルのときだけ。
-        // 先頭フレームの矩形は論理画面全体なので、素材に透過があれば
-        // 標識は和集合に入る。以降のフレームで現れた標識は、廃棄方法の
-        // 判定が先に弾く
-        debug_assert!(color != TRANSPARENT, "透過標識を色として近似している");
-        let index = self.nearest.index_of(color);
-        let fit = if self.fallback == Some(index) {
+        let settled = self
+            .settled
+            .as_mut()
+            .expect("開いたテーブルに割り当てていない色を写している");
+        let index = settled.nearest.index_of(color);
+        let fit = if settled.fallback == Some(index) {
             Fit::Substituted
         } else {
             Fit::Approximated {
-                error: distance(color, self.entries[index as usize]),
+                error: distance(color, self.entries[usize::from(index)]),
             }
         };
         Mapped { index, fit }
+    }
+
+    /// 新しく `count` 色を足しても上限に収まるか
+    ///
+    /// 透過標識を見た素材では、透過添字のぶんを1つ残す。
+    fn fits(&self, count: u16) -> bool {
+        let limit = MAX_COLORS - usize::from(self.transparent_seen);
+        self.entries.len() + usize::from(count) <= limit
+    }
+
+    /// 色を添字順の末尾へ足す
+    ///
+    /// 既に載っている色と、上限を超える色は落ちる。
+    fn push(&mut self, color: u32) {
+        let before = self.lookup.count();
+        if self.lookup.observe_color(color) && self.lookup.count() != before {
+            self.entries.push(color);
+            self.last_used.push(0);
+        }
     }
 }
 
@@ -384,6 +431,13 @@ mod tests {
         (0..count as u32).map(|i| i | i << 8 | i << 16).collect()
     }
 
+    /// 画素列を1フレームとして受け入れた、開いたテーブル
+    fn opened(pixels: &[u8], bpp: usize) -> Palette {
+        let mut palette = Palette::new();
+        assert!(palette.admit(bpp, &[], pixels), "1フレーム目が入らない");
+        palette
+    }
+
     #[test]
     fn the_entry_count_is_rounded_up_to_a_power_of_two() {
         for (colors, entries) in [
@@ -397,18 +451,27 @@ mod tests {
             (129, 256),
             (256, 256),
         ] {
-            let table = ColorTable::new(&gray(colors));
+            let table = ColorTable::new(&gray(colors), None);
             assert_eq!(table.len(), entries, "{colors}色");
             assert_eq!(table.bytes().len(), entries * 3, "{colors}色");
         }
     }
 
+    /// 透過添字は色を持たないため、そこまで届くエントリ数が要る
+    #[test]
+    fn the_transparent_index_widens_the_table() {
+        for (colors, entries) in [(1, 2), (2, 4), (4, 8), (255, 256)] {
+            let table = ColorTable::new(&gray(colors), Some(colors as u8));
+            assert_eq!(table.len(), entries, "{colors}色");
+        }
+    }
+
     #[test]
     fn the_padding_is_black() {
-        let table = ColorTable::new(&[0x00FF_FFFF, 0x0000_00FF]);
+        let table = ColorTable::new(&[0x00FF_FFFF, 0x0000_00FF], None);
         assert_eq!(table.len(), 2);
 
-        let table = ColorTable::new(&[0x00FF_FFFF, 0x0000_00FF, 0x0000_FF00]);
+        let table = ColorTable::new(&[0x00FF_FFFF, 0x0000_00FF, 0x0000_FF00], None);
         assert_eq!(
             table.bytes(),
             [255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 0]
@@ -419,110 +482,129 @@ mod tests {
     fn the_size_field_is_the_exponent_minus_one() {
         for (colors, field) in [(1, 0), (2, 0), (3, 1), (5, 2), (256, 7)] {
             assert_eq!(
-                ColorTable::new(&gray(colors)).size_field(),
+                ColorTable::new(&gray(colors), None).size_field(),
                 field,
                 "{colors}色"
             );
         }
     }
 
-    /// 和集合を数える
-    fn colors_of(pixels: &[u8], bpp: usize) -> Colors {
-        let mut colors = Colors::new();
-        colors.observe(pixels, bpp);
-        colors
+    /// 添字は色を見つけた順に振る
+    #[test]
+    fn indices_follow_the_order_the_colors_were_found() {
+        let palette = opened(&[1u8, 2, 3, 4, 5, 6, 1, 2, 3], 3);
+
+        assert_eq!(palette.colors(), 2);
+        assert_eq!(palette.color_at(0), 0xFF03_0201);
+        assert_eq!(palette.color_at(1), 0xFF06_0504);
     }
 
-    /// 透過標識が和集合にあるなら、そのエントリがそのまま透過インデックスになる
+    /// 直前のフレームから変わっていない画素は走査しない
     #[test]
-    fn the_marker_entry_doubles_as_the_transparent_index() {
-        let pixels = [1u8, 2, 3, 0xFF, 0, 0, 0, 0, 4, 5, 6, 0xFF];
-        let palette = Palette::from_colors(colors_of(&pixels, 4), false);
+    fn unchanged_pixels_are_left_out_of_the_scan() {
+        let first = [1u8, 2, 3, 4, 5, 6];
+        let second = [1u8, 2, 3, 7, 8, 9];
 
+        let mut palette = opened(&first, 3);
+        assert!(palette.admit(3, &first, &second));
+        assert_eq!(palette.colors(), 3);
+        assert_eq!(palette.color_at(2), 0xFF09_0807);
+    }
+
+    /// 透過標識は添字を占めない
+    #[test]
+    fn the_marker_takes_no_entry() {
+        let palette = opened(&[0u8, 0, 0, 0, 1, 2, 3, 0xFF], 4);
+
+        assert_eq!(palette.colors(), 1);
         assert_eq!(palette.transparent(), Some(1));
-        assert_eq!(palette.table().len(), 4, "透過スロットを余分に足している");
     }
 
-    /// 標識が無く空きがあるときは、透過ラン用のスロットを1つ足す
+    /// 透過添字は、まだ色の割り当たっていない最小の添字
     #[test]
-    fn an_opaque_union_gains_a_transparent_slot() {
-        let pixels = [1u8, 2, 3, 4, 5, 6];
-        let palette = Palette::from_colors(colors_of(&pixels, 3), false);
+    fn the_transparent_index_follows_the_colors_allocated_so_far() {
+        let first = [1u8, 2, 3];
+        let mut palette = opened(&first, 3);
+        assert_eq!(palette.transparent(), Some(1));
 
+        assert!(palette.admit(3, &first, &[4, 5, 6]));
         assert_eq!(palette.transparent(), Some(2));
-        assert_eq!(
-            &palette.table().bytes()[6..9],
-            [0, 0, 0],
-            "透過スロットが標識のエントリになっていない"
-        );
     }
 
-    /// 和集合が上限を埋めていると透過スロットを取れない
+    /// 上限に収まらないフレームは1色も足さない
     ///
-    /// 可逆性は透過ランの削減より優先するため、色を落として空けることはしない。
+    /// 透過標識を見ていない素材の上限は [`MAX_COLORS`]。
     #[test]
-    fn a_full_opaque_union_keeps_every_color_and_loses_the_run() {
-        let pixels: Vec<u8> = (0..MAX_COLORS)
+    fn a_frame_that_does_not_fit_adds_nothing() {
+        let full: Vec<u8> = (0..MAX_COLORS)
             .flat_map(|i| [i as u8, (i >> 8) as u8, 0])
             .collect();
-        let palette = Palette::from_colors(colors_of(&pixels, 3), false);
+        let mut palette = opened(&full, 3);
+        assert_eq!(palette.colors(), MAX_COLORS as u16);
+        assert_eq!(palette.transparent(), None, "色で埋まっても透過添字がある");
 
-        assert_eq!(palette.transparent(), None);
-        assert_eq!(palette.table().len(), MAX_COLORS);
+        assert!(!palette.admit(3, &full, &[0xFF, 0xFF, 0xFF]));
+        assert_eq!(palette.colors(), MAX_COLORS as u16, "色を足している");
     }
 
-    /// スロットを確保するときは、最後に見つけた色を明け渡す
+    /// 透過標識を見た素材の上限は、透過添字のぶん1つ縮む
     #[test]
-    fn reserving_a_slot_drops_the_last_color_found() {
-        let pixels: Vec<u8> = (0..MAX_COLORS)
-            .flat_map(|i| [i as u8, (i >> 8) as u8, 0])
+    fn a_marker_reserves_the_last_index() {
+        let mut pixels: Vec<u8> = (0..MAX_COLORS - 1)
+            .flat_map(|i| [i as u8, (i >> 8) as u8, 0, 0xFF])
             .collect();
-        let palette = Palette::from_colors(colors_of(&pixels, 3), true);
+        pixels.extend_from_slice(&[0, 0, 0, 0]);
 
-        assert_eq!(palette.transparent(), Some((MAX_COLORS - 1) as u8));
-        assert_eq!(palette.colors(), (MAX_COLORS - 1) as u16);
-        assert!(
-            !palette
-                .table()
-                .bytes()
-                .chunks_exact(3)
-                .any(|color| color == [(MAX_COLORS - 1) as u8, ((MAX_COLORS - 1) >> 8) as u8, 0]),
-            "明け渡した色がテーブルに残っている"
-        );
-    }
-
-    /// 上限に届いていない和集合は、確保を頼まれても色を明け渡さない
-    #[test]
-    fn reserving_a_slot_keeps_every_color_below_the_limit() {
-        let pixels: Vec<u8> = (0..MAX_COLORS - 1)
-            .flat_map(|i| [i as u8, (i >> 8) as u8, 0])
-            .collect();
-        let palette = Palette::from_colors(colors_of(&pixels, 3), true);
-
+        let mut palette = opened(&pixels, 4);
         assert_eq!(palette.colors(), (MAX_COLORS - 1) as u16);
         assert_eq!(palette.transparent(), Some((MAX_COLORS - 1) as u8));
+
+        assert!(!palette.admit(4, &[], &[0xFF, 0xFF, 0xFF, 0xFF]));
     }
 
-    /// 空きが1つだけ残っている和集合にはスロットが入る
+    /// 閉じたテーブルは、割り当て済みの色をそのままの添字で残す
     #[test]
-    fn a_union_one_short_of_the_limit_still_gains_a_slot() {
-        let pixels: Vec<u8> = (0..MAX_COLORS - 1)
-            .flat_map(|i| [i as u8, (i >> 8) as u8, 0])
-            .collect();
-        let palette = Palette::from_colors(colors_of(&pixels, 3), false);
+    fn settling_keeps_the_indices_that_were_already_handed_out() {
+        let mut palette = opened(&[1u8, 2, 3, 4, 5, 6], 3);
+        palette.settle(&[0xFF80_8080, 0xFF03_0201]);
 
-        assert_eq!(palette.transparent(), Some((MAX_COLORS - 1) as u8));
-        assert_eq!(palette.table().len(), MAX_COLORS);
+        assert_eq!(palette.color_at(0), 0xFF03_0201);
+        assert_eq!(palette.color_at(1), 0xFF06_0504);
+        assert_eq!(palette.color_at(2), 0xFF80_8080, "量子化した色が入らない");
+        assert_eq!(palette.colors(), 3, "重なった色を二重に足している");
+    }
+
+    /// 閉じたテーブルに無い色は最近傍へ写る
+    #[test]
+    fn a_color_outside_a_settled_table_is_approximated() {
+        let mut palette = opened(&[0u8, 0, 0], 3);
+        palette.settle(&[]);
+
+        let mapped = palette.map(&[1, 0, 0], 3);
+        assert_eq!(mapped.index, 0);
+        assert!(matches!(mapped.fit, Fit::Approximated { .. }));
+    }
+
+    /// 透過標識は透過添字への完全一致になる
+    #[test]
+    fn the_marker_maps_to_the_transparent_index() {
+        let mut palette = opened(&[1u8, 2, 3, 0xFF], 4);
+        let mapped = palette.map(&[0, 0, 0, 0], 4);
+
+        assert_eq!(mapped.index, 1);
+        assert!(matches!(mapped.fit, Fit::Exact));
     }
 
     /// 写す先が1つも残らないテーブルへ足す埋め草は、不透明な黒
     ///
     /// カラーテーブルのパディングは黒なので、写す先にする埋め草も黒にする。
-    /// 別の色を足すと、透過だけの区間から据えたテーブルがその色を画面へ出す。
+    /// 別の色を足すと、透過だけの窓から閉じたテーブルがその色を画面へ出す。
     #[test]
     fn the_padding_that_becomes_a_target_is_opaque_black() {
-        let pixels = [0u8, 0, 0, 0];
-        let mut palette = Palette::from_colors(colors_of(&pixels, 4), false);
+        let mut palette = opened(&[0u8, 0, 0, 0], 4);
+        assert_eq!(palette.colors(), 0);
+
+        palette.settle(&[]);
         assert!(palette.black_fallback(), "写す先の埋め草を足していない");
 
         let mapped = palette.map(&[0x10, 0x20, 0x30, 0xFF], 4);
@@ -530,33 +612,13 @@ mod tests {
             matches!(mapped.fit, Fit::Substituted),
             "埋め草へ落ちた画素を近似として返している"
         );
-        assert_eq!(palette.color_at(mapped.index), 0xFF00_0000);
-    }
-
-    /// 透過のエントリは維持の対象にならない
-    ///
-    /// 透過スロットは据え直したテーブルが必ず1つ取り直すもので、維持へ数えると
-    /// 非透過色の空きを食う。
-    #[test]
-    fn the_transparent_entry_is_never_kept() {
-        let pixels = [1u8, 2, 3, 4, 5, 6];
-        let mut palette = Palette::from_colors(colors_of(&pixels, 3), false);
-        let transparent = palette.transparent().expect("透過インデックスが無い");
-
-        palette.set_frame(1);
-        palette.mark_used(0);
-        palette.mark_used(transparent);
-
-        let kept = palette.recently_used(8);
-        assert_eq!(kept.len(), 1, "透過のエントリまで維持している");
-        assert_eq!(kept[0].color, 0xFF03_0201);
+        assert_eq!(palette.color_at(mapped.index), OPAQUE_BLACK);
     }
 
     /// 一度も添字を書いていないエントリは維持の対象にならない
     #[test]
     fn an_entry_that_was_never_written_is_not_kept() {
-        let pixels = [1u8, 2, 3, 4, 5, 6];
-        let mut palette = Palette::from_colors(colors_of(&pixels, 3), false);
+        let mut palette = opened(&[1u8, 2, 3, 4, 5, 6], 3);
 
         palette.set_frame(1);
         palette.mark_used(0);
@@ -564,6 +626,17 @@ mod tests {
         let kept = palette.recently_used(8);
         assert_eq!(kept.len(), 1, "書いていないエントリまで維持している");
         assert_eq!(kept[0].color, 0xFF03_0201);
+    }
+
+    /// 透過添字は色を持たないため、最終使用を数えない
+    #[test]
+    fn the_transparent_index_is_never_kept() {
+        let mut palette = opened(&[1u8, 2, 3], 3);
+        let transparent = palette.transparent().expect("透過添字が無い");
+
+        palette.set_frame(1);
+        palette.mark_used(transparent);
+        assert!(palette.recently_used(8).is_empty());
     }
 
     /// 維持したエントリの最終使用は、据え直した後のテーブルへ引き継ぐ
@@ -586,5 +659,20 @@ mod tests {
         assert_eq!(carried.len(), 1, "最終使用が引き継がれていない");
         assert_eq!(carried[0].color, 0xFF00_0000);
         assert_eq!(carried[0].last_used, 9);
+    }
+
+    /// 据え直したテーブルは非透過色を [`QUANTIZED_COLORS`] までに抑える
+    #[test]
+    fn a_rebuilt_table_leaves_room_for_the_transparent_index() {
+        let kept: Vec<Kept> = (0..MAX_COLORS)
+            .map(|i| Kept {
+                color: 0xFF00_0000 | i as u32,
+                last_used: 1,
+            })
+            .collect();
+        let palette = Palette::from_rebuilt(&kept, &[]);
+
+        assert_eq!(palette.colors(), QUANTIZED_COLORS as u16);
+        assert_eq!(palette.transparent(), Some(QUANTIZED_COLORS as u8));
     }
 }

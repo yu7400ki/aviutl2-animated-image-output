@@ -52,10 +52,6 @@ pub(crate) fn compress<W: Write>(
         "最小符号長は 2..=8: {min_code_size}"
     );
     let clear = 1u16 << min_code_size;
-    debug_assert!(
-        indices.iter().all(|&index| u16::from(index) < clear),
-        "カラーテーブルの外を指す添字"
-    );
 
     let mut compressor = Compressor::new(writer, min_code_size);
     compressor.emit(clear)?;

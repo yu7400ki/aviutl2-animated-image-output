@@ -228,32 +228,6 @@ impl Histogram {
         self.add(r, g, b, count);
     }
 
-    /// 画素列の色を、1画素あたり `weight` の重みで積む
-    ///
-    /// `pixels` は1画素 `bpp` バイトが隙間なく並んでいること。`bpp` は3か4であること。
-    ///
-    /// 透過標識は積まない。RGBが (0,0,0) なので、積むと透過の面積だけ黒が重くなり、
-    /// 分割が黒の周りに箱を割いて非透過色の表現力を削る。
-    pub(crate) fn observe(&mut self, pixels: &[u8], bpp: usize, weight: u64) {
-        match bpp {
-            3 => {
-                for pixel in pixels.chunks_exact(3) {
-                    self.add(pixel[0], pixel[1], pixel[2], weight);
-                }
-            }
-            4 => {
-                for pixel in pixels.chunks_exact(4) {
-                    let color = u32::from_le_bytes([pixel[0], pixel[1], pixel[2], pixel[3]]);
-                    if color == TRANSPARENT {
-                        continue;
-                    }
-                    self.add(pixel[0], pixel[1], pixel[2], weight);
-                }
-            }
-            other => panic!("1画素あたり3バイトか4バイトのみ扱える: {other}"),
-        }
-    }
-
     /// 色を `count` 画素ぶん積む
     fn add(&mut self, r: u8, g: u8, b: u8, count: u64) {
         let cell = at(
@@ -271,17 +245,6 @@ impl Histogram {
         self.green[cell] += count * g;
         self.blue[cell] += count * b;
         self.squared[cell] += u128::from(count) * u128::from(r * r + g * g + b * b);
-    }
-
-    /// 色が落ちるビンに積まれた画素数
-    #[cfg(test)]
-    pub(crate) fn weight_of(&self, color: u32) -> u64 {
-        let [r, g, b, _] = color.to_le_bytes();
-        self.weight[at(
-            (r >> BIN_SHIFT) as usize + 1,
-            (g >> BIN_SHIFT) as usize + 1,
-            (b >> BIN_SHIFT) as usize + 1,
-        )]
     }
 
     /// 積んだ色を `target` 色以下へ割り、箱ごとの平均色を添字順に返す
@@ -772,25 +735,6 @@ mod tests {
             (variance - expected).abs() <= expected * 1e-12,
             "{variance} が {expected} から離れている"
         );
-    }
-
-    /// 透過標識は積まない
-    #[test]
-    fn the_transparent_marker_is_not_counted() {
-        let mut histogram = Histogram::new();
-        histogram.observe(&[0, 0, 0, 0, 0, 0, 0, 0, 10, 20, 30, 255], 4, 1);
-
-        // 標識を積んでいれば黒が重みを持ち、平均は黒へ寄る
-        assert_eq!(histogram.quantize(1), vec![pack([10, 20, 30])]);
-    }
-
-    /// RGB8の入力に透過は無く、黒はそのまま数える
-    #[test]
-    fn black_is_counted_when_the_input_has_no_alpha() {
-        let mut histogram = Histogram::new();
-        histogram.observe(&[0, 0, 0, 40, 40, 40], 3, 1);
-
-        assert_eq!(histogram.quantize(1), vec![pack([20, 20, 20])]);
     }
 
     /// キャッシュはビンの中心色に対する最近傍を持つ

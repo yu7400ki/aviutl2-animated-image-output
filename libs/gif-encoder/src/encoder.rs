@@ -2,29 +2,20 @@
 
 use crate::block::{
     self, DISPOSAL_DO_NOT_DISPOSE, DISPOSAL_RESTORE_TO_BACKGROUND, DISPOSAL_RESTORE_TO_PREVIOUS,
+    GLOBAL_TABLE_OFFSET,
 };
 use crate::delay::Hundredths;
 use crate::error::Error;
 use crate::frame::{Canvas, Screen};
 use crate::layout::{ColorType, Layout};
 use crate::lzw;
-use crate::normalize::{self, Binarized};
-use crate::rebuild::rebuild;
-use crate::spool::{Ring, Spool, Spooled};
+use crate::normalize::{self, Binarized, TRANSPARENT, pack};
+use crate::rebuild::{changed_colors, rebuild};
+use crate::ring::Ring;
 use crate::table::{ColorTable, Palette, QUANTIZED_COLORS};
-use anim_core::{FrameDelay, Rect, paste};
+use anim_core::{FrameDelay, Rect};
 use std::borrow::Cow;
-use std::io::{Seek, Write};
-
-/// [`Config::max_spool_bytes`] の目安となる値
-///
-/// グローバルカラーテーブルは1枚目の画像データより前に書く必要があるため、
-/// 色が決まるまでのフレームをエンコーダが抱えることになり、その量は素材の
-/// 大きさとフレーム数に比例する。
-///
-/// この512MiBは、1920x1080のRGBA8 (1フレーム約8.29MB) が全画面差分で続く場合の
-/// 64フレーム、30fpsで約2.1秒に相当する。
-pub const DEFAULT_MAX_SPOOL_BYTES: usize = 512 << 20;
+use std::io::{Seek, SeekFrom, Write};
 
 /// エンコード設定
 #[derive(Debug, Clone, Copy)]
@@ -35,14 +26,6 @@ pub struct Config {
     pub color_type: ColorType,
     /// アニメーションの再生回数 (0で無限ループ)
     pub num_plays: u32,
-    /// 溜めたフレームが抱えるメモリの上限バイト数
-    /// ([`DEFAULT_MAX_SPOOL_BYTES`] が目安)
-    ///
-    /// クロップ済みの画素データに、フレームごとの管理領域を加えた概算で数える。
-    /// 超える場合はそこまでの色でカラーテーブルを据え、以降のフレームは
-    /// 先読みリングを通して書き出す。カラーテーブルは1枚も溜めずには据えられない
-    /// ため、先頭フレームだけは上限に関わらず溜める。
-    pub max_spool_bytes: usize,
 }
 
 /// 既定は無限ループするRGB8
@@ -51,7 +34,6 @@ impl Default for Config {
         Config {
             color_type: ColorType::Rgb8,
             num_plays: 0,
-            max_spool_bytes: DEFAULT_MAX_SPOOL_BYTES,
         }
     }
 }
@@ -64,19 +46,9 @@ pub enum PaletteKind {
         /// 色の和集合の大きさ
         colors: u16,
     },
-    /// 溜めきれず、先頭区間の色を据えた
-    ExactFromPrefix {
-        /// 据えた区間の色の和集合の大きさ
-        colors: u16,
-    },
-    /// 全フレームのヒストグラムから量子化した
+    /// 途中で色が載りきらなくなり、先読みの窓から量子化した
     Quantized {
-        /// 量子化で得た非透過色の数
-        colors: u16,
-    },
-    /// 溜めきれず、先頭区間だけから量子化した
-    QuantizedFromPrefix {
-        /// 量子化で得た非透過色の数
+        /// 載っている非透過色の数 (そこまでに見つけた色と量子化した色の合計)
         colors: u16,
     },
 }
@@ -87,9 +59,6 @@ pub struct Report {
     /// グローバルカラーテーブルの据え方
     pub palette: PaletteKind,
     /// カラーテーブルを据え直した回数 (0ならグローバルの1枚で足りた)
-    ///
-    /// 1回目が先頭の書き出し位置で起きたときは、その結果がグローバルカラー
-    /// テーブルになる。
     pub rebuilds: u32,
     /// ローカルカラーテーブルを書いたフレーム数
     ///
@@ -99,21 +68,21 @@ pub struct Report {
     /// 完全一致が無く最近傍へ写した画素数
     ///
     /// 素材の色に近いエントリはあったが、そのものは無かった画素。可逆の経路では
-    /// 常に0で、先頭区間から据えたテーブルに無い色が後から現れたときと、量子化した
-    /// 色へ写したときに増える。数えるのは写した画素で、持ち越した画素は数えない。
+    /// 常に0で、量子化した色へ写したときに増える。数えるのは写した画素で、
+    /// 持ち越した画素は数えない。
     ///
     /// [`Report::substituted_pixels`] と合わせて0なら、全画素が据えたテーブルの
     /// 色そのままで解決した。
     pub approximated_pixels: u64,
     /// 写す先が無く、埋め草の黒へ置いた画素数
     ///
-    /// 溜めた区間の画素がすべて透過で、据えたテーブルが非透過色を1つも持たない
-    /// ときに増える。近似と違って素材の色は画面に残らない。
+    /// 据えたテーブルが非透過色を1つも持たないときに増える。近似と違って
+    /// 素材の色は画面に残らない。
     pub substituted_pixels: u64,
     /// 据えたテーブルに非透過色が1つも無く、写す先として黒を足したか
     ///
-    /// 溜めた区間の画素がすべて透過だったときに起きる。テーブルの形の記述で、
-    /// その黒へ実際に置いた画素は [`Report::substituted_pixels`] が数える。
+    /// テーブルの形の記述で、その黒へ実際に置いた画素は
+    /// [`Report::substituted_pixels`] が数える。
     pub black_fallback: bool,
     /// 見えていた画素を完全な透過へ潰した画素数
     ///
@@ -125,8 +94,6 @@ pub struct Report {
     pub binarized_to_opaque: u64,
     /// 遅延を下限で切り上げたか
     pub delay_clamped: bool,
-    /// 溜めたフレームが抱えたバイト数の最大値
-    pub peak_spool_bytes: usize,
 }
 
 /// 書き出し位置から先を覗くフレーム数
@@ -230,18 +197,18 @@ struct Palettes {
     retired_approximated: u64,
     /// 手放したテーブルが埋め草へ置いた画素数の合計
     retired_substituted: u64,
-    /// どこかのテーブルが写す先として黒を足したか
-    black_fallback: bool,
+    /// 手放したテーブルが写す先として黒を足したか
+    retired_fallback: bool,
 }
 
 impl Palettes {
     fn new(palette: Palette) -> Self {
         Palettes {
-            black_fallback: palette.black_fallback(),
             current: palette,
             earlier: None,
             retired_approximated: 0,
             retired_substituted: 0,
+            retired_fallback: false,
         }
     }
 
@@ -253,7 +220,6 @@ impl Palettes {
     /// 据え直したテーブルへ移り、今までのものを保留中のフレームのために残す
     fn replace(&mut self, palette: Palette) {
         debug_assert!(self.earlier.is_none(), "1フレームで2度据え直している");
-        self.black_fallback |= palette.black_fallback();
         self.earlier = Some(std::mem::replace(&mut self.current, palette));
     }
 
@@ -262,6 +228,7 @@ impl Palettes {
         if let Some(earlier) = self.earlier.take() {
             self.retired_approximated += earlier.approximated();
             self.retired_substituted += earlier.substituted();
+            self.retired_fallback |= earlier.black_fallback();
         }
     }
 
@@ -278,28 +245,13 @@ impl Palettes {
             + self.current.substituted()
             + self.earlier.as_ref().map_or(0, Palette::substituted)
     }
-}
 
-/// エンコーダが進む段階
-///
-/// グローバルカラーテーブルは1枚目の画像データより前に書く必要があるため、
-/// 色が決まるまで1フレームも書き出せない。決まった時点で [`Stage::Deciding`] は
-/// [`Stage::Streaming`] へ移り、後戻りしない。
-///
-/// どちらの段階も抱える領域が大きいため、値そのものは間接に置く。
-enum Stage {
-    /// 色が決まるまでフレームを溜めている
-    Deciding(Box<Spool>),
-    /// 色が決まり、先読みリング越しに書き出している
-    Streaming(Box<Streaming>),
-}
-
-/// 書き出しの段階が持つ状態
-struct Streaming {
-    /// 書き出し位置から先を覗く窓
-    ring: Ring,
-    /// 書き出し位置のフレームを処理する状態
-    writing: Writing,
+    /// 手放したものも含め、どこかのテーブルが写す先として黒を足したか
+    fn black_fallback(&self) -> bool {
+        self.retired_fallback
+            || self.current.black_fallback()
+            || self.earlier.as_ref().is_some_and(Palette::black_fallback)
+    }
 }
 
 /// 書き出し位置のフレーム1つを処理する状態
@@ -327,31 +279,42 @@ struct Writing {
     pacing: RestorePacing,
 }
 
+impl Writing {
+    fn new(layout: Layout) -> Self {
+        Writing {
+            palettes: Palettes::new(Palette::new()),
+            frames: 0,
+            previous: Vec::new(),
+            canvas: Canvas::new(layout),
+            rendered: Vec::new(),
+            indices: Vec::new(),
+            pending: None,
+            pacing: RestorePacing::new(),
+        }
+    }
+}
+
 /// GIFのエンコーダ
 ///
 /// [`Encoder::new`] で寸法とフレーム数を宣言し、[`Encoder::add_frame`] で
 /// フレームを投入し、[`Encoder::finish`] で閉じる。
 ///
-/// グローバルカラーテーブルを全フレームの色の和集合から据えるため、投入された
-/// フレームは色が決まるまでエンコーダ内部に溜まる。決まった後も、先読みリングの
-/// ぶんだけ書き出しが遅れる。
+/// グローバルカラーテーブルは色が決まる前に位置だけ確保し、決まった時点で
+/// そこへ書き戻す。投入されたフレームは先読みリングのぶんだけ遅れて書き出される。
 pub struct Encoder<W: Write + Seek> {
     writer: W,
     layout: Layout,
-    stage: Stage,
+    /// 書き出し位置から先を覗く窓
+    ring: Ring,
+    /// 書き出し位置のフレームを処理する状態
+    writing: Writing,
     num_frames: u32,
-    num_plays: u32,
     /// [`Self::add_frame`] が受け付けたフレーム数
     frames_accepted: u32,
     /// 書き出しに失敗し、ブロックの列が中断しているか
     poisoned: bool,
-    /// グローバルカラーテーブルの据え方。決まるまでは `None`
+    /// グローバルカラーテーブルの据え方。書き戻すまでは `None`
     palette_kind: Option<PaletteKind>,
-    /// まだ書いていないグローバルカラーテーブル
-    ///
-    /// 先頭のフレームを符号化するまで書かない。据え直しがそこで起きたときは、
-    /// 据え直した結果をここへ入れ替えてから書く。
-    head: Option<ColorTable>,
     /// カラーテーブルを据え直した回数
     rebuilds: u32,
     /// ローカルカラーテーブルを書いたフレーム数
@@ -362,19 +325,21 @@ pub struct Encoder<W: Write + Seek> {
     hundredths: Hundredths,
     /// 遅延を下限で切り上げたか
     delay_clamped: bool,
-    /// 溜めたバイト数の最大値
-    peak_spool_bytes: usize,
 }
 
 impl<W: Write + Seek> Encoder<W> {
     /// `width` x `height` の `num_frames` フレームを `writer` へ書き出す
     ///
+    /// ヘッダ・論理画面記述子・グローバルカラーテーブルの場所・ループ回数を
+    /// ここで書く。
+    ///
     /// # Errors
     /// 寸法が0か65535を超えるとき [`Error::InvalidDimensions`]。フレーム数が0の
     /// とき [`Error::InvalidFrameCount`]。1フレームのバイト数が `usize` で
-    /// 表現できないとき [`Error::ImageTooLarge`]。
+    /// 表現できないとき [`Error::ImageTooLarge`]。書き出しに失敗したとき
+    /// [`Error::Io`]。
     pub fn new(
-        writer: W,
+        mut writer: W,
         width: u32,
         height: u32,
         num_frames: u32,
@@ -383,23 +348,27 @@ impl<W: Write + Seek> Encoder<W> {
         if num_frames == 0 {
             return Err(Error::InvalidFrameCount);
         }
+        let layout = Layout::new(width, height, config.color_type)?;
+
+        block::header(&mut writer)?;
+        block::logical_screen_descriptor(&mut writer, layout.width, layout.height)?;
+        block::global_table_placeholder(&mut writer)?;
+        block::netscape(&mut writer, config.num_plays)?;
 
         Ok(Encoder {
             writer,
-            layout: Layout::new(width, height, config.color_type)?,
-            stage: Stage::Deciding(Box::new(Spool::new(config.max_spool_bytes, num_frames))),
+            layout,
+            ring: Ring::new(LOOKAHEAD),
+            writing: Writing::new(layout),
             num_frames,
-            num_plays: config.num_plays,
             frames_accepted: 0,
             poisoned: false,
             palette_kind: None,
-            head: None,
             rebuilds: 0,
             local_tables: 0,
             binarized: Binarized::default(),
             hundredths: Hundredths::new(),
             delay_clamped: false,
-            peak_spool_bytes: 0,
         })
     }
 
@@ -448,6 +417,9 @@ impl<W: Write + Seek> Encoder<W> {
 
     /// 書き出しを終え、終端を書いて `writer` と結果を返す
     ///
+    /// 一度も溢れずに来たなら、ここで色が決まってグローバルカラーテーブルへ
+    /// 書き戻す。
+    ///
     /// # Errors
     /// 投入されたフレーム数が宣言したフレーム数に満たないとき
     /// [`Error::FrameCountMismatch`]。
@@ -462,20 +434,17 @@ impl<W: Write + Seek> Encoder<W> {
             });
         }
 
-        let (stage, mut parts) = self.split();
-        let mut approximated_pixels = 0;
-        let mut substituted_pixels = 0;
-        let mut black_fallback = false;
-        if let Stage::Streaming(streaming) = stage {
-            parts.drain(streaming)?;
-            if let Some(pending) = streaming.writing.pending.take() {
-                // 次のフレームが無く、廃棄方法が変えられるキャンバスの続きも無い
-                parts.write_pending(pending, DISPOSAL_DO_NOT_DISPOSE)?;
-            }
-            approximated_pixels = streaming.writing.palettes.approximated();
-            substituted_pixels = streaming.writing.palettes.substituted();
-            black_fallback = streaming.writing.palettes.black_fallback;
+        let (ring, writing, mut parts) = self.split();
+        parts.drain(ring, writing)?;
+        if let Some(pending) = writing.pending.take() {
+            // 次のフレームが無く、廃棄方法が変えられるキャンバスの続きも無い
+            parts.write_pending(pending, DISPOSAL_DO_NOT_DISPOSE)?;
         }
+        parts.settle_exact(&writing.palettes.current)?;
+
+        let approximated_pixels = writing.palettes.approximated();
+        let substituted_pixels = writing.palettes.substituted();
+        let black_fallback = writing.palettes.black_fallback();
 
         block::trailer(&mut self.writer)?;
         self.writer.flush()?;
@@ -483,7 +452,7 @@ impl<W: Write + Seek> Encoder<W> {
         let report = Report {
             palette: self
                 .palette_kind
-                .expect("全フレームを投入した時点で色は決まっている"),
+                .expect("全フレームを書き終えた時点で色は決まっている"),
             rebuilds: self.rebuilds,
             local_tables: self.local_tables,
             approximated_pixels,
@@ -492,228 +461,69 @@ impl<W: Write + Seek> Encoder<W> {
             binarized_to_transparent: self.binarized.to_transparent,
             binarized_to_opaque: self.binarized.to_opaque,
             delay_clamped: self.delay_clamped,
-            peak_spool_bytes: self.peak_spool_bytes,
         };
         Ok((self.writer, report))
     }
 
-    /// 段階と、段階に依らない部品に分けて借りる
-    ///
-    /// 段階ごとの値を取り出したまま部品を触れるようにする。
-    fn split(&mut self) -> (&mut Stage, Parts<'_, W>) {
+    /// 先読みリング・書き出し位置の状態・それ以外の部品に分けて借りる
+    fn split(&mut self) -> (&mut Ring, &mut Writing, Parts<'_, W>) {
         let Encoder {
             writer,
             layout,
-            stage,
-            num_frames,
-            num_plays,
-            frames_accepted,
+            ring,
+            writing,
+            num_frames: _,
+            frames_accepted: _,
             poisoned: _,
             palette_kind,
-            head,
             rebuilds,
             local_tables,
             binarized: _,
             hundredths,
             delay_clamped,
-            peak_spool_bytes,
         } = self;
 
         (
-            stage,
+            ring,
+            writing,
             Parts {
                 writer,
                 layout,
                 palette_kind,
-                head,
                 rebuilds,
                 local_tables,
                 hundredths,
                 delay_clamped,
-                peak_spool_bytes,
-                num_frames: *num_frames,
-                num_plays: *num_plays,
-                frames_accepted: *frames_accepted,
             },
         )
     }
 
-    /// 正規化したフレームを段階に応じて処理し、段階が移ったらそれを覚える
+    /// 正規化したフレームを先読みリングへ入れ、溢れたぶんを書き出しへ渡す
     fn accept(&mut self, pixels: &[u8], delay: FrameDelay) -> Result<(), Error> {
-        let (stage, mut parts) = self.split();
-
-        let next = match stage {
-            Stage::Deciding(spool) => parts.spool_frame(spool, pixels, delay)?,
-            Stage::Streaming(streaming) => {
-                parts.push_frame(streaming, pixels, delay)?;
-                None
-            }
+        let (ring, writing, mut parts) = self.split();
+        let Some(due) = ring.push(pixels.to_vec(), delay) else {
+            return Ok(());
         };
-
-        if let Some(next) = next {
-            *stage = next;
-        }
-        Ok(())
+        parts.write_frame(writing, ring, &due.pixels, due.delay)
     }
 }
 
-/// [`Encoder`] から [`Stage`] 以外を借りたもの
+/// [`Encoder`] からフレームの窓と書き出し位置の状態以外を借りたもの
 ///
-/// 段階ごとの値は引数で受け取る。フレーム1つを処理する判断と書き出しを担う。
+/// フレーム1つを処理する判断と書き出しを担う。
 struct Parts<'a, W: Write + Seek> {
     writer: &'a mut W,
     layout: &'a Layout,
     palette_kind: &'a mut Option<PaletteKind>,
-    head: &'a mut Option<ColorTable>,
     rebuilds: &'a mut u32,
     local_tables: &'a mut u32,
     hundredths: &'a mut Hundredths,
     delay_clamped: &'a mut bool,
-    peak_spool_bytes: &'a mut usize,
-    num_frames: u32,
-    num_plays: u32,
-    frames_accepted: u32,
 }
 
 impl<W: Write + Seek> Parts<'_, W> {
-    /// 溜めているフレームへ1つ加え、色が決まったら溜めたぶんを流す
-    fn spool_frame(
-        &mut self,
-        spool: &mut Spool,
-        pixels: &[u8],
-        delay: FrameDelay,
-    ) -> Result<Option<Stage>, Error> {
-        let rect = spool.rect_of(self.layout, pixels);
-        let region_len = rect.area() as usize * self.layout.bytes_per_pixel;
-
-        // 抱えきれない大きさが来たら、そこまでの色で据えて溜めたぶんを流し、
-        // 投入されたフレームは以降と同じ逐次の経路へ通す
-        if !spool.can_hold(region_len) {
-            let mut streaming = self.commit(spool, true)?;
-            self.push_frame(&mut streaming, pixels, delay)?;
-            return Ok(Some(Stage::Streaming(streaming)));
-        }
-
-        spool.push(self.layout, pixels, rect, delay);
-        *self.peak_spool_bytes = (*self.peak_spool_bytes).max(spool.len());
-
-        // 全フレームの色を見終えるまでカラーテーブルは据えられない
-        if self.frames_accepted + 1 != self.num_frames {
-            return Ok(None);
-        }
-
-        let streaming = self.commit(spool, false)?;
-        Ok(Some(Stage::Streaming(streaming)))
-    }
-
-    /// 色を決めて溜めたフレームを流す
-    ///
-    /// 溜めた区間の色が上限に収まっていればそのまま据えて可逆に出し、超えて
-    /// いればヒストグラムから量子化する。
-    ///
-    /// 据えたテーブルはここでは書かない。先頭のフレームがこのテーブルで
-    /// 符号化されるとは限らず、据え直しがそこで起きたときはその結果が
-    /// グローバルカラーテーブルになる。
-    ///
-    /// `from_prefix` は溜めきれずに決着したことを表す。据えた色は溜めた区間の
-    /// ものでしかないため、以降のフレームの色を覆っているとは限らない。覆って
-    /// いない色は最近傍で写る。
-    fn commit(&mut self, spool: &mut Spool, from_prefix: bool) -> Result<Box<Streaming>, Error> {
-        let settled = spool.drain();
-        let (palette, kind) = match settled.histogram {
-            Some(histogram) => {
-                let palette = Palette::from_quantized(&histogram.quantize(QUANTIZED_COLORS));
-                let count = palette.colors();
-                let kind = if from_prefix {
-                    PaletteKind::QuantizedFromPrefix { colors: count }
-                } else {
-                    PaletteKind::Quantized { colors: count }
-                };
-                (palette, kind)
-            }
-            None => {
-                let count = settled.colors.count();
-                let kind = if from_prefix {
-                    PaletteKind::ExactFromPrefix { colors: count }
-                } else {
-                    PaletteKind::Exact { colors: count }
-                };
-                // 先頭区間から据えたテーブルは以降のフレームの色を覆う保証が無く、
-                // 覆っていない色が透過なら廃棄方法では書けない。透過を持てる入力では
-                // 1色を明け渡してでもスロットを取る
-                let reserve = from_prefix && self.layout.color_type == ColorType::Rgba8;
-                (Palette::from_colors(settled.colors, reserve), kind)
-            }
-        };
-        *self.palette_kind = Some(kind);
-        *self.head = Some(palette.table().clone());
-
-        let mut streaming = Box::new(Streaming {
-            ring: Ring::new(LOOKAHEAD),
-            writing: Writing {
-                palettes: Palettes::new(palette),
-                frames: 0,
-                previous: Vec::new(),
-                canvas: Canvas::new(*self.layout),
-                rendered: Vec::new(),
-                indices: Vec::new(),
-                pending: None,
-                pacing: RestorePacing::new(),
-            },
-        });
-        self.replay(&settled.frames, &mut streaming)?;
-        Ok(streaming)
-    }
-
-    /// ヘッダ・論理画面記述子・グローバルカラーテーブル・ループ回数を書く
-    fn write_head(&mut self, table: &ColorTable) -> Result<(), Error> {
-        block::header(self.writer)?;
-        block::logical_screen_descriptor(self.writer, self.layout.width, self.layout.height)?;
-        block::global_color_table(self.writer, table.bytes())?;
-        block::netscape(self.writer, self.num_plays)?;
-        Ok(())
-    }
-
-    /// 溜めたフレームをキャンバスへ貼り直し、書き出しの経路へ通す
-    ///
-    /// 溜めた矩形は直前のフレームとの差分なので、投入された順に貼れば入力の
-    /// フレームがそのまま戻る。戻したフレームを流せば、溜めなかった場合と同じ
-    /// 判定で廃棄方法が決まる。
-    ///
-    /// 末尾の数フレームは先読みリングに残る。続きを見ずに書き出すと廃棄方法を
-    /// 選べない。
-    fn replay(&mut self, frames: &[Spooled], streaming: &mut Streaming) -> Result<(), Error> {
-        let mut rebuilt = vec![0; self.layout.frame_len];
-        for frame in frames {
-            paste(
-                &mut rebuilt,
-                &frame.data,
-                frame.rect,
-                self.layout.stride,
-                self.layout.bytes_per_pixel,
-            );
-            self.push_frame(streaming, &rebuilt, frame.delay)?;
-        }
-        Ok(())
-    }
-
-    /// 投入されたフレームを先読みリングへ入れ、溢れたぶんを書き出しへ渡す
-    fn push_frame(
-        &mut self,
-        streaming: &mut Streaming,
-        pixels: &[u8],
-        delay: FrameDelay,
-    ) -> Result<(), Error> {
-        let Streaming { ring, writing } = streaming;
-        let Some(due) = ring.push(pixels.to_vec(), delay) else {
-            return Ok(());
-        };
-        self.write_frame(writing, ring, &due.pixels, due.delay)
-    }
-
     /// 先読みリングに残ったフレームをすべて書き出しへ渡す
-    fn drain(&mut self, streaming: &mut Streaming) -> Result<(), Error> {
-        let Streaming { ring, writing } = streaming;
+    fn drain(&mut self, ring: &mut Ring, writing: &mut Writing) -> Result<(), Error> {
         while let Some(due) = ring.take() {
             self.write_frame(writing, ring, &due.pixels, due.delay)?;
         }
@@ -745,15 +555,37 @@ impl<W: Write + Seek> Parts<'_, W> {
         *frames += 1;
         palettes.current.set_frame(*frames);
 
+        // 開いたテーブルはこのフレームの色をまとめて受け入れる。収まらなければ
+        // そこで閉じ、以降の色は最近傍へ写る
+        if palettes.current.is_open()
+            && !palettes
+                .current
+                .admit(self.layout.bytes_per_pixel, previous, pixels)
+        {
+            self.settle(&mut palettes.current, ring, previous, pixels)?;
+        }
+
         let tolerance = REBUILD_TOLERANCE * REBUILD_TOLERANCE;
         let mut mapped =
             canvas.render(previous, pixels, &mut palettes.current, tolerance, rendered);
+        // 色で埋まったテーブルは透過添字を持たない。標識を書く先が無いフレームは
+        // 表現できないため、閉じて透過添字を取り直す
+        if palettes.current.is_open() && self.lacks_transparent(&palettes.current, rendered, ring) {
+            self.settle(&mut palettes.current, ring, previous, pixels)?;
+            mapped = canvas.render(previous, pixels, &mut palettes.current, tolerance, rendered);
+        }
+
         // 写す先が無かった画素は1つでも据え直す。近似と違って誤差の大小では
-        // 測れず、据え直す以外にその色を出す手立てが無い。埋め草しか写す先の
-        // 無いテーブルは溜めた区間が全画素透過のときしか生まれず、据え直した
-        // テーブルは必ず非透過色を持つので、この経路が繰り返し立つことはない
-        if mapped.substituted > 0 || mapped.exceeded > self.rebuild_floor() {
-            let mut fresh = rebuild(
+        // 測れず、据え直す以外にその色を出す手立てが無い
+        if mapped.substituted > 0
+            || mapped.exceeded > self.rebuild_floor()
+            || self.lacks_transparent(&palettes.current, rendered, ring)
+        {
+            debug_assert!(
+                !palettes.current.is_open(),
+                "書き戻していないテーブルを据え直している"
+            );
+            let fresh = rebuild(
                 self.layout,
                 &palettes.current,
                 KEEP_WINDOW,
@@ -761,14 +593,6 @@ impl<W: Write + Seek> Parts<'_, W> {
                 previous,
                 std::iter::once(pixels).chain(ring.window()),
             );
-            // まだ1フレームも符号化していないなら、据え直した結果がそのまま
-            // グローバルカラーテーブルになる。書く順を入れ替えるだけで、
-            // 次の据え直しまでのフレームは色表を自分で運ばずに済む
-            if pending.is_none() {
-                debug_assert!(self.head.is_some(), "書いた後のテーブルを入れ替えている");
-                fresh.promote_to_global();
-                *self.head = Some(fresh.table().clone());
-            }
             palettes.replace(fresh);
             palettes.current.set_frame(*frames);
             mapped = canvas.render(previous, pixels, &mut palettes.current, tolerance, rendered);
@@ -814,6 +638,77 @@ impl<W: Write + Seek> Parts<'_, W> {
         Ok(())
     }
 
+    /// 開いたテーブルを閉じ、グローバルカラーテーブルを書き戻す
+    ///
+    /// 量子化の材料は書き出し位置のフレームと先読みの窓で、そこで入力が変わった
+    /// 画素の色を積む。目標色数は透過添字の余地を残した空きぶん。
+    fn settle(
+        &mut self,
+        palette: &mut Palette,
+        ring: &Ring,
+        previous: &[u8],
+        pixels: &[u8],
+    ) -> Result<(), Error> {
+        let free = QUANTIZED_COLORS.saturating_sub(usize::from(palette.colors()));
+        let mut quantized = Vec::new();
+        if free > 0 {
+            let histogram = changed_colors(
+                self.layout,
+                previous,
+                std::iter::once(pixels).chain(ring.window()),
+            );
+            if histogram.distinct() > 0 {
+                quantized = histogram.quantize(free);
+            }
+        }
+
+        palette.settle(&quantized);
+        *self.palette_kind = Some(PaletteKind::Quantized {
+            colors: palette.colors(),
+        });
+        self.write_global_table(palette)
+    }
+
+    /// 一度も溢れずに来たテーブルを、そのままグローバルカラーテーブルへ書き戻す
+    fn settle_exact(&mut self, palette: &Palette) -> Result<(), Error> {
+        if !palette.is_open() {
+            return Ok(());
+        }
+
+        *self.palette_kind = Some(PaletteKind::Exact {
+            colors: palette.colors(),
+        });
+        self.write_global_table(palette)
+    }
+
+    /// 確保しておいた位置へグローバルカラーテーブルを書き、元の位置へ戻る
+    fn write_global_table(&mut self, palette: &Palette) -> Result<(), Error> {
+        let resume = self.writer.stream_position()?;
+        self.writer.seek(SeekFrom::Start(GLOBAL_TABLE_OFFSET))?;
+        block::global_color_table(self.writer, &palette.global_bytes())?;
+        self.writer.seek(SeekFrom::Start(resume))?;
+        Ok(())
+    }
+
+    /// 透過標識があるのに、それを書く添字が無いか
+    ///
+    /// 見るのは写した面と、窓の先頭の1枚。廃棄方法はこのフレームを次のフレームと
+    /// 突き合わせて決まり、矩形を抜いた先を透過として読ませるには、抜くフレーム
+    /// 自身が透過添字を宣言している必要がある。
+    fn lacks_transparent(&self, palette: &Palette, rendered: &[u8], ring: &Ring) -> bool {
+        if self.layout.color_type != ColorType::Rgba8 || palette.transparent().is_some() {
+            return false;
+        }
+
+        let bpp = self.layout.bytes_per_pixel;
+        let marked = |plane: &[u8]| {
+            plane
+                .chunks_exact(bpp)
+                .any(|pixel| pack(pixel, bpp) == TRANSPARENT)
+        };
+        marked(rendered) || ring.window().next().is_some_and(marked)
+    }
+
     /// 据え直しに踏み切る、誤差が閾値を超えた画素数の下限
     fn rebuild_floor(&self) -> u64 {
         let pixels = u64::from(self.layout.width) * u64::from(self.layout.height);
@@ -821,12 +716,7 @@ impl<W: Write + Seek> Parts<'_, W> {
     }
 
     /// 保留していたフレームを `disposal` で書き出す
-    ///
-    /// 最初の1枚の前に、まだ書いていないヘッダとグローバルカラーテーブルを書く。
     fn write_pending(&mut self, pending: Pending, disposal: u8) -> Result<(), Error> {
-        if let Some(table) = self.head.take() {
-            self.write_head(&table)?;
-        }
         block::graphic_control(self.writer, disposal, pending.delay, pending.transparent)?;
         block::image_descriptor(
             self.writer,
@@ -966,14 +856,14 @@ fn encode_on(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anim_core::Colors;
     use std::io::Cursor;
 
-    /// 1色だけのテーブル
+    /// 1色だけの閉じたテーブル
     fn table_of(pixel: &[u8; 3]) -> Palette {
-        let mut colors = Colors::new();
-        colors.observe(pixel, 3);
-        Palette::from_colors(colors, false)
+        let mut palette = Palette::new();
+        palette.admit(3, &[], pixel);
+        palette.settle(&[]);
+        palette
     }
 
     /// 手放したテーブルが最近傍へ写した画素も、報告に残る
@@ -998,13 +888,23 @@ mod tests {
         );
     }
 
-    /// 一様な色で埋めたRGB8のフレーム
-    fn flat(value: u8) -> Vec<u8> {
-        vec![value; (REBUILD_WIDTH * REBUILD_HEIGHT) as usize * 3]
-    }
-
     const REBUILD_WIDTH: u32 = 20;
     const REBUILD_HEIGHT: u32 = 20;
+
+    /// 画面が白へ切り替わるフレーム
+    ///
+    /// 閉じた時点の先読みの窓の外に置く。窓の中では、閉じたテーブルが白まで
+    /// 覆ってしまう。
+    const WHITENS_AT: usize = LOOKAHEAD + 1;
+
+    /// 色の散った画素で埋めたRGB8のフレーム
+    ///
+    /// 上限を超える色を1フレームに置き、先頭の書き出し位置でテーブルを閉じさせる。
+    fn scattered() -> Vec<u8> {
+        (0..REBUILD_WIDTH * REBUILD_HEIGHT)
+            .flat_map(|i| [(i % 64 * 4) as u8, (i / 64 * 4) as u8, 0x40])
+            .collect()
+    }
 
     /// 据え直したテーブルは、いま処理しているフレームから最終使用を数える
     ///
@@ -1012,21 +912,17 @@ mod tests {
     /// ままになり、次の据え直しの維持から外れる。
     #[test]
     fn a_rebuilt_table_counts_its_entries_from_the_current_frame() {
-        // 先頭フレームだけで決着させ、2枚目の白で据え直しへ踏み切らせる
-        let mut frames = vec![flat(0x00), flat(0xFF)];
-        frames.resize(12, flat(0x00));
+        // 先頭フレームで閉じ、画面を白で覆うフレームで据え直しへ踏み切らせる
+        let white = vec![0xFF; (REBUILD_WIDTH * REBUILD_HEIGHT) as usize * 3];
+        let mut frames = vec![scattered(); WHITENS_AT];
+        frames.resize(WHITENS_AT + LOOKAHEAD, white);
 
-        let config = Config {
-            color_type: ColorType::Rgb8,
-            max_spool_bytes: 0,
-            ..Config::default()
-        };
         let mut encoder = Encoder::new(
             Cursor::new(Vec::new()),
             REBUILD_WIDTH,
             REBUILD_HEIGHT,
             frames.len() as u32,
-            config,
+            Config::default(),
         )
         .unwrap();
         let delay = FrameDelay::new(1, 30).unwrap();
@@ -1034,17 +930,12 @@ mod tests {
             encoder.add_frame(frame, delay).unwrap();
         }
 
-        let Stage::Streaming(streaming) = encoder.stage else {
-            panic!("書き出しへ移っていない");
-        };
-        let writing = streaming.writing;
-
-        // 白を書いたのは据え直した2枚目だけ
-        let kept = writing.palettes.current.recently_used(KEEP_WINDOW);
+        // 白を書いたのは据え直したフレームだけで、その番号は1から数えたもの
+        let kept = encoder.writing.palettes.current.recently_used(KEEP_WINDOW);
         let white = kept.iter().find(|entry| entry.color == 0xFFFF_FFFF);
         assert_eq!(
             white.map(|entry| entry.last_used),
-            Some(2),
+            Some(WHITENS_AT as u32 + 1),
             "据え直したフレームで書いた添字の最終使用が残っていない"
         );
     }
@@ -1132,10 +1023,7 @@ mod tests {
             encoder.add_frame(&frame, delay).unwrap();
         }
 
-        match encoder.stage {
-            Stage::Streaming(streaming) => streaming.writing.pacing,
-            Stage::Deciding(_) => panic!("書き出しへ移っていない"),
-        }
+        encoder.writing.pacing
     }
 
     /// 書き出しの経路は、候補を立てる前に間合いを見る

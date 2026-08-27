@@ -53,7 +53,7 @@ pub(crate) fn rebuild<'a>(
 ///
 /// 変わっていない画素は写し直さないため積まない。透過標識は色を持たないため
 /// 積まない。
-fn changed_colors<'a>(
+pub(crate) fn changed_colors<'a>(
     layout: &Layout,
     base: &'a [u8],
     window: impl Iterator<Item = &'a [u8]>,
@@ -129,7 +129,15 @@ fn release_oldest(kept: &mut Vec<Kept>, count: usize) {
 mod tests {
     use super::*;
     use crate::layout::ColorType;
-    use anim_core::{Colors, MAX_COLORS};
+    use anim_core::MAX_COLORS;
+
+    /// 画素列の色をそのまま受け入れて閉じたテーブル
+    fn settled(pixels: &[u8]) -> Palette {
+        let mut palette = Palette::new();
+        assert!(palette.admit(3, &[], pixels), "色が上限に収まらない");
+        palette.settle(&[]);
+        palette
+    }
 
     fn kept_of(entries: &[(u32, u32)]) -> Vec<Kept> {
         entries
@@ -235,10 +243,8 @@ mod tests {
         let pixels: Vec<u8> = (0..MAX_COLORS)
             .flat_map(|i| [i as u8, (i >> 8) as u8, 0])
             .collect();
-        let mut colors = Colors::new();
-        colors.observe(&pixels, 3);
-        let mut current = Palette::from_colors(colors, false);
-        assert_eq!(current.transparent(), None, "透過スロットが取れている");
+        let mut current = settled(&pixels);
+        assert_eq!(current.transparent(), None, "透過添字が取れている");
 
         current.set_frame(1);
         for index in 0..MAX_COLORS {
@@ -254,9 +260,7 @@ mod tests {
     /// 維持で足りる色には空きを費やさない
     #[test]
     fn the_residual_leaves_out_the_colors_the_kept_entries_cover() {
-        let mut colors = Colors::new();
-        colors.observe(&[0u8, 0, 0], 3);
-        let mut current = Palette::from_colors(colors, false);
+        let mut current = settled(&[0u8, 0, 0]);
         current.set_frame(1);
         current.mark_used(0);
 
@@ -276,9 +280,7 @@ mod tests {
             .collect();
 
         // 維持が空なので、空きはテーブルの非透過スロットすべて
-        let mut colors = Colors::new();
-        colors.observe(&[0u8, 0, 0], 3);
-        let current = Palette::from_colors(colors, false);
+        let current = settled(&[0u8, 0, 0]);
         assert!(current.recently_used(8).is_empty());
 
         let expected =

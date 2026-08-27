@@ -431,7 +431,6 @@ fn for_each_row(rect: Rect, layout: &Layout, mut row: impl FnMut(usize, usize)) 
 mod tests {
     use super::*;
     use crate::block::DISPOSAL_RESTORE_TO_PREVIOUS;
-    use anim_core::Colors;
 
     const WIDTH: u32 = 4;
     const HEIGHT: u32 = 2;
@@ -447,12 +446,16 @@ mod tests {
             .collect()
     }
 
+    /// フレーム列の色を見つけた順に受け入れて閉じたテーブル
     fn palette_of(frames: &[&[u8]], bpp: usize) -> Palette {
-        let mut colors = Colors::new();
+        let mut palette = Palette::new();
+        let mut previous: &[u8] = &[];
         for frame in frames {
-            colors.observe(frame, bpp);
+            assert!(palette.admit(bpp, previous, frame), "色が上限に収まらない");
+            previous = frame;
         }
-        Palette::from_colors(colors, false)
+        palette.settle(&[]);
+        palette
     }
 
     /// 先頭フレームを描き、その矩形を返す
@@ -837,8 +840,7 @@ mod tests {
             .iter()
             .map(|&at| {
                 palette
-                    .table()
-                    .bytes()
+                    .global_bytes()
                     .chunks_exact(3)
                     .position(|color| color == [at, 0x20, 0x10])
                     .unwrap() as u8

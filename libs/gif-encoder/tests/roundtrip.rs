@@ -5,9 +5,7 @@
 //! ffmpeg の2つでデコードする。ffmpeg が見つからない環境では、そちらだけを
 //! 飛ばして `gif` クレートの結果で判定する。
 
-use gif_encoder::{
-    ColorType, Config, DEFAULT_MAX_SPOOL_BYTES, Encoder, Error, FrameDelay, PaletteKind, Report,
-};
+use gif_encoder::{ColorType, Config, Encoder, Error, FrameDelay, PaletteKind, Report};
 use std::cell::RefCell;
 use std::io::{Cursor, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -45,7 +43,6 @@ fn encode(
     let config = Config {
         color_type,
         num_plays,
-        ..Config::default()
     };
     encode_with(width, height, config, frames)
 }
@@ -313,13 +310,10 @@ fn round_trip_config(
         .map(|data| expected_rgba(data, color_type))
         .collect();
 
-    // 溜めきれる素材では和集合が全フレームを覆うので、写す先の黒を足すのは
-    // 素材のどこにも不透明な画素が無いときに限る
-    let opaque = expected
-        .iter()
-        .flat_map(|frame| frame.chunks_exact(4))
-        .any(|pixel| pixel[3] != 0);
-    assert_eq!(report.black_fallback, !opaque, "写す先の黒の足し方が違う");
+    // 透過添字はエントリを占有しないため、全画素透過の素材でもテーブルは
+    // 透過添字を持つ。写す先の黒が要るのは、閉じた時点で非透過色が1つも
+    // 見つかっていないときだけ
+    assert!(!report.black_fallback, "写す先の黒を足している");
 
     let decoded = decode_with_gif(&bytes);
     assert_eq!(
@@ -822,7 +816,7 @@ fn a_full_opaque_union_writes_every_pixel_of_the_rect() {
     }
 }
 
-/// 素材自身の透過画素と未変更画素のランは同じエントリを使う
+/// 素材自身の透過画素と未変更画素のランは、そのフレームの透過添字を分け合う
 #[test]
 fn the_marker_entry_carries_both_kinds_of_transparency() {
     const WIDTH: u32 = 6;
@@ -838,19 +832,17 @@ fn the_marker_entry_carries_both_kinds_of_transparency() {
     let (bytes, _) = round_trip(WIDTH, HEIGHT, color, &[first, second]);
     let decoded = decode_with_gif(&bytes);
 
-    // 標識のエントリが両方のフレームの透過インデックスになっている
-    let palette = decoded.palette.expect("グローバルカラーテーブルが無い");
-    let marker = palette
-        .chunks_exact(3)
-        .position(|entry| entry == [0, 0, 0])
-        .expect("標識のエントリが無い");
+    // 先頭フレームの矩形は論理画面全体で、素材の標識はその透過添字で書かれる
     for (index, frame) in decoded.frames.iter().enumerate() {
-        assert_eq!(
-            frame.transparent,
-            Some(marker as u8),
-            "{index} 番目の透過インデックスが標識を指していない"
+        assert!(
+            frame.transparent.is_some(),
+            "{index} 番目に透過インデックスが無い"
         );
     }
+    assert_eq!(
+        decoded.frames[0].rgba[3], 0,
+        "素材の透過画素が透過インデックスで書かれていない"
+    );
 
     // 2枚目の矩形は変わっていない画素で埋まり、透過で書かれている
     assert_eq!(decoded.frames[1].rect(), (1, 1, 4, 3));
@@ -987,7 +979,7 @@ fn panel_over_an_edge() -> Vec<Vec<u8>> {
 fn the_smaller_of_the_two_clearing_candidates_wins() {
     let frames = panel_over_an_edge();
     let (bytes, report) = round_trip(16, 8, ColorType::Rgba8, &frames);
-    assert_eq!(report.palette, PaletteKind::Exact { colors: 66 });
+    assert_eq!(report.palette, PaletteKind::Exact { colors: 65 });
 
     use gif::DisposalMethod::{Keep, Previous};
     assert_eq!(
@@ -1166,83 +1158,7 @@ fn a_pixel_outside_the_pending_rect_widens_it() {
     );
 }
 
-/// 透過を持たない素材はキャンバスを残したまま流れる
-///
-/// 候補 2 と 3 が立つのは「不透明 → 透過」の遷移を含むフレームだけで、
-/// 不透明な素材の出力は候補が増えても変わらない。
-#[test]
-fn an_opaque_animation_keeps_every_frame() {
-    const WIDTH: u32 = 8;
-    const HEIGHT: u32 = 4;
-    let frames = moving_sprite(WIDTH, HEIGHT, 6);
-
-    let (bytes, _) = round_trip(WIDTH, HEIGHT, ColorType::Rgb8, &frames);
-    assert!(
-        disposals(&bytes)
-            .iter()
-            .all(|&disposal| disposal == gif::DisposalMethod::Keep),
-        "不透明な素材でキャンバスを抜いている"
-    );
-}
-
-/// 先頭区間がちょうど256色を埋めても、透過を持てる入力ならスロットを取る
-///
-/// 先頭区間から据えたテーブルは以降のフレームの色を覆う保証が無く、覆っていない
-/// 色が透過なら廃棄方法では書けない。明け渡した1色は最近傍へ写る。
-#[test]
-fn a_prefix_that_fills_the_table_still_reserves_a_transparent_slot() {
-    let color = ColorType::Rgba8;
-    let first: Vec<u8> = (0..256).flat_map(|i| [i as u8, 0, 0, 0xFF]).collect();
-    let mut second = first.clone();
-    set_pixel(&mut second, 16, color, 1, 1, &[0, 0, 0, 0]);
-
-    let config = Config {
-        color_type: color,
-        max_spool_bytes: 0,
-        ..Config::default()
-    };
-    // 明け渡した色の画素は最近傍へ写る。写す先は6-6-6のビン単位で引くので、
-    // 隣り合う色のどれになるかはビンの幅まで開く
-    let (bytes, report) = round_trip_config(16, 16, config, &[first, second], 4);
-    assert_eq!(report.palette, PaletteKind::ExactFromPrefix { colors: 256 });
-    assert!(
-        report.approximated_pixels > 0,
-        "明け渡した色が最近傍へ写っていない"
-    );
-
-    let decoded = decode_with_gif(&bytes);
-    assert!(
-        decoded.frames[0].transparent.is_some(),
-        "透過スロットを取っていない"
-    );
-    assert_eq!(
-        disposals(&bytes),
-        [gif::DisposalMethod::Background, gif::DisposalMethod::Keep]
-    );
-}
-
-/// 透過を持てない入力では、和集合が埋まったテーブルの色を明け渡さない
-#[test]
-fn a_prefix_that_fills_the_table_keeps_every_color_without_alpha() {
-    let first: Vec<u8> = (0..256).flat_map(|i| [i as u8, 0, 0]).collect();
-    let mut second = first.clone();
-    set_pixel(&mut second, 16, ColorType::Rgb8, 1, 1, &[0, 0, 0]);
-
-    let config = Config {
-        color_type: ColorType::Rgb8,
-        max_spool_bytes: 0,
-        ..Config::default()
-    };
-    let (bytes, report) = round_trip_config(16, 16, config, &[first, second], 0);
-    assert_eq!(report.palette, PaletteKind::ExactFromPrefix { colors: 256 });
-    assert_eq!(report.approximated_pixels, 0, "色を明け渡している");
-    assert_eq!(decode_with_gif(&bytes).frames[0].transparent, None);
-}
-
-/// スプールの上限で使う素材
-///
-/// 全フレームが先頭フレームと同じ2色しか使わないため、先頭区間だけで据えた
-/// カラーテーブルでも以降のフレームを覆える。
+/// 2色だけで1画素が動くフレーム列
 fn moving_sprite(width: u32, height: u32, count: usize) -> Vec<Vec<u8>> {
     let color = ColorType::Rgb8;
     (0..count)
@@ -1262,176 +1178,86 @@ fn moving_sprite(width: u32, height: u32, count: usize) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// スプールの上限に達しても、溜めた区間と以降のフレームが同じ判定で書かれる
-#[test]
-fn frames_beyond_the_spool_limit_survive_both_decoders() {
-    const WIDTH: u32 = 8;
-    const HEIGHT: u32 = 4;
-    let frames = moving_sprite(WIDTH, HEIGHT, 9);
-
-    // 上限まで溜めた出力は、溜めきった出力とフレームごとに一致する
-    let (whole, report) = round_trip(WIDTH, HEIGHT, ColorType::Rgb8, &frames);
-    assert!(matches!(report.palette, PaletteKind::Exact { .. }));
-    let composed = compose(&decode_with_gif(&whole));
-
-    for limit in [0, 64, 256, DEFAULT_MAX_SPOOL_BYTES] {
-        let config = Config {
-            max_spool_bytes: limit,
-            ..Config::default()
-        };
-        let (bytes, report) = encode_with(WIDTH, HEIGHT, config, &frames).unwrap();
-        let decoded = decode_with_gif(&bytes);
-
-        // 小さい上限では溜めきれず、先頭区間の色で決着する
-        let settled_early = matches!(report.palette, PaletteKind::ExactFromPrefix { .. });
-        assert_eq!(
-            settled_early,
-            limit < DEFAULT_MAX_SPOOL_BYTES,
-            "上限 {limit} の決着の仕方が違う: {:?}",
-            report.palette
-        );
-
-        assert_eq!(decoded.frames.len(), frames.len(), "上限 {limit}");
-        assert_eq!(compose(&decoded), composed, "上限 {limit} の合成結果が違う");
-        for (index, frame) in decoded.frames.iter().enumerate() {
-            assert_eq!(
-                frame.delay,
-                index as u16 + 2,
-                "上限 {limit} の {index} 番目"
-            );
-        }
-        assert!(
-            report.peak_spool_bytes >= (WIDTH * HEIGHT) as usize * 3,
-            "上限 {limit} で先頭フレームが溜まっていない"
-        );
-
-        if let Some(raw) = decode_with_ffmpeg(&bytes) {
-            let frame_len = (WIDTH * HEIGHT) as usize * 4;
-            assert_eq!(raw.len(), frame_len * frames.len(), "上限 {limit}");
-            for (index, actual) in raw.chunks_exact(frame_len).enumerate() {
-                assert_eq!(
-                    actual, composed[index],
-                    "ffmpeg の {index} 番目 (上限 {limit})"
-                );
-            }
-        }
-    }
-}
-
-/// 上限が最後のフレームで効いても、そのフレームは書き出しの経路を通る
-#[test]
-fn a_limit_reached_on_the_last_frame_still_writes_it() {
-    const WIDTH: u32 = 8;
-    const HEIGHT: u32 = 4;
-    let frames = moving_sprite(WIDTH, HEIGHT, 2);
-    let (whole, _) = round_trip(WIDTH, HEIGHT, ColorType::Rgb8, &frames);
-
-    let config = Config {
-        max_spool_bytes: 0,
-        ..Config::default()
-    };
-    let (bytes, report) = encode_with(WIDTH, HEIGHT, config, &frames).unwrap();
-    assert!(
-        matches!(report.palette, PaletteKind::ExactFromPrefix { .. }),
-        "上限が効いていない: {:?}",
-        report.palette
-    );
-    assert_eq!(
-        compose(&decode_with_gif(&bytes)),
-        compose(&decode_with_gif(&whole)),
-        "溜めきった出力と合成結果が違う"
-    );
-}
-
-/// 上限に達した経路では、先頭区間から据えたことがレポートに出る
-#[test]
-fn a_table_settled_from_a_prefix_is_reported() {
-    const WIDTH: u32 = 8;
-    const HEIGHT: u32 = 4;
-    let frames = moving_sprite(WIDTH, HEIGHT, 5);
-
-    let config = Config {
-        max_spool_bytes: 0,
-        ..Config::default()
-    };
-    let (_, report) = encode_with(WIDTH, HEIGHT, config, &frames).unwrap();
-    assert_eq!(report.palette, PaletteKind::ExactFromPrefix { colors: 2 });
-
-    // 先頭フレームだけを溜めたぶんが山になる
-    let region = (WIDTH * HEIGHT) as usize * 3;
-    assert!(report.peak_spool_bytes >= region);
-    assert!(report.peak_spool_bytes < region * 2);
-}
-
-/// 溜めきれず先頭区間だけから量子化したことがレポートに出る
-#[test]
-fn a_table_quantized_from_a_prefix_is_reported() {
-    const WIDTH: u32 = 64;
-    const HEIGHT: u32 = 8;
-
-    let frames = quantized_frames(WIDTH, HEIGHT, 3);
-    let config = Config {
-        max_spool_bytes: 0,
-        ..Config::default()
-    };
-    let (_, report) = encode_with(WIDTH, HEIGHT, config, &frames).unwrap();
-
-    assert!(
-        matches!(report.palette, PaletteKind::QuantizedFromPrefix { .. }),
-        "{:?}",
-        report.palette
-    );
-}
-
-/// 透過だけの先頭区間から据えたテーブルは、不透明な画素1つで据え直す
+/// 透過を持たない素材はキャンバスを残したまま流れる
 ///
-/// 和集合が透過標識だけだと写す先の候補が1つも残らず、埋め草の黒しか無い。
-/// そこへ落ちる画素は「もっと良く表せる」のではなく「表す手立てが無い」ので、
-/// 誤差が許容の中でも据え直す。
-///
-/// 後から現れる色は黒のすぐ隣に置く。誤差だけが据え直しを決めているなら、
-/// この色は許容の中に収まって黒のまま残る。
+/// 候補 2 と 3 が立つのは「不透明 → 透過」の遷移を含むフレームだけで、
+/// 不透明な素材の出力は候補が増えても変わらない。
 #[test]
-fn an_opaque_pixel_after_a_fully_transparent_prefix_forces_a_rebuild() {
-    const WIDTH: u32 = 4;
-    const HEIGHT: u32 = 2;
-    let color = ColorType::Rgba8;
+fn an_opaque_animation_keeps_every_frame() {
+    const WIDTH: u32 = 8;
+    const HEIGHT: u32 = 4;
+    let frames = moving_sprite(WIDTH, HEIGHT, 6);
 
-    let first = solid(WIDTH, HEIGHT, color, &[0, 0, 0, 0]);
+    let (bytes, _) = round_trip(WIDTH, HEIGHT, ColorType::Rgb8, &frames);
+    assert!(
+        disposals(&bytes)
+            .iter()
+            .all(|&disposal| disposal == gif::DisposalMethod::Keep),
+        "不透明な素材でキャンバスを抜いている"
+    );
+}
+
+/// 上限を超える色を持つフレームで、その場の窓から量子化へ移る
+///
+/// 先頭フレームが1枚で上限を超えるので、割り当て済みの色は無いまま閉じる。
+/// 以降の色は最近傍へ写る。
+#[test]
+fn a_frame_that_overflows_the_table_moves_to_quantization() {
+    const WIDTH: u32 = 32;
+    const HEIGHT: u32 = 9;
+
+    let first: Vec<u8> = (0..WIDTH * HEIGHT).flat_map(distinct_bin).collect();
     let mut second = first.clone();
-    set_pixel(&mut second, WIDTH, color, 1, 1, &[0x01, 0x00, 0x00, 0xFF]);
-
-    let config = Config {
-        color_type: color,
-        max_spool_bytes: 0,
-        ..Config::default()
-    };
-    let (bytes, report) = encode_with(WIDTH, HEIGHT, config, &[first, second]).unwrap();
-    assert_eq!(report.palette, PaletteKind::ExactFromPrefix { colors: 1 });
-    assert!(report.black_fallback, "写す先の黒を足したことが出ていない");
-    assert_eq!(report.rebuilds, 1, "写す先が無いのに据え直していない");
-    assert_eq!(
-        report.substituted_pixels, 0,
-        "据え直した後も埋め草へ写している"
+    set_pixel(
+        &mut second,
+        WIDTH,
+        ColorType::Rgba8,
+        1,
+        1,
+        &[0xFC, 0xFC, 0, 0xFF],
     );
 
+    let (_, report) = round_trip_within(WIDTH, HEIGHT, ColorType::Rgba8, &[first, second], 4);
+    assert_eq!(report.palette, PaletteKind::Quantized { colors: 255 });
+    assert!(
+        report.approximated_pixels > 0,
+        "上限を超えた色が最近傍へ写っていない"
+    );
+}
+
+/// 色で埋まったテーブルに257色目が現れたら、その色は最近傍へ写る
+///
+/// 先頭フレームが上限ちょうどの色を埋めるので、量子化の空きは残らない。
+/// 割り当て済みの色は動かないまま、載らなかった色だけが寄る。
+#[test]
+fn a_257th_color_is_mapped_to_its_nearest() {
+    const WIDTH: u32 = 16;
+    const HEIGHT: u32 = 16;
+    let color = ColorType::Rgb8;
+
+    let first: Vec<u8> = (0..WIDTH * HEIGHT)
+        .flat_map(|i| [i as u8, 0x40, 0x80])
+        .collect();
+    let mut second = first.clone();
+    set_pixel(&mut second, WIDTH, color, 3, 2, &[0x00, 0x41, 0x80]);
+
+    let (bytes, report) = encode(WIDTH, HEIGHT, color, &[first, second], 0).unwrap();
+    assert_eq!(report.palette, PaletteKind::Quantized { colors: 256 });
+    assert_eq!(report.approximated_pixels, 1);
+
+    // 赤だけが候補ごとに違い、ビンの中心 (実値1.5) に最も近いのは実値1の色
     let decoded = decode_with_gif(&bytes);
     let screen = &compose(&decoded)[1];
-    let at = ((WIDTH + 1) * 4) as usize;
-    assert_eq!(
-        screen[at..at + 4],
-        [0x01, 0x00, 0x00, 0xFF],
-        "素材の色が残っていない"
-    );
+    let at = ((2 * WIDTH + 3) * 4) as usize;
+    assert_eq!(screen[at..at + 4], [0x01, 0x40, 0x80, 0xFF]);
 }
 
-/// 写す先が無い画素は、据え直しの画素数の下限を見ない
+/// 全画素透過の先頭フレームの後に現れた不透明な色も、そのまま載る
 ///
-/// 下限は論理画面に占める割合で決まる。100x100 の画面に一辺10の矩形は
-/// 1% で、近似なら据え直さない広さしか無い。写す先が無い画素をこの下限で
-/// 測ると、小さく描かれた物の色だけが黒へ落ちる。
+/// 透過標識は添字を占めないので、テーブルはまだどの色も割り当てていない。
+/// 後から現れた色は見つけた順に添字を得る。
 #[test]
-fn a_small_opaque_square_after_a_transparent_prefix_keeps_its_color() {
+fn an_opaque_pixel_after_a_fully_transparent_frame_keeps_its_color() {
     const WIDTH: u32 = 100;
     const HEIGHT: u32 = 100;
     const SIDE: u32 = 10;
@@ -1448,11 +1274,12 @@ fn a_small_opaque_square_after_a_transparent_prefix_keeps_its_color() {
 
     let config = Config {
         color_type: color,
-        max_spool_bytes: 0,
         ..Config::default()
     };
-    let (bytes, report) = encode_with(WIDTH, HEIGHT, config, &[first, second]).unwrap();
-    assert_eq!(report.rebuilds, 1, "下限が写す先の無さを捨てている");
+    let (bytes, report) = round_trip_config(WIDTH, HEIGHT, config, &[first, second], 0);
+    assert_eq!(report.palette, PaletteKind::Exact { colors: 1 });
+    assert_eq!(report.rebuilds, 0, "可逆のままテーブルを据え直している");
+    assert_eq!(report.substituted_pixels, 0);
 
     let decoded = decode_with_gif(&bytes);
     let screen = &compose(&decoded)[1];
@@ -1460,73 +1287,12 @@ fn a_small_opaque_square_after_a_transparent_prefix_keeps_its_color() {
     assert_eq!(screen[at..at + 4], square, "素材の色が残っていない");
 }
 
-/// 先頭区間から据えたテーブルに無い色が後から現れたら、最近傍へ写す
+/// 全画素不透明の先頭フレームの後に透過画素が現れても、廃棄方法で表現する
 ///
-/// 後から現れる色は据えた色のすぐ隣に置く。誤差が大きいとテーブルを据え直す
-/// 経路へ逸れ、最近傍へ写らずに済んでしまう。
+/// テーブルは透過添字を持つため、標識を書く先はある。先頭フレームの矩形は
+/// 論理画面全体なので、それを抜けば遷移が表現できる。
 #[test]
-fn a_color_appearing_after_the_settlement_is_mapped_to_its_nearest() {
-    const WIDTH: u32 = 8;
-    const HEIGHT: u32 = 4;
-    let color = ColorType::Rgb8;
-
-    let first = solid(WIDTH, HEIGHT, color, &[0x30, 0x50, 0x70]);
-    let mut second = first.clone();
-    set_pixel(&mut second, WIDTH, color, 2, 1, &[0x31, 0x50, 0x70]);
-
-    let config = Config {
-        max_spool_bytes: 0,
-        ..Config::default()
-    };
-    let (bytes, report) = encode_with(WIDTH, HEIGHT, config, &[first, second]).unwrap();
-    assert_eq!(report.palette, PaletteKind::ExactFromPrefix { colors: 1 });
-    assert_eq!(report.approximated_pixels, 1);
-    assert_eq!(report.rebuilds, 0, "テーブルを据え直している");
-
-    // 据えたテーブルの非透過色は1つしかなく、後から現れた色もそこへ写る
-    let decoded = decode_with_gif(&bytes);
-    let solid_screen = solid(WIDTH, HEIGHT, ColorType::Rgba8, &[0x30, 0x50, 0x70, 0xFF]);
-    for (index, screen) in compose(&decoded).iter().enumerate() {
-        assert_eq!(screen, &solid_screen, "{index} 番目の合成結果が違う");
-    }
-}
-
-/// 先頭区間が上限いっぱいの色で、257色目が後から現れたら最近傍へ写す
-///
-/// 溜めた区間の和集合が上限を埋めていると透過スロットが取れず、矩形の中の
-/// 未変更画素も添字を引く。潰されない画素で載っていない色に当たる経路になる。
-#[test]
-fn a_257th_color_after_a_full_prefix_is_mapped_to_its_nearest() {
-    const WIDTH: u32 = 16;
-    const HEIGHT: u32 = 16;
-    let color = ColorType::Rgb8;
-
-    let first: Vec<u8> = (0..WIDTH * HEIGHT)
-        .flat_map(|i| [i as u8, 0x40, 0x80])
-        .collect();
-    let mut second = first.clone();
-    set_pixel(&mut second, WIDTH, color, 3, 2, &[0x00, 0x41, 0x80]);
-
-    let config = Config {
-        max_spool_bytes: 0,
-        ..Config::default()
-    };
-    let (bytes, report) = encode_with(WIDTH, HEIGHT, config, &[first, second]).unwrap();
-    assert_eq!(report.palette, PaletteKind::ExactFromPrefix { colors: 256 });
-
-    // 赤だけが候補ごとに違い、ビンの中心 (実値1.5) に最も近いのは実値1の色
-    let decoded = decode_with_gif(&bytes);
-    let screen = &compose(&decoded)[1];
-    let at = ((2 * WIDTH + 3) * 4) as usize;
-    assert_eq!(screen[at..at + 4], [0x01, 0x40, 0x80, 0xFF]);
-}
-
-/// 全画素不透明の先頭区間の後に透過画素が現れても、廃棄方法で表現する
-///
-/// テーブルには透過ラン用のスロットが載っているため、標識を書く先はある。
-/// 先頭フレームの矩形は論理画面全体なので、それを抜けば遷移が表現できる。
-#[test]
-fn a_transparent_pixel_after_an_opaque_prefix_clears_the_screen() {
+fn a_transparent_pixel_after_an_opaque_frame_clears_the_screen() {
     const WIDTH: u32 = 4;
     const HEIGHT: u32 = 2;
     let color = ColorType::Rgba8;
@@ -1537,47 +1303,165 @@ fn a_transparent_pixel_after_an_opaque_prefix_clears_the_screen() {
 
     let config = Config {
         color_type: color,
-        max_spool_bytes: 0,
         ..Config::default()
     };
     let (bytes, report) = round_trip_config(WIDTH, HEIGHT, config, &[first, second], 0);
-    assert_eq!(report.palette, PaletteKind::ExactFromPrefix { colors: 1 });
+    assert_eq!(report.palette, PaletteKind::Exact { colors: 1 });
     assert_eq!(
         disposals(&bytes),
         [gif::DisposalMethod::Background, gif::DisposalMethod::Keep]
     );
 }
 
-/// 溜めた区間の最後のフレームは、続きを見るまで書き出さない
+/// 色で埋まったテーブルに透過画素が現れたら、据え直して透過添字を取り直す
 ///
-/// 上限で決着した直後のフレームが「不透明 → 透過」の遷移を持つとき、その判定は
-/// 保留したままの最後のフレームに対して行われる。区間の中で書き出してしまうと
-/// 遷移を判定する相手が無くなり、廃棄方法を選べない。
+/// 不透明な色が上限を埋めると、まだ色の割り当たっていない添字が無くなる。
+/// そこへ透過画素が現れると、いま据えているテーブルではその位置を表現できない。
 #[test]
-fn the_last_spooled_frame_is_carried_into_streaming() {
-    const WIDTH: u32 = 4;
-    const HEIGHT: u32 = 2;
+fn a_transparent_pixel_after_a_full_opaque_table_forces_a_rebuild() {
+    const WIDTH: u32 = 16;
+    const HEIGHT: u32 = 16;
     let color = ColorType::Rgba8;
 
-    // 標識を先頭フレームへ入れて、先頭区間の和集合が2枚目の色を覆うようにする
-    let mut first = solid(WIDTH, HEIGHT, color, &[0x20, 0x40, 0x60, 0xFF]);
-    set_pixel(&mut first, WIDTH, color, 0, 0, &[0, 0, 0, 0]);
-    let mut second = first.clone();
-    set_pixel(&mut second, WIDTH, color, 1, 1, &[0, 0, 0, 0]);
+    let first: Vec<u8> = (0..WIDTH * HEIGHT)
+        .flat_map(|i| [i as u8, 0x40, 0x80, 0xFF])
+        .collect();
+    let mut third = first.clone();
+    set_pixel(&mut third, WIDTH, color, 3, 2, &[0, 0, 0, 0]);
+    let frames = vec![first.clone(), first, third];
 
     let config = Config {
         color_type: color,
-        max_spool_bytes: 0,
         ..Config::default()
     };
-    let (bytes, _) = round_trip_config(WIDTH, HEIGHT, config, &[first, second], 0);
+    // 据え直したテーブルは透過添字のぶん1色を手放し、その色の画素が最近傍へ寄る
+    let (bytes, report) = round_trip_config(WIDTH, HEIGHT, config, &frames, 4);
+    assert_eq!(report.palette, PaletteKind::Quantized { colors: 256 });
+    assert_eq!(report.rebuilds, 1, "透過添字を取り直していない");
+    assert!(report.local_tables > 0, "据え直した色表を書いていない");
+
+    let decoded = decode_with_gif(&bytes);
     assert_eq!(
-        disposals(&bytes),
-        [gif::DisposalMethod::Background, gif::DisposalMethod::Keep],
-        "溜めた区間の最後のフレームが廃棄方法を選べていない"
+        decoded.frames[0].transparent, None,
+        "色で埋まったテーブルが透過添字を持っている"
+    );
+    assert!(
+        decoded.frames[2].transparent.is_some(),
+        "据え直したテーブルに透過添字が無い"
     );
 }
 
+/// 溢れる前に書いたフレームの色は、書き戻したテーブルでも変わらない
+///
+/// 割り当て済みの色は添字ごとそのまま残るため、後から書き戻すテーブルの前半は
+/// 既に書いたフレームが指しているものと一致する。並べ替えると、書き終えた
+/// フレームの画面が変わる。
+#[test]
+fn the_frames_written_before_the_overflow_keep_their_colors() {
+    const WIDTH: u32 = 32;
+    const HEIGHT: u32 = 24;
+    const OVERFLOW_AT: usize = 9;
+    const FRAMES: usize = 14;
+    let color = ColorType::Rgb8;
+
+    let background = [0x10u8, 0x20, 0x30];
+    let dot = [0xF0u8, 0xF0, 0xF0];
+    let frames: Vec<Vec<u8>> = (0..FRAMES)
+        .map(|index| {
+            let mut frame = solid(WIDTH, HEIGHT, color, &background);
+            set_pixel(&mut frame, WIDTH, color, index as u32 % WIDTH, 0, &dot);
+            if index >= OVERFLOW_AT {
+                // 上限を超える色を一度に置き、この位置でテーブルを閉じさせる
+                for i in 0..300u32 {
+                    let pixel = [(i % 64 * 4) as u8, (i / 64 * 4) as u8, 0x80];
+                    set_pixel(&mut frame, WIDTH, color, i % WIDTH, 8 + i / WIDTH, &pixel);
+                }
+            }
+            frame
+        })
+        .collect();
+
+    let (bytes, report) = encode(WIDTH, HEIGHT, color, &frames, 0).unwrap();
+    assert!(
+        matches!(report.palette, PaletteKind::Quantized { .. }),
+        "溢れていない: {:?}",
+        report.palette
+    );
+
+    let expected: Vec<Vec<u8>> = frames
+        .iter()
+        .map(|data| expected_rgba(data, color))
+        .collect();
+    let screens = compose(&decode_with_gif(&bytes));
+    for index in 0..OVERFLOW_AT {
+        assert_eq!(
+            screens[index], expected[index],
+            "`gif` クレートの {index} 番目が書き戻しで変わった"
+        );
+    }
+
+    if let Some(raw) = decode_with_ffmpeg(&bytes) {
+        let frame_len = (WIDTH * HEIGHT) as usize * 4;
+        for (index, actual) in raw.chunks_exact(frame_len).take(OVERFLOW_AT).enumerate() {
+            assert_eq!(
+                actual, expected[index],
+                "ffmpeg の {index} 番目が書き戻しで変わった"
+            );
+        }
+    }
+}
+
+/// 不透明な256色ちょうどの素材は可逆で、色が揃うまでは透過ランも使える
+///
+/// 透過添字はまだ色の割り当たっていない最小の添字なので、色が上限を埋めるまでの
+/// フレームは未変更画素を潰せる。
+#[test]
+fn a_material_with_exactly_256_opaque_colors_stays_lossless() {
+    const WIDTH: u32 = 16;
+    const HEIGHT: u32 = 16;
+    const FILLS_AT: usize = 3;
+    const FRAMES: usize = 6;
+    let color = ColorType::Rgb8;
+
+    // 253色を敷き、動く2色と合わせて255色。最後の1色は途中のフレームで現れる
+    let base: Vec<u8> = (0..WIDTH * HEIGHT)
+        .flat_map(|i| [(i % 253) as u8, 0x40, 0x80])
+        .collect();
+    let dots = [[9u8, 9, 9], [10, 10, 10]];
+    let frames: Vec<Vec<u8>> = (0..FRAMES)
+        .map(|index| {
+            let mut frame = base.clone();
+            // 最終行の両端を入れ替えると、その間の未変更画素が矩形の中に入る
+            let turn = index % 2;
+            set_pixel(&mut frame, WIDTH, color, 13, 15, &dots[turn]);
+            set_pixel(&mut frame, WIDTH, color, 15, 15, &dots[1 - turn]);
+            if index >= FILLS_AT {
+                set_pixel(&mut frame, WIDTH, color, 0, 0, &[0xFF, 0x40, 0x80]);
+            }
+            frame
+        })
+        .collect();
+
+    let (bytes, report) = round_trip(WIDTH, HEIGHT, color, &frames);
+    assert_eq!(report.palette, PaletteKind::Exact { colors: 256 });
+    assert_eq!(report.approximated_pixels, 0, "可逆で書けていない");
+
+    let decoded = decode_with_gif(&bytes);
+    let frame = &decoded.frames[1];
+    assert!(
+        frame.transparent.is_some(),
+        "色が揃う前のフレームが透過添字を持っていない"
+    );
+    assert!(
+        frame.rgba.chunks_exact(4).any(|pixel| pixel[3] == 0),
+        "未変更画素を透過ランへ潰していない"
+    );
+    assert_eq!(
+        decoded.frames[FRAMES - 1].transparent,
+        None,
+        "色で埋まったテーブルが透過添字を持っている"
+    );
+}
 /// 設定した再生回数がループ数の欄へ落ちる
 #[test]
 fn the_number_of_plays_reaches_the_decoder() {
@@ -2033,6 +1917,52 @@ impl Seek for FailingWriter {
     }
 }
 
+/// ヘッダ・論理画面記述子・確保したグローバルカラーテーブルのバイト数
+const HEAD_BYTES: usize = 13 + 768;
+
+/// 場所を確保する書き出しに失敗したら、エンコーダを作れない
+///
+/// [`Encoder::new`] がヘッダと確保したカラーテーブルを書くため、書き出し先の
+/// 失敗はここで出る。
+#[test]
+fn a_writer_that_cannot_take_the_head_is_rejected() {
+    let (writer, _) = FailingWriter::new(4);
+    assert!(matches!(
+        Encoder::new(writer, 8, 8, 1, Config::default()),
+        Err(Error::Io(_))
+    ));
+}
+
+/// 書き戻す前に落ちたファイルには、確保しただけのカラーテーブルが残る
+///
+/// 黒で埋めると、色の決まっていないファイルが真っ黒なアニメーションとして
+/// 黙って読めてしまう。
+#[test]
+fn a_table_that_was_never_written_back_stays_visible() {
+    const FRAMES: u32 = 16;
+    const MAGENTA: [u8; 3] = [0xFF, 0x00, 0xFF];
+
+    let frames: Vec<Vec<u8>> = (0..FRAMES).map(|seed| noise(8 * 8 * 3, seed)).collect();
+    // ループ回数まで書いたところで尽き、フレームを1枚も書けない長さ
+    let (writer, written) = FailingWriter::new(HEAD_BYTES + 19);
+    let mut encoder = Encoder::new(writer, 8, 8, FRAMES, Config::default()).unwrap();
+
+    let failure = frames
+        .iter()
+        .enumerate()
+        .find_map(|(index, frame)| encoder.add_frame(frame, delay_of(index)).err());
+    assert!(matches!(failure, Some(Error::Io(_))), "{failure:?}");
+
+    let bytes = written.borrow();
+    assert_eq!(bytes.len(), HEAD_BYTES + 19, "確保した先まで書けている");
+    assert!(
+        bytes[13..HEAD_BYTES]
+            .chunks_exact(3)
+            .all(|entry| entry == MAGENTA),
+        "確保しただけのエントリが黙って読める色になっている"
+    );
+}
+
 /// 途中で切れたブロックの列に書き足すと読めないGIFになるため、失敗後は受け付けない
 ///
 /// 書き出しは先読みリングが埋まるまで始まらないので、失敗するのは投入の途中に
@@ -2041,13 +1971,9 @@ impl Seek for FailingWriter {
 fn a_failed_write_poisons_the_encoder() {
     const FRAMES: u32 = 16;
     let frames: Vec<Vec<u8>> = (0..FRAMES).map(|seed| noise(8 * 8 * 3, seed)).collect();
-    let config = Config {
-        max_spool_bytes: 0,
-        ..Config::default()
-    };
-    // ヘッダは通り、論理画面記述子かカラーテーブルで尽きる長さ
-    let (writer, _) = FailingWriter::new(8);
-    let mut encoder = Encoder::new(writer, 8, 8, FRAMES, config).unwrap();
+    // 確保したカラーテーブルまでは通り、フレームの書き出しで尽きる長さ
+    let (writer, _) = FailingWriter::new(HEAD_BYTES + 19);
+    let mut encoder = Encoder::new(writer, 8, 8, FRAMES, Config::default()).unwrap();
 
     let failure = frames
         .iter()
@@ -2073,11 +1999,7 @@ fn a_write_that_fails_after_a_frame_leaves_the_stream_unterminated() {
     const TRAILER: u8 = 0x3B;
 
     let frames: Vec<Vec<u8>> = (0..FRAMES).map(|seed| noise(8 * 8 * 3, seed)).collect();
-    // 溜める余地を無くし、先読みリングが埋まった後の投入から書き出させる
-    let config = Config {
-        max_spool_bytes: 0,
-        ..Config::default()
-    };
+    let config = Config::default();
 
     // 終端まで書けたときの出力と、1枚目を書き終えた時点のバイト数を測る
     let (writer, complete) = FailingWriter::new(usize::MAX);
@@ -2117,11 +2039,18 @@ fn a_write_that_fails_after_a_frame_leaves_the_stream_unterminated() {
     ));
     assert!(matches!(encoder.finish(), Err(Error::Poisoned)));
 
+    // グローバルカラーテーブルは色が決まった時点で書き戻されるので、
+    // 中断した出力に残るのは確保しただけのバイト列になる
     let written = interrupted.borrow();
     assert_eq!(
-        written.as_slice(),
-        &full[..first_frame_bytes],
-        "書けたバイト列が終端まで書けた出力の接頭辞でない"
+        &written[..13],
+        &full[..13],
+        "書けたバイト列がヘッダで食い違う"
+    );
+    assert_eq!(
+        &written[HEAD_BYTES..],
+        &full[HEAD_BYTES..first_frame_bytes],
+        "書けたバイト列が、テーブルより後ろで終端まで書けた出力と食い違う"
     );
     assert_eq!(
         full.last(),
@@ -2135,61 +2064,41 @@ fn a_write_that_fails_after_a_frame_leaves_the_stream_unterminated() {
     );
 }
 
-/// 先頭の書き出し位置で据え直したら、その結果がグローバルカラーテーブルになる
-///
-/// まだ1フレームも符号化していないので、据え直したテーブルを据える先は
-/// グローバルの1枚しかない。決着したままのテーブルを書くと、そのテーブルは
-/// 1フレームも使われずに終わり、以降のフレームは色表を運び続ける。
-#[test]
-fn a_rebuild_at_the_first_written_frame_becomes_the_global_table() {
-    const WIDTH: u32 = 64;
-    const HEIGHT: u32 = 64;
-
-    // 量子化の誤差が先頭フレームで下限を超え、その位置で据え直す。以降の
-    // フレームは変わらないので、据え直しはこの1回で終わる
-    let frame = noise((WIDTH * HEIGHT * 3) as usize, 11);
-    let frames = vec![frame; 10];
-
-    let config = Config {
-        max_spool_bytes: 0,
-        ..Config::default()
-    };
-    let (bytes, report) = encode_with(WIDTH, HEIGHT, config, &frames).unwrap();
-    assert!(
-        matches!(report.palette, PaletteKind::QuantizedFromPrefix { .. }),
-        "{:?}",
-        report.palette
-    );
-    assert_eq!(report.rebuilds, 1, "先頭の書き出し位置で据え直していない");
-    assert_eq!(
-        report.local_tables, 0,
-        "据え直した結果をグローバルへ据えていない"
-    );
-
-    // 先頭フレームが描く色は、すべてグローバルカラーテーブルに載っている
-    let decoded = decode_with_gif(&bytes);
-    let screen = compose(&decoded)[0].clone();
-    let palette = decoded.palette.expect("グローバルカラーテーブルが無い");
-    for pixel in screen.chunks_exact(4) {
-        assert!(
-            palette.chunks_exact(3).any(|entry| entry == &pixel[..3]),
-            "グローバルに無い色を先頭フレームが描いている: {pixel:?}"
-        );
-    }
-}
-
 /// カラーテーブルの据え直しを見る素材の寸法
 const SCENE_WIDTH: u32 = 64;
 const SCENE_HEIGHT: u32 = 64;
 
-/// 先頭フレームだけを見てカラーテーブルを据える設定
+/// テーブルを閉じさせる帯の色数
+const CROWD_COLORS: u32 = 300;
+
+/// 帯を描く先頭行
+const CROWD_ROW: u32 = 56;
+
+/// 帯が現れてテーブルが閉じるフレーム
+const SETTLES_AT: usize = 9;
+
+/// 色が入れ替わってテーブルを据え直すフレーム
 ///
-/// 溜める余地を無くすと、以降のフレームに現れる色は据えたテーブルに載っていない。
-/// 場面転換をテーブルの外側へ置けるので、据え直しの経路を名指しで踏める。
-fn settle_on_the_first_frame() -> Config {
-    Config {
-        max_spool_bytes: 0,
-        ..Config::default()
+/// 閉じた時点の先読みの窓 ([`SETTLES_AT`] から8フレーム) の外に置く。窓の中に
+/// 入れると、閉じたテーブルが入れ替わった後の色まで覆ってしまう。
+const REBUILDS_AT: usize = SETTLES_AT + 8;
+
+/// 上限を超える色の帯を `frame` へ描く
+///
+/// 1フレームでこれだけの色が現れると、その位置でテーブルが閉じて量子化へ移る。
+/// `blue` を変えた帯は閉じたテーブルの色から遠いので、据え直しへ踏み切らせる。
+fn crowd(frame: &mut [u8], color_type: ColorType, blue: u8) {
+    let bpp = color_type.bytes_per_pixel();
+    for i in 0..CROWD_COLORS {
+        let pixel = [(i % 64 * 4) as u8, (i / 64 * 4) as u8, blue, 0xFF];
+        set_pixel(
+            frame,
+            SCENE_WIDTH,
+            color_type,
+            i % SCENE_WIDTH,
+            CROWD_ROW + i / SCENE_WIDTH,
+            &pixel[..bpp],
+        );
     }
 }
 
@@ -2204,47 +2113,39 @@ const MARKER: [u8; 3] = [0xFF, 0x00, 0xFF];
 /// 目印が占める行数
 const MARKER_ROWS: u32 = 2;
 
-/// 上端に目印の帯を置き、残りを `background` で埋めたフレーム
-fn marked_frame(background: impl Fn(usize) -> [u8; 3]) -> Vec<u8> {
-    let mut frame = Vec::with_capacity((SCENE_WIDTH * SCENE_HEIGHT) as usize * 3);
-    for y in 0..SCENE_HEIGHT {
-        for x in 0..SCENE_WIDTH {
-            let pixel = if y < MARKER_ROWS {
-                MARKER
-            } else {
-                background((y * SCENE_WIDTH + x) as usize)
-            };
-            frame.extend_from_slice(&pixel);
-        }
-    }
-    frame
-}
-
 /// 入力が変わらない画素の画面上の色は、テーブルを据え直しても変わらない
 ///
-/// 目印の帯は先頭フレームで据えたテーブルにそのまま載り、以降どのフレームでも
-/// 入力が変わらない。背景は据え直しの空きを埋め尽くすので目印の色はテーブルから
-/// 落ちるが、持ち越した画素を写し直さない限り画面には残り続ける。
+/// 目印の帯は先頭フレームで割り当てた色をそのまま持ち、以降どのフレームでも
+/// 入力が変わらない。据え直しの窓は目印を見ないのでその色はテーブルから落ちるが、
+/// 持ち越した画素を写し直さない限り画面には残り続ける。
 #[test]
 fn a_pixel_that_never_changes_keeps_its_color_across_a_rebuild() {
-    const FRAMES: usize = 12;
+    const FRAMES: usize = REBUILDS_AT + 4;
+    let color = ColorType::Rgb8;
 
-    // 6-6-6 のビンを512個埋める背景。据え直しの空きをすべて奪う
-    let scene = |index: usize| [(index % 32 * 8) as u8, (index / 32 % 16 * 8) as u8, 0];
-    let mut frames = vec![marked_frame(|_| [4, 4, 4])];
-    frames.resize_with(FRAMES, || marked_frame(scene));
+    let frames: Vec<Vec<u8>> = (0..FRAMES)
+        .map(|index| {
+            let mut frame = solid(SCENE_WIDTH, SCENE_HEIGHT, color, &[0x04, 0x04, 0x04]);
+            for y in 0..MARKER_ROWS {
+                for x in 0..SCENE_WIDTH {
+                    set_pixel(&mut frame, SCENE_WIDTH, color, x, y, &MARKER);
+                }
+            }
+            if index >= SETTLES_AT {
+                crowd(&mut frame, color, 0x40);
+            }
+            if index >= REBUILDS_AT {
+                crowd(&mut frame, color, 0xC0);
+            }
+            frame
+        })
+        .collect();
 
-    let (bytes, report) = round_trip_config(
-        SCENE_WIDTH,
-        SCENE_HEIGHT,
-        settle_on_the_first_frame(),
-        &frames,
-        8,
-    );
+    let (bytes, report) = encode(SCENE_WIDTH, SCENE_HEIGHT, color, &frames, 0).unwrap();
     assert_eq!(report.rebuilds, 1, "テーブルを据え直していない");
     assert_eq!(
         report.local_tables,
-        FRAMES as u32 - 1,
+        (FRAMES - REBUILDS_AT) as u32,
         "据え直した後のフレームが色表を持っていない"
     );
 
@@ -2265,35 +2166,41 @@ const BLINK_AT: (u32, u32) = (0, 0);
 
 /// 場面転換を跨いで瞬く画素を持つ素材
 ///
-/// 先頭区間の背景は据えるテーブルの空きを残す色数で、場面転換で現れる色は
-/// ほんの数色しかない。据え直しても空きが足りるので、直近の出力で使った
-/// エントリはすべて維持される。
-fn blinking_scene(frames: usize, change_at: usize, blink_back_at: usize) -> Vec<Vec<u8>> {
+/// 瞬く色は先頭区間で割り当てるので、閉じたテーブルにそのまま載っている。
+/// 動く点が毎フレームその色を書くため、据え直しの時点では直近の出力に現れている。
+fn blinking_scene(frames: usize, blink_back_at: usize) -> Vec<Vec<u8>> {
     /// 瞬く画素が戻ってくる色
     const BLINK: [u8; 3] = [0xFF, 0x00, 0xFF];
     /// 場面転換の後に瞬く画素が持つ色
     const BLINKED: [u8; 3] = [0xFF, 0xFF, 0x00];
-    /// 場面転換の後の背景の色
+    /// 場面転換で画面を覆う色
     const AFTER: [[u8; 3]; 4] = [
-        [0xFF, 0xFF, 0xFF],
-        [0xF0, 0x00, 0x00],
-        [0x00, 0xF0, 0x00],
-        [0x00, 0x00, 0xF0],
+        [0x00, 0xFF, 0x00],
+        [0x00, 0xF0, 0x10],
+        [0x10, 0xFF, 0x00],
+        [0x10, 0xF0, 0x10],
     ];
+    let color = ColorType::Rgb8;
 
     (0..frames)
         .map(|index| {
-            let changed = index >= change_at;
+            let changed = index >= REBUILDS_AT;
             let mut frame = Vec::with_capacity((SCENE_WIDTH * SCENE_HEIGHT) as usize * 3);
             for at in 0..(SCENE_WIDTH * SCENE_HEIGHT) as usize {
-                // 先頭区間の背景は 6-6-6 のビンが200個ぶんの暗い色
                 let pixel = if changed {
                     AFTER[at % AFTER.len()]
                 } else {
-                    [(at % 200 * 4) as u8 / 4 * 4, 0x10, 0x20]
+                    [0x20, 0x10, 0x20]
                 };
                 frame.extend_from_slice(&pixel);
             }
+            if index >= SETTLES_AT && !changed {
+                crowd(&mut frame, color, 0x40);
+            }
+
+            // 毎フレーム動く点が、瞬く色を直近の出力に残す
+            let dot = index as u32 % SCENE_WIDTH;
+            set_pixel(&mut frame, SCENE_WIDTH, color, dot, 4, &BLINK);
             let blink = if changed && index < blink_back_at {
                 BLINKED
             } else {
@@ -2302,7 +2209,7 @@ fn blinking_scene(frames: usize, change_at: usize, blink_back_at: usize) -> Vec<
             set_pixel(
                 &mut frame,
                 SCENE_WIDTH,
-                ColorType::Rgb8,
+                color,
                 BLINK_AT.0,
                 BLINK_AT.1,
                 &blink,
@@ -2315,28 +2222,15 @@ fn blinking_scene(frames: usize, change_at: usize, blink_back_at: usize) -> Vec<
 /// 瞬き (A→B→A) で戻った色は、場面転換で据え直したテーブルにも残る
 ///
 /// 戻ってくるフレームは据え直したときの先読みの窓より後ろにあるので、残差から
-/// この色は得られない。維持したエントリだけがこの色を保てる。窓が
-/// `BLINK_BACK_AT - CHANGE_AT` フレームまで伸びると、残差からも得られるように
-/// なってこの性質を固定できなくなる。
+/// この色は得られない。維持したエントリだけがこの色を保てる。
 #[test]
 fn a_color_that_blinks_back_survives_a_rebuild() {
-    const FRAMES: usize = 14;
-    const CHANGE_AT: usize = 3;
-    const BLINK_BACK_AT: usize = 12;
+    const BLINK_BACK_AT: usize = REBUILDS_AT + 8;
+    const FRAMES: usize = BLINK_BACK_AT + 2;
 
-    let frames = blinking_scene(FRAMES, CHANGE_AT, BLINK_BACK_AT);
-    let (bytes, report) = round_trip_config(
-        SCENE_WIDTH,
-        SCENE_HEIGHT,
-        settle_on_the_first_frame(),
-        &frames,
-        0,
-    );
+    let frames = blinking_scene(FRAMES, BLINK_BACK_AT);
+    let (bytes, report) = encode(SCENE_WIDTH, SCENE_HEIGHT, ColorType::Rgb8, &frames, 0).unwrap();
     assert_eq!(report.rebuilds, 1, "テーブルを据え直していない");
-    assert_eq!(
-        report.approximated_pixels, 0,
-        "維持したエントリで足りるはずの色を最近傍へ写している"
-    );
 
     let screens = compose(&decode_with_gif(&bytes));
     assert_eq!(
@@ -2354,25 +2248,27 @@ fn a_color_that_blinks_back_survives_a_rebuild() {
 fn colors_spread_over_the_window(frames: usize, spread: &[[u8; 3]]) -> Vec<Vec<u8>> {
     /// 場面転換で全画面を覆う色
     const SCENE: [u8; 3] = [0xFF, 0x00, 0x00];
-    /// 後から足す色が占める辺の長さ
-    const BLOCK: u32 = 4;
+    let color = ColorType::Rgb8;
 
     (0..frames)
         .map(|index| {
-            let mut frame = if index == 0 {
-                solid(SCENE_WIDTH, SCENE_HEIGHT, ColorType::Rgb8, &[128, 128, 128])
+            let mut frame = if index < REBUILDS_AT {
+                solid(SCENE_WIDTH, SCENE_HEIGHT, color, &[0x80, 0x80, 0x80])
             } else {
-                solid(SCENE_WIDTH, SCENE_HEIGHT, ColorType::Rgb8, &SCENE)
+                solid(SCENE_WIDTH, SCENE_HEIGHT, color, &SCENE)
             };
+            if (SETTLES_AT..REBUILDS_AT).contains(&index) {
+                crowd(&mut frame, color, 0x40);
+            }
             // 足した色は消さずに積み上げる。1フレームで変わるのはブロック1つぶん
-            for (slot, color) in spread.iter().enumerate() {
-                if index < slot + 2 {
+            for (slot, color_of) in spread.iter().enumerate() {
+                if index < REBUILDS_AT + slot + 1 {
                     break;
                 }
-                for y in 0..BLOCK {
-                    for x in 0..BLOCK {
-                        let at = (slot as u32 * BLOCK + x, y);
-                        set_pixel(&mut frame, SCENE_WIDTH, ColorType::Rgb8, at.0, at.1, color);
+                for y in 0..SPREAD_BLOCK {
+                    for x in 0..SPREAD_BLOCK {
+                        let at = (slot as u32 * SPREAD_BLOCK + x, y);
+                        set_pixel(&mut frame, SCENE_WIDTH, color, at.0, at.1, color_of);
                     }
                 }
             }
@@ -2381,13 +2277,15 @@ fn colors_spread_over_the_window(frames: usize, spread: &[[u8; 3]]) -> Vec<Vec<u
         .collect()
 }
 
+/// 後から足す色が占める辺の長さ
+const SPREAD_BLOCK: u32 = 4;
+
 /// 残差は書き出し位置の1枚ではなく、先読みの窓全体から取る
 ///
 /// 窓の中の後続フレームが足す色までテーブルに載るので、そのフレームを写す時点で
 /// 完全一致が引ける。窓が書き出し位置の1枚だけなら、これらの色は最近傍へ落ちる。
 #[test]
 fn the_residual_reaches_the_whole_lookahead_window() {
-    const FRAMES: usize = 16;
     const SPREAD: [[u8; 3]; 6] = [
         [0x00, 0xFF, 0x00],
         [0x00, 0x00, 0xFF],
@@ -2396,20 +2294,21 @@ fn the_residual_reaches_the_whole_lookahead_window() {
         [0xFF, 0x00, 0xFF],
         [0xFF, 0xFF, 0xFF],
     ];
+    const FRAMES: usize = REBUILDS_AT + SPREAD.len() + 2;
 
     let frames = colors_spread_over_the_window(FRAMES, &SPREAD);
-    let (_, report) = round_trip_config(
-        SCENE_WIDTH,
-        SCENE_HEIGHT,
-        settle_on_the_first_frame(),
-        &frames,
-        0,
-    );
+    let (bytes, report) = encode(SCENE_WIDTH, SCENE_HEIGHT, ColorType::Rgb8, &frames, 0).unwrap();
     assert_eq!(report.rebuilds, 1, "テーブルを据え直していない");
-    assert_eq!(
-        report.approximated_pixels, 0,
-        "窓の中で現れる色がテーブルに載っていない"
-    );
+
+    let screens = compose(&decode_with_gif(&bytes));
+    for (slot, expected) in SPREAD.iter().enumerate() {
+        let at = slot as u32 * SPREAD_BLOCK;
+        assert_eq!(
+            pixel_at(&screens[REBUILDS_AT + slot + 1], at, 0),
+            [expected[0], expected[1], expected[2], u8::MAX],
+            "{slot} 番目に足した色がテーブルに載っていない"
+        );
+    }
 }
 
 /// 矩形を塗る
@@ -2424,7 +2323,7 @@ fn fill_block(frame: &mut [u8], at: (u32, u32), size: (u32, u32), pixel: &[u8]) 
 /// 保留中のフレームの矩形を広げる符号化と、テーブルの据え直しが重なる素材
 ///
 /// 保留中のフレームの外で不透明な物が消えるので矩形を広げることになり、同じ
-/// フレームで場面転換が起きてテーブルを据え直す。
+/// フレームで色が入れ替わってテーブルを据え直す。
 fn a_widened_rect_across_a_rebuild(frames: usize) -> Vec<Vec<u8>> {
     /// 消える物の色
     const OBJECT: [u8; 4] = [0x00, 0xFF, 0x00, 0xFF];
@@ -2435,28 +2334,19 @@ fn a_widened_rect_across_a_rebuild(frames: usize) -> Vec<Vec<u8>> {
     (0..frames)
         .map(|index| {
             let mut frame = transparent.clone();
-            // 塗る色を先頭フレームの和集合へ入れておく
+            // 塗る色を先頭フレームの色へ入れておく
             fill_block(&mut frame, (48, 8), (4, 4), &PAINT);
-            if index < 2 {
+            if index < REBUILDS_AT {
                 fill_block(&mut frame, (32, 32), (8, 8), &OBJECT);
             }
             if index >= 1 {
                 fill_block(&mut frame, (0, 0), (4, 4), &PAINT);
             }
-            if index >= 2 {
-                // 6-6-6 のビンを255個埋め、据え直しで維持をすべて解かせる
-                for slot in 0..255u32 {
-                    let color = [(slot % 16 * 16) as u8, (slot / 16 * 16) as u8, 0x40, 0xFF];
-                    let at = (slot % SCENE_WIDTH, 56 + slot / SCENE_WIDTH);
-                    set_pixel(
-                        &mut frame,
-                        SCENE_WIDTH,
-                        ColorType::Rgba8,
-                        at.0,
-                        at.1,
-                        &color,
-                    );
-                }
+            if index >= SETTLES_AT {
+                crowd(&mut frame, ColorType::Rgba8, 0x40);
+            }
+            if index >= REBUILDS_AT {
+                crowd(&mut frame, ColorType::Rgba8, 0xC0);
             }
             frame
         })
@@ -2469,18 +2359,18 @@ fn a_widened_rect_across_a_rebuild(frames: usize) -> Vec<Vec<u8>> {
 /// テーブルで符号化し直すと、その色が最近傍へずれて画面から消える。
 #[test]
 fn a_widened_rect_keeps_the_table_that_encoded_the_pending_frame() {
-    const FRAMES: usize = 8;
+    const FRAMES: usize = REBUILDS_AT + 4;
     const PAINT: [u8; 4] = [0xFF, 0x00, 0xFF, 0xFF];
 
     let frames = a_widened_rect_across_a_rebuild(FRAMES);
     let config = Config {
         color_type: ColorType::Rgba8,
-        ..settle_on_the_first_frame()
+        ..Config::default()
     };
     let (bytes, report) = encode_with(SCENE_WIDTH, SCENE_HEIGHT, config, &frames).unwrap();
     assert_eq!(report.rebuilds, 1, "テーブルを据え直していない");
 
-    let widened = rects(&bytes)[1];
+    let widened = rects(&bytes)[REBUILDS_AT - 1];
     assert!(
         widened.2 > 4 && widened.3 > 4,
         "保留中のフレームの矩形が広がっていない: {widened:?}"
@@ -2489,9 +2379,10 @@ fn a_widened_rect_keeps_the_table_that_encoded_the_pending_frame() {
     // 広げた矩形は廃棄方法が矩形を抜くフレームなので、続くフレームの画面は
     // 抜いた先の扱いがデコーダで割れる。突き合わせるのはこのフレームだけ
     let frame_len = (SCENE_WIDTH * SCENE_HEIGHT) as usize * 4;
-    let mut screens = vec![compose(&decode_with_gif(&bytes))[1].clone()];
+    let at = frame_len * (REBUILDS_AT - 1);
+    let mut screens = vec![compose(&decode_with_gif(&bytes))[REBUILDS_AT - 1].clone()];
     if let Some(raw) = decode_with_ffmpeg(&bytes) {
-        screens.push(raw[frame_len..frame_len * 2].to_vec());
+        screens.push(raw[at..at + frame_len].to_vec());
     }
 
     for screen in &screens {

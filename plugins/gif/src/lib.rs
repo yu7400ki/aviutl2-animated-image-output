@@ -25,7 +25,6 @@ fn encoder_config(config: &Config) -> EncoderConfig {
             ColorFormat::Rgba32 => ColorType::Rgba8,
         },
         num_plays: config.repeat as u32,
-        ..EncoderConfig::default()
     }
 }
 
@@ -66,18 +65,7 @@ fn pixel_share(pixels: u64, total_pixels: u64) -> String {
 fn palette_message(palette: PaletteKind) -> Option<String> {
     match palette {
         PaletteKind::Exact { .. } => None,
-        PaletteKind::ExactFromPrefix { colors } => Some(format!(
-            "パレット: 解析に使えるメモリを超えたため、先頭部分の色を載せました ({}色)",
-            colors
-        )),
-        PaletteKind::Quantized { colors } => Some(format!(
-            "パレット: 全フレームから減色しました ({}色)",
-            colors
-        )),
-        PaletteKind::QuantizedFromPrefix { colors } => Some(format!(
-            "パレット: 解析に使えるメモリを超えたため、先頭部分だけから減色しました ({}色)",
-            colors
-        )),
+        PaletteKind::Quantized { colors } => Some(format!("パレット: 減色しました ({}色)", colors)),
     }
 }
 
@@ -288,7 +276,6 @@ mod tests {
             binarized_to_transparent: 0,
             binarized_to_opaque: 0,
             delay_clamped: false,
-            peak_spool_bytes: 0,
         }
     }
 
@@ -366,49 +353,17 @@ mod tests {
         assert_eq!(palette_message(PaletteKind::Exact { colors: 198 }), None);
     }
 
-    /// 据え方ごとに決まった説明が出て、色数は文面に載る
+    /// 減色したことは、色数を添えて出る
     #[test]
-    fn every_reported_palette_kind_has_its_own_message() {
-        let kinds = [
-            PaletteKind::ExactFromPrefix { colors: 198 },
-            PaletteKind::Quantized { colors: 198 },
-            PaletteKind::QuantizedFromPrefix { colors: 198 },
-        ];
-
-        let messages: Vec<String> = kinds
-            .iter()
-            .map(|&palette| {
-                let message = palette_message(palette).expect("説明が無い");
-                assert!(
-                    message.contains("198"),
-                    "{palette:?} に色数が無い: {message}"
-                );
-                message
-            })
-            .collect();
-
-        for (index, message) in messages.iter().enumerate() {
-            assert!(
-                !messages[index + 1..].contains(message),
-                "重複した説明: {message}"
-            );
-        }
-    }
-
-    /// 先頭部分から据えたことは、劣化が無くても出る
-    #[test]
-    fn a_palette_from_a_prefix_is_reported_even_when_lossless() {
+    fn a_quantized_palette_is_reported_with_its_color_count() {
         let report = Report {
-            palette: PaletteKind::ExactFromPrefix { colors: 64 },
+            palette: PaletteKind::Quantized { colors: 64 },
             ..clean_report()
         };
 
         assert_eq!(
             report_messages(&report, TOTAL_PIXELS),
-            vec![(
-                Severity::Info,
-                "パレット: 解析に使えるメモリを超えたため、先頭部分の色を載せました (64色)".into()
-            )]
+            vec![(Severity::Info, "パレット: 減色しました (64色)".into())]
         );
     }
 
@@ -527,13 +482,12 @@ mod tests {
         let report = Report {
             rebuilds: 37,
             local_tables: 41,
-            peak_spool_bytes: 987_654_321,
             approximated_pixels: 4096,
             ..clean_report()
         };
 
         for message in messages(&report) {
-            for hidden in ["37", "41", "987654321", "987,654,321"] {
+            for hidden in ["37", "41"] {
                 assert!(!message.contains(hidden), "{message}");
             }
         }

@@ -25,6 +25,15 @@ const COLOR_RESOLUTION: u8 = 7;
 const GLOBAL_TABLE_BYTES: usize = MAX_COLORS * 3;
 /// [`MAX_COLORS`] エントリを表すカラーテーブルの大きさの欄
 const GLOBAL_TABLE_SIZE: u8 = 7;
+/// グローバルカラーテーブルが始まるデータストリーム上の位置
+///
+/// ヘッダと論理画面記述子の直後。[`global_color_table`] はここへ書き戻す。
+pub(crate) const GLOBAL_TABLE_OFFSET: u64 = 13;
+/// 書き戻す前のグローバルカラーテーブルを埋める色
+///
+/// 書き戻さないまま終わったファイルは、この色が並んだまま残る。黒で埋めると
+/// 真っ黒なアニメーションとして黙って読めてしまう。
+const PLACEHOLDER: [u8; 3] = [0xFF, 0x00, 0xFF];
 /// ループ回数を持つアプリケーション拡張の識別子と認証コード
 const NETSCAPE: &[u8; 11] = b"NETSCAPE2.0";
 /// ループ回数を運ぶサブブロックの先頭に置く値
@@ -55,6 +64,18 @@ pub(crate) fn logical_screen_descriptor<W: Write>(
     writer.write_all(&width.to_le_bytes())?;
     writer.write_all(&height.to_le_bytes())?;
     writer.write_all(&[packed, 0, 0])
+}
+
+/// 色の決まっていないグローバルカラーテーブルを書く
+///
+/// 色が決まった時点で [`GLOBAL_TABLE_OFFSET`] へ戻り、[`global_color_table`] が
+/// この上へ書き直す。
+pub(crate) fn global_table_placeholder<W: Write>(writer: &mut W) -> io::Result<()> {
+    let mut bytes = Vec::with_capacity(GLOBAL_TABLE_BYTES);
+    for _ in 0..MAX_COLORS {
+        bytes.extend_from_slice(&PLACEHOLDER);
+    }
+    writer.write_all(&bytes)
 }
 
 /// グローバルカラーテーブルを書く
@@ -182,6 +203,23 @@ mod tests {
                 "{colors}色の埋め草が黒でない"
             );
         }
+    }
+
+    /// 色の決まっていないグローバルカラーテーブルは、確保した位置と大きさを持つ
+    #[test]
+    fn the_placeholder_fills_every_entry_with_a_visible_color() {
+        let mut bytes = Vec::new();
+        header(&mut bytes).unwrap();
+        logical_screen_descriptor(&mut bytes, 1, 1).unwrap();
+        assert_eq!(bytes.len() as u64, GLOBAL_TABLE_OFFSET);
+
+        global_table_placeholder(&mut bytes).unwrap();
+        let table = &bytes[GLOBAL_TABLE_OFFSET as usize..];
+        assert_eq!(table.len(), 768);
+        assert!(
+            table.chunks_exact(3).all(|entry| entry == PLACEHOLDER),
+            "確保しただけのエントリが目立たない色になっている"
+        );
     }
 
     /// 設定値の再生回数からループ数の欄が決まる
