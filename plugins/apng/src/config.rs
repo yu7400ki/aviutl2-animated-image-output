@@ -113,7 +113,7 @@ mod tests {
         assert_eq!(loaded.reduce_color, saved.reduce_color);
     }
 
-    /// 色数の最適化を持たない設定ファイルは、最適化しない状態で読める
+    /// 色数の削減を持たない設定ファイルは、削減しない状態で読める
     #[test]
     fn a_config_without_the_reduce_color_key_falls_back_to_off() {
         let config = load(&[
@@ -128,7 +128,7 @@ mod tests {
         assert!(!config.reduce_color);
     }
 
-    /// 真偽値として読めない色数の最適化は既定値になる
+    /// 真偽値として読めない色数の削減は既定値になる
     #[test]
     fn an_unparsable_reduce_color_falls_back_to_the_default() {
         for value in ["yes", "1", ""] {
