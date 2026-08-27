@@ -6,7 +6,7 @@ use crate::block::{
 };
 use crate::delay::Hundredths;
 use crate::error::Error;
-use crate::frame::{Canvas, Screen};
+use crate::frame::{Canvas, Screen, Written};
 use crate::layout::{ColorType, Layout};
 use crate::lzw;
 use crate::normalize::{self, Binarized, TRANSPARENT, pack};
@@ -178,6 +178,8 @@ struct Pending {
     local: Option<ColorTable>,
     /// LZWで圧縮した画像データ
     body: Vec<u8>,
+    /// 添字を作るときにテーブルへ写した画素の集計
+    written: Written,
 }
 
 /// グローバルカラーテーブルと、そこから逃げたフレームの色表
@@ -226,6 +228,16 @@ impl Palettes {
     fn escape(&mut self, palette: Palette) {
         debug_assert!(self.escaped.is_none(), "1フレームで2度逃げている");
         self.escaped = Some(palette);
+    }
+
+    /// 書き出す候補が決まったので、その集計を符号化したテーブルへ渡す
+    ///
+    /// 廃棄方法は候補を複数符号化して1つだけ採るため、採った候補の画素だけを
+    /// テーブルが数える。
+    fn note_written(&mut self, written: &Written) {
+        let palette = self.earlier();
+        palette.note_approximated(written.approximated);
+        palette.note_substituted(written.substituted);
     }
 
     /// 保留中のフレームを書き終えたので、その色表を手放す
@@ -527,6 +539,7 @@ impl<W: Write + Seek> Encoder<W> {
         parts.drain(ring, writing)?;
         if let Some(pending) = writing.pending.take() {
             // 次のフレームが無く、廃棄方法が変えられるキャンバスの続きも無い
+            writing.palettes.note_written(&pending.written);
             parts.write_pending(pending, DISPOSAL_DO_NOT_DISPOSE)?;
         }
         parts.settle_exact(&writing.palettes.global)?;
@@ -698,6 +711,7 @@ impl<W: Write + Seek> Parts<'_, W> {
                     pacing,
                 );
                 let disposed = waiting.rect;
+                palettes.note_written(&waiting.written);
                 self.write_pending(waiting, disposal)?;
                 canvas.advance(disposal, disposed, rendered, laid.rect);
                 *pending = Some(laid);
@@ -898,7 +912,7 @@ fn encode_on(
     delay: u16,
 ) -> Pending {
     indices.clear();
-    screen.append_indices(frame, rect, palette, indices);
+    let written = screen.append_indices(frame, rect, palette, indices);
 
     let min_code_size = lzw::min_code_size(indices);
     let mut body = Vec::new();
@@ -911,6 +925,7 @@ fn encode_on(
         min_code_size,
         local: palette.local_table(),
         body,
+        written,
     }
 }
 

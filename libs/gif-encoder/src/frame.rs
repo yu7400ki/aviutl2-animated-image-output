@@ -91,7 +91,7 @@ impl Screen<'_> {
         rect: Rect,
         palette: &mut Palette,
         out: &mut Vec<u8>,
-    ) {
+    ) -> Written {
         let stride = self.layout.stride;
         let bpp = self.layout.bytes_per_pixel;
         let transparent = palette.transparent();
@@ -129,9 +129,22 @@ impl Screen<'_> {
                 out.push(index);
             }
         }
-        palette.note_approximated(approximated);
-        palette.note_substituted(substituted);
+        Written {
+            approximated,
+            substituted,
+        }
     }
+}
+
+/// 添字を書くときにテーブルへ写した画素の集計
+///
+/// 廃棄方法の候補は複数符号化して1つだけ採るため、書き出す候補が決まってから
+/// テーブルへ渡す。
+pub(crate) struct Written {
+    /// 完全一致が無く最近傍へ写した画素数
+    pub(crate) approximated: u64,
+    /// 写す先が無く埋め草へ置いた画素数
+    pub(crate) substituted: u64,
 }
 
 /// 入力が変わった画素を写した結果の集計
@@ -821,6 +834,45 @@ mod tests {
 
         canvas.advance(DISPOSAL_RESTORE_TO_BACKGROUND, rect, &rendered, rect);
         assert_eq!(canvas.after[..4], written, "キャンバスが書いた色を持たない");
+    }
+
+    /// 添字を書いた集計は、テーブルへ入れずに返り値で渡す
+    ///
+    /// 廃棄方法は候補を複数符号化して1つだけ採るため、符号化した時点で数えると
+    /// 採らなかった候補の画素まで載る。
+    #[test]
+    fn writing_indices_hands_the_counts_back_instead_of_noting_them() {
+        /// 先に据えたテーブルにだけある色
+        const CARRIED: [u8; 4] = [0xFF, 0x00, 0xFF, 0xFF];
+
+        let first: Vec<u8> = CARRIED.repeat((WIDTH * HEIGHT) as usize);
+        let mut canvas = Canvas::new(layout(ColorType::Rgba8));
+        let mut rendered = Vec::new();
+        canvas.render(&[], &first, &mut palette_of(&[&first], 4), &mut rendered);
+        start(&mut canvas, &rendered);
+
+        let mut palette = palette_of(&[&SETTLED[..]], 4);
+        canvas.render(&first, &first, &mut palette, &mut rendered);
+
+        let rect = layout(ColorType::Rgba8).whole();
+        let mut indices = Vec::new();
+        let written = canvas.dispose(rect).background().append_indices(
+            &mut rendered,
+            rect,
+            &mut palette,
+            &mut indices,
+        );
+
+        assert_eq!(
+            written.approximated,
+            u64::from(WIDTH * HEIGHT),
+            "書き直した画素を数えていない"
+        );
+        assert_eq!(
+            palette.approximated(),
+            0,
+            "符号化した時点でテーブルが数えている"
+        );
     }
 
     /// テーブルが持つ唯一の非透過色
