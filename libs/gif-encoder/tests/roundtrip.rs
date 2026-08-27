@@ -450,6 +450,8 @@ struct Scanned {
     min_code_sizes: Vec<u8>,
     /// グラフィック制御拡張が宣言する透過インデックス
     transparent: Vec<Option<u8>>,
+    /// フレームごとのローカルカラーテーブルのバイト列。運ばなければ `None`
+    local_tables: Vec<Option<Vec<u8>>>,
 }
 
 /// ブロックの区切りを長さの宣言だけでたどる
@@ -472,6 +474,7 @@ fn scan(bytes: &[u8]) -> Scanned {
 
     let mut min_code_sizes = Vec::new();
     let mut transparent = Vec::new();
+    let mut local_tables = Vec::new();
     loop {
         match bytes[at] {
             // 終端
@@ -481,6 +484,7 @@ fn scan(bytes: &[u8]) -> Scanned {
                     global_table,
                     min_code_sizes,
                     transparent,
+                    local_tables,
                 };
             }
             // 拡張ブロック
@@ -496,9 +500,11 @@ fn scan(bytes: &[u8]) -> Scanned {
             0x2C => {
                 let packed = bytes[at + 9];
                 at += 10;
-                if packed & 0x80 != 0 {
-                    at += entries_of(packed) * 3;
-                }
+                local_tables.push((packed & 0x80 != 0).then(|| {
+                    let table = bytes[at..at + entries_of(packed) * 3].to_vec();
+                    at += table.len();
+                    table
+                }));
                 min_code_sizes.push(bytes[at]);
                 at = skip_sub_blocks(bytes, at + 1);
             }
@@ -2579,30 +2585,52 @@ fn escape_settled(color_type: ColorType) -> Vec<u8> {
     frame
 }
 
-/// 先頭フレームの色を持つ画素を、青の方向へ [`DRIFT_STEP`] だけ動かしたフレーム
+/// 逃げた後に1フレームで動く距離
+///
+/// 引き継いだ色表からの隔たりは動いた回数 `k` に対して `(CREEP_STEP * k)^2` で、
+/// 逃げの床を超えない。グローバルカラーテーブルからの隔たりは
+/// [`DRIFT_STEP`] のぶんだけ離れたままなので、床を超え続ける。
+const CREEP_STEP: u8 = 5;
+
+/// 先頭フレームの色を持つ画素を、青の方向へ `blue` だけ動かしたフレーム
 ///
 /// 動くのは3画素目からで、変わった画素の色数は [`ESCAPE_BASE_COLORS`] に収まる。
-fn escape_drifted(color_type: ColorType) -> Vec<u8> {
+fn escape_drifted_by(color_type: ColorType, blue: u8) -> Vec<u8> {
     let bpp = color_type.bytes_per_pixel();
     let mut frame = escape_settled(color_type);
     for at in 2..(ESCAPE_WIDTH * ESCAPE_HEIGHT) as usize {
-        frame[at * bpp + 2] += DRIFT_STEP;
+        frame[at * bpp + 2] += blue;
     }
     frame
 }
 
-/// ドリフトする素材のフレーム列
+/// 大きく飛んだ後、小さく動き続ける素材のフレーム列
+///
+/// 飛んだ位置で逃げ、その後は引き継いだ色表の内側を動く。飛んだ後が静止して
+/// いると変わった画素が0個になり、判定相手を取り違えても引き金が立たない。
 fn drifting_scene(color_type: ColorType) -> Vec<Vec<u8>> {
     let mut frames = vec![escape_base(color_type)];
     frames.resize(ESCAPE_AT, escape_settled(color_type));
-    frames.resize(ESCAPE_AT + 3, escape_drifted(color_type));
+    for step in 0..3 {
+        frames.push(escape_drifted_by(
+            color_type,
+            DRIFT_STEP + CREEP_STEP * step,
+        ));
+    }
     frames
 }
 
 /// グローバルカラーテーブルの先頭 `colors` 色
 fn global_colors(bytes: &[u8], colors: usize) -> Vec<[u8; 3]> {
-    scan(bytes)
-        .global_table
+    table_colors(&scan(bytes).global_table, colors)
+}
+
+/// カラーテーブルのバイト列の先頭 `colors` 色
+///
+/// 2の冪へ切り上げた余りは黒で埋まる。写す先として数えると最近傍がそちらへ
+/// 落ちるため、割り当てた色だけを取る。
+fn table_colors(table: &[u8], colors: usize) -> Vec<[u8; 3]> {
+    table
         .chunks_exact(3)
         .take(colors)
         .map(|entry| [entry[0], entry[1], entry[2]])
@@ -2689,6 +2717,123 @@ fn an_escaped_frame_whose_colors_fit_is_written_losslessly() {
             "{at} 番目の画素が入力と一致しない"
         );
     }
+}
+
+/// 逃げた色表は、床を超えないうちは同じバイト列のまま運ばれる
+///
+/// 逃げの判定は引き継いだ色表に対して行う。判定相手をグローバルカラー
+/// テーブルへ戻すと、動き続けるフレームは毎回床を超えて色表を作り直す。
+/// 運ぶ枚数はどちらも同じなので、バイト列で見る。
+#[test]
+fn a_carried_table_keeps_its_bytes_while_the_drift_stays_under_the_floor() {
+    let color = ColorType::Rgb8;
+    let frames = drifting_scene(color);
+
+    let (bytes, report) = encode(ESCAPE_WIDTH, ESCAPE_HEIGHT, color, &frames, 0).unwrap();
+    assert_eq!(
+        report.local_tables,
+        (frames.len() - ESCAPE_AT) as u32,
+        "逃げた位置から最後まで色表を運んでいない"
+    );
+
+    let scanned = scan(&bytes);
+    assert!(
+        scanned.local_tables[..ESCAPE_AT]
+            .iter()
+            .all(Option::is_none),
+        "逃げる前のフレームが色表を運んでいる"
+    );
+    let carried = scanned.local_tables[ESCAPE_AT]
+        .as_deref()
+        .expect("逃げたフレームが色表を運んでいない");
+    for (index, table) in scanned.local_tables.iter().enumerate().skip(ESCAPE_AT + 1) {
+        assert_eq!(
+            table.as_deref(),
+            Some(carried),
+            "{index} 番目が色表を作り直している"
+        );
+    }
+
+    // 素材が引き金を跨いでいることを、運んだ色表とグローバルの両方から測る
+    let held = table_colors(carried, ESCAPE_BASE_COLORS as usize);
+    let global = global_colors(&bytes, ESCAPE_BASE_COLORS as usize);
+    for (step, frame) in frames.iter().enumerate().skip(ESCAPE_AT) {
+        let crept = u32::from(CREEP_STEP) * (step - ESCAPE_AT) as u32;
+        let far = u32::from(DRIFT_STEP) + crept;
+        assert!(
+            nearest_errors(frame, color, &held)[2..]
+                .iter()
+                .all(|&error| error == crept * crept),
+            "{step} 番目が運んだ色表から離れている"
+        );
+        assert!(
+            nearest_errors(frame, color, &global)[2..]
+                .iter()
+                .all(|&error| error == far * far),
+            "{step} 番目がグローバルカラーテーブルの近くにある"
+        );
+    }
+}
+
+/// 2度逃げる素材のフレーム列
+///
+/// 1枚目の色表を引き継いだフレームが近似を積み、その後もう一度床を超える。
+/// 手放す色表の集計を畳み忘れると、積んだぶんが報告から消える。
+fn twice_escaping_scene(color_type: ColorType) -> Vec<Vec<u8>> {
+    let mut frames = vec![escape_base(color_type)];
+    frames.resize(ESCAPE_AT, escape_settled(color_type));
+    for blue in [
+        DRIFT_STEP,
+        DRIFT_STEP + CREEP_STEP,
+        2 * DRIFT_STEP + CREEP_STEP,
+        2 * DRIFT_STEP + 2 * CREEP_STEP,
+    ] {
+        frames.push(escape_drifted_by(color_type, blue));
+    }
+    frames
+}
+
+/// 手放す色表の集計は、次の色表へ移る前に畳まれる
+///
+/// 引き継いだ色表は、床を再び超えたフレームがその場で作り直す。作り直しの側で
+/// 畳み忘れると、1枚目の色表が最近傍へ写した画素が報告から丸ごと落ちる。
+#[test]
+fn a_table_replaced_by_a_second_escape_keeps_the_pixels_it_approximated() {
+    let color = ColorType::Rgb8;
+    let frames = twice_escaping_scene(color);
+
+    let (bytes, report) = encode(ESCAPE_WIDTH, ESCAPE_HEIGHT, color, &frames, 0).unwrap();
+    let scanned = scan(&bytes);
+    let carried: Vec<Option<&[u8]>> = scanned
+        .local_tables
+        .iter()
+        .map(|table| table.as_deref())
+        .collect();
+    assert_eq!(
+        carried[ESCAPE_AT],
+        carried[ESCAPE_AT + 1],
+        "1枚目の色表を引き継いでいない"
+    );
+    assert_eq!(
+        carried[ESCAPE_AT + 2],
+        carried[ESCAPE_AT + 3],
+        "2枚目の色表を引き継いでいない"
+    );
+    assert_ne!(
+        carried[ESCAPE_AT],
+        carried[ESCAPE_AT + 2],
+        "2度目に逃げていない"
+    );
+
+    // 閉じたグローバルカラーテーブルは、上限を超えさせた2画素を最近傍へ写す。
+    // 色表を引き継ぐ2フレームは、動いた3画素目から先を最近傍へ写す
+    const OVERFLOWED: u64 = 2;
+    let moved = u64::from(ESCAPE_WIDTH * ESCAPE_HEIGHT) - OVERFLOWED;
+    assert_eq!(
+        report.approximated_pixels,
+        OVERFLOWED + 2 * moved,
+        "手放した色表が写した画素が報告から落ちている"
+    );
 }
 
 /// 逃げるフレームに置く、上限を超える色数
