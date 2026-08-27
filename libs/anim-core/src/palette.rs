@@ -159,6 +159,61 @@ impl Colors {
         self.table.lookup(color)
     }
 
+    /// 見つけた順に並べた色
+    pub fn colors(&self) -> impl ExactSizeIterator<Item = u32> + '_ {
+        self.entries.iter().map(|entry| entry.color)
+    }
+
+    /// 画素の色の添字。数えていなければ `None`
+    ///
+    /// `pixel` は1画素 `bpp` バイトが並んでいること。`bpp` は3か4であること。
+    pub fn index_of_pixel(&self, pixel: &[u8], bpp: usize) -> Option<u8> {
+        match bpp {
+            3 => self.table.lookup(pack::<3>(pixel)),
+            4 => self.table.lookup(pack::<4>(pixel)),
+            other => panic!("1画素あたり3バイトか4バイトのみ扱える: {other}"),
+        }
+    }
+
+    /// 画素列を添字へ写して `out` へ追記する
+    ///
+    /// まだ数えていない色は見つけた順に数える。`pixels` は1画素 `bpp` バイトが
+    /// 隙間なく並んでいること。`bpp` は3か4であること。
+    ///
+    /// 上限を超えて数えられない色に当たったら、`out` を呼び出し前の長さへ戻して
+    /// 偽を返す。
+    pub fn append_indices(&mut self, pixels: &[u8], bpp: usize, out: &mut Vec<u8>) -> bool {
+        out.reserve(pixels.len() / bpp);
+        let start = out.len();
+        let mapped = match bpp {
+            3 => self.map::<3>(pixels, out),
+            4 => self.map::<4>(pixels, out),
+            other => panic!("1画素あたり3バイトか4バイトのみ扱える: {other}"),
+        };
+        if !mapped {
+            out.truncate(start);
+        }
+        mapped
+    }
+
+    fn map<const BPP: usize>(&mut self, pixels: &[u8], out: &mut Vec<u8>) -> bool {
+        for pixel in pixels.chunks_exact(BPP) {
+            let color = pack::<BPP>(pixel);
+            let index = match self.table.lookup(color) {
+                Some(index) => index,
+                None => {
+                    if !self.insert(color) {
+                        self.exceeded = true;
+                        return false;
+                    }
+                    (self.entries.len() - 1) as u8
+                }
+            };
+            out.push(index);
+        }
+        true
+    }
+
     /// 色を1つ覚える。上限を超えて入らなければ偽を返す
     fn insert(&mut self, color: u32) -> bool {
         let mut slot = slot_of(color);
@@ -414,6 +469,65 @@ mod tests {
             colors.index_of(MAX_COLORS as u32 - 1),
             Some((MAX_COLORS - 1) as u8)
         );
+    }
+
+    /// 写しながら数えると、添字は色を見つけた順に振られる
+    #[test]
+    fn appending_indices_assigns_them_in_the_order_the_colors_are_found() {
+        let pixels = rgba(&[
+            [0x30, 0, 0, 0xFF],
+            [0x10, 0, 0, 0xFF],
+            [0x30, 0, 0, 0xFF],
+            [0x10, 0, 0, 0x80],
+        ]);
+        let mut colors = Colors::new();
+        let mut indices = Vec::new();
+        assert!(colors.append_indices(&pixels, 4, &mut indices));
+
+        assert_eq!(indices, [0, 1, 0, 2]);
+        assert_eq!(
+            colors.colors().collect::<Vec<u32>>(),
+            [
+                pack::<4>(&[0x30, 0, 0, 0xFF]),
+                pack::<4>(&[0x10, 0, 0, 0xFF]),
+                pack::<4>(&[0x10, 0, 0, 0x80]),
+            ]
+        );
+    }
+
+    /// 既に数えた色は、写すときも同じ添字を引く
+    #[test]
+    fn already_counted_colors_keep_their_indices_when_mapped() {
+        let mut colors = Colors::new();
+        colors.observe(&distinct_rgb(3), 3);
+
+        let mut indices = Vec::new();
+        assert!(colors.append_indices(&distinct_rgb(3), 3, &mut indices));
+        assert_eq!(indices, [0, 1, 2]);
+        assert_eq!(colors.count(), 3);
+    }
+
+    /// 上限を超える画素列は写せず、追記した添字も残らない
+    #[test]
+    fn a_pixel_beyond_the_limit_leaves_the_output_untouched() {
+        let mut colors = Colors::new();
+        let mut indices = vec![0xAA];
+        assert!(!colors.append_indices(&distinct_rgb(MAX_COLORS + 1), 3, &mut indices));
+
+        assert_eq!(indices, [0xAA]);
+        assert!(colors.exceeded());
+    }
+
+    /// 画素から添字を引ける。数えていない色は `None`
+    #[test]
+    fn a_counted_pixel_is_looked_up_by_its_bytes() {
+        let mut colors = Colors::new();
+        colors.observe(&rgba(&[[1, 2, 3, 0xFF], [4, 5, 6, 0x80]]), 4);
+
+        assert_eq!(colors.index_of_pixel(&[1, 2, 3, 0xFF], 4), Some(0));
+        assert_eq!(colors.index_of_pixel(&[1, 2, 3], 3), Some(0));
+        assert_eq!(colors.index_of_pixel(&[4, 5, 6, 0x80], 4), Some(1));
+        assert_eq!(colors.index_of_pixel(&[4, 5, 6], 3), None);
     }
 
     /// 画素列から数えた色も、1色ずつ数えた色と同じ表に載る

@@ -8,26 +8,13 @@ use crate::delta::Delta;
 use crate::error::Error;
 use crate::layout::{ColorType, Layout, Output};
 use crate::over;
-use crate::palette::Palette;
-use crate::spool::{Spool, Spooled};
-use anim_core::{FrameDelay, Rect, append_pixels, crop, paste};
+use crate::palette::{PLTE_LEN, Palette, TRNS_LEN};
+use anim_core::{Colors, FrameDelay, Rect, crop};
 use std::io::{Seek, Write};
 use std::ops::RangeInclusive;
 
 /// [`Config::compression_level`] に指定できる範囲
 pub const COMPRESSION_LEVELS: RangeInclusive<u32> = 1..=9;
-
-/// [`Config::max_spool_bytes`] の目安となる値
-///
-/// PNGの色種別はファイル全体で1つなので、出力の色種別は最後のフレームまで
-/// 決まらないことがある。フレームを1回しか取得しない前提では、決まるまでの
-/// フレームをエンコーダが抱えることになり、その量は素材の大きさとフレーム数に
-/// 比例する。
-///
-/// この512MiBは、1920x1080のRGBA8 (1フレーム約8.29MB) が全画面差分で続く場合の
-/// 64フレーム、30fpsで約2.1秒に相当する。これを超える長さのHD素材では
-/// [`Config::reduce_color`] は色種別を落とさず、入力の色種別のまま書き出す。
-pub const DEFAULT_MAX_SPOOL_BYTES: usize = 512 << 20;
 
 /// エンコード設定
 #[derive(Debug, Clone, Copy)]
@@ -41,24 +28,15 @@ pub struct Config {
     pub compression_level: u32,
     /// アニメーションの再生回数 (0で無限ループ)
     pub num_plays: u32,
-    /// 出力の色種別を入力より小さいものへ落とすか
+    /// 出力の色種別をパレット参照へ落とすか
     ///
-    /// 全フレームの色の和集合がパレットに収まるならパレット参照へ落とし、収まらなければ
-    /// 入力の色種別のまま書き出す。PNGの色種別はファイル全体で1つなので、収まるかは
-    /// 最後のフレームまで決まらない。有効にすると、決まるまでのフレームをエンコーダ内部に
-    /// 溜める。
+    /// PNGの色種別はファイル全体で1つなので、先頭フレームの色数だけで決める。
+    /// 先頭フレームの矩形はキャンバス全体なので、そこで色数がパレットに収まらなければ
+    /// 全フレームの和集合も収まらない。収まらなければ入力の色種別のまま書き出す。
     ///
-    /// 出力が小さくなるとは限らない。アルファを持たない出力へ落とした場合、溜めた区間は
-    /// 捨てる判断を経ずに書き出されるため、その区間のぶんだけ大きくなることがある。
+    /// 収まったらパレット参照で書き出しを始める。後のフレームで色数が溢れたときは
+    /// [`Error::ColorLimitExceeded`] で失敗する。
     pub reduce_color: bool,
-    /// 溜めたフレームが抱えるメモリの上限バイト数 ([`DEFAULT_MAX_SPOOL_BYTES`] が目安)
-    ///
-    /// クロップ済みの画素データに、フレームごとの管理領域を加えた概算で数える。
-    /// 超える場合は色種別を落とすのをやめ、入力の色種別のまま書き出す。
-    ///
-    /// 落とすのをやめた先がアルファを持たなければ、そこまでに溜めた区間も捨てる判断を
-    /// 経ずに書き出される。
-    pub max_spool_bytes: usize,
 }
 
 /// 既定は無限ループするRGB8で、圧縮レベルは6、色種別は落とさない
@@ -69,7 +47,6 @@ impl Default for Config {
             compression_level: 6,
             num_plays: 0,
             reduce_color: false,
-            max_spool_bytes: DEFAULT_MAX_SPOOL_BYTES,
         }
     }
 }
@@ -131,18 +108,9 @@ impl BlendPacing {
     }
 }
 
-/// 溜めたフレームから決まる出力の画素表現
-#[derive(Clone, Copy)]
-enum Decision {
-    /// 溜めたフレームの内容だけで1つに定まった
-    Fixed(Output),
-    /// 溜めきれなくなったため、入力の色種別のままにする
-    Abandoned,
-}
-
 /// [`Config::reduce_color`] が出力の色種別に及ぼした結果
 ///
-/// 出力の色種別を決めた時点の判断で、それより後のフレームの内容では変わらない。
+/// 先頭フレームの色数で決まり、それより後のフレームの内容では変わらない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorReduction {
     /// パレット参照へ落とした
@@ -150,10 +118,8 @@ pub enum ColorReduction {
         /// パレットに載せた色数
         colors: u16,
     },
-    /// 落とせる要素が無く、入力の色種別のままにした
+    /// 先頭フレームの色数が多く、入力の色種別のままにした
     Kept,
-    /// 溜めたフレームが上限に達し、解析を打ち切って入力の色種別のままにした
-    Abandoned,
 }
 
 /// dispose_opを決めた結果
@@ -181,33 +147,61 @@ struct Pending {
     body: Vec<u8>,
 }
 
-/// エンコーダが進む段階
-///
-/// PNGの色種別はファイル全体で1つなので、出力の画素表現が決まるまではヘッダを
-/// 書けず、候補を書き出す表現で圧縮することもできない。決まった時点で
-/// [`Stage::Deciding`] は [`Stage::Streaming`] へ移り、後戻りしない。
-enum Stage {
-    /// 出力の画素表現が決まるまでフレームを溜めている
-    Deciding(Spool),
-    /// ヘッダを書き終え、1フレーム遅れで書き出している
-    Streaming(Streaming),
+/// 出力の画素表現と、パレット参照ならその添字の表
+enum Encoding {
+    /// 入力の色種別のまま書き出す
+    Direct(Output),
+    /// 見つけた順に振った添字で書き出す
+    Indexed(Palette),
 }
 
-/// 書き出しの段階が持つ状態
-struct Streaming {
+impl Encoding {
     /// 出力の画素表現
-    output: Output,
+    fn output(&self) -> Output {
+        match self {
+            Encoding::Direct(output) => *output,
+            Encoding::Indexed(_) => Output::Indexed8,
+        }
+    }
+
+    /// blend_op=OVERの候補で、変化しなかった画素を潰す書き方
+    ///
+    /// 潰した画素はアルファを0で書き、キャンバスをそのまま残す。重ねる先が無い
+    /// 出力と、アルファが0の色に添字が振られていないパレットでは `None` を返す。
+    fn collapse(&self) -> Option<Collapse<'_>> {
+        match self {
+            Encoding::Direct(Output::Rgba8) => Some(Collapse::Transparent),
+            Encoding::Direct(_) => None,
+            Encoding::Indexed(palette) => Some(Collapse::Index(palette, palette.transparent()?)),
+        }
+    }
+}
+
+/// blend_op=OVERの候補で、変化しなかった画素へ書く値
+enum Collapse<'a> {
+    /// 完全に透明なRGBA8の画素
+    Transparent,
+    /// アルファが0の色を指す添字
+    Index(&'a Palette, u8),
+}
+
+/// 書き出しが持ち越す状態
+///
+/// 先頭フレームで出力の画素表現が決まってから作られ、以降のフレームはこれに従う。
+struct Writing {
+    /// 出力の画素表現
+    encoding: Encoding,
     /// 書き出しを待っているフレーム
     pending: Option<Pending>,
     /// blend_op=OVERの候補を立てるかどうかの間合い
     blend_pacing: BlendPacing,
 }
 
-impl Streaming {
+impl Writing {
     /// 出力の画素表現を確定した直後の、まだ何も保留していない状態
-    fn new(output: Output) -> Self {
-        Streaming {
-            output,
+    fn new(encoding: Encoding) -> Self {
+        Writing {
+            encoding,
             pending: None,
             blend_pacing: BlendPacing::new(),
         }
@@ -218,11 +212,9 @@ impl Streaming {
 ///
 /// [`Encoder::add_frame`] でフレームを1つずつ書き出し、[`Encoder::finish`] で終端する。
 /// dispose_opは次のフレームの圧縮後サイズを見て決めるため、書き出しは1フレーム遅れる。
-/// [`Config::reduce_color`] が有効なときだけ、出力の色種別が決まるまでのフレームを
-/// さらに内部へ溜める。
 ///
-/// 溜めるかどうかに関わらず、直前のフレームとそれを描く前のキャンバスの2面を常に抱える
-/// (1920x1080のRGBA8で約16.6MB)。溜めたぶんを貼り直す間は、キャンバスをもう1面加える。
+/// 直前のフレームとそれを描く前のキャンバスの2面を常に抱える
+/// (1920x1080のRGBA8で約16.6MB)。フレームは投入された順にそのまま書き出す。
 pub struct Encoder<W: Write + Seek> {
     /// チャンクを並べる書き出し先
     chunks: ChunkWriter<W>,
@@ -232,18 +224,16 @@ pub struct Encoder<W: Write + Seek> {
     codec: Codec,
     /// 直前のフレームとキャンバスの追跡
     delta: Delta,
-    /// 進んでいる段階
-    stage: Stage,
+    /// 書き出しの状態。先頭フレームで出力の画素表現が決まるまでは `None`
+    writing: Option<Writing>,
+    /// 出力の色種別をパレット参照へ落とすよう求められたか
+    reduce_color: bool,
     num_frames: u32,
     num_plays: u32,
     /// [`Self::add_frame`] が受け付けたフレーム数
     frames_accepted: u32,
     /// 書き出しに失敗し、チャンク列が中断しているか
     poisoned: bool,
-    /// 出力の色種別を落とした結果。決まるまでは `None`
-    reduction: Option<ColorReduction>,
-    /// 溜めたバイト数の最大値
-    peak_spool_bytes: usize,
 }
 
 impl<W: Write + Seek> Encoder<W> {
@@ -271,77 +261,73 @@ impl<W: Write + Seek> Encoder<W> {
             return Err(Error::InvalidCompressionLevel(config.compression_level));
         }
 
-        let stage = if config.reduce_color {
-            Stage::Deciding(Spool::new(config.max_spool_bytes))
-        } else {
-            Stage::Streaming(Streaming::new(Output::from(config.color_type)))
-        };
         let mut encoder = Encoder {
             chunks: ChunkWriter::new(writer),
             layout: Layout::new(width, height, config.color_type)?,
             codec: Codec::new(config.compression_level),
             delta: Delta::new(),
-            stage,
+            writing: None,
+            reduce_color: config.reduce_color,
             num_frames,
             num_plays: config.num_plays,
             frames_accepted: 0,
             poisoned: false,
-            reduction: None,
-            peak_spool_bytes: 0,
         };
 
-        if let Stage::Streaming(streaming) = &encoder.stage {
-            let output = streaming.output;
+        if !config.reduce_color {
+            let output = Output::from(config.color_type);
             let (_, mut parts) = encoder.split();
-            parts.write_header(output, None)?;
+            parts.write_header(output)?;
+            encoder.writing = Some(Writing::new(Encoding::Direct(output)));
         }
         Ok(encoder)
     }
 
-    /// 溜めたフレームのバイト数の最大値
-    pub fn peak_spool_bytes(&self) -> usize {
-        self.peak_spool_bytes
-    }
-
     /// 出力の色種別を落とした結果
     ///
-    /// [`Config::reduce_color`] が有効で、出力の色種別が決まった後に `Some` を返す。
-    /// 色種別は遅くとも最後のフレームで決まるため、全フレームを投入した後は必ず
-    /// `Some` になる。
+    /// [`Config::reduce_color`] が有効で、先頭フレームを投入した後に `Some` を返す。
+    /// パレットに載る色数は最後のフレームまで伸びるため、全フレームを投入した後の値が
+    /// 出力に載る色数になる。
     pub fn color_reduction(&self) -> Option<ColorReduction> {
-        self.reduction
+        if !self.reduce_color {
+            return None;
+        }
+
+        Some(match &self.writing.as_ref()?.encoding {
+            Encoding::Direct(_) => ColorReduction::Kept,
+            Encoding::Indexed(palette) => ColorReduction::Palette {
+                colors: palette.colors(),
+            },
+        })
     }
 
-    /// 段階と、段階に依らない部品に分けて借りる
+    /// 書き出しの状態と、それに依らない部品に分けて借りる
     ///
-    /// 段階ごとの値を取り出したまま部品を触れるようにする。
-    fn split(&mut self) -> (&mut Stage, Parts<'_, W>) {
+    /// 状態を取り出したまま部品を触れるようにする。
+    fn split(&mut self) -> (&mut Option<Writing>, Parts<'_, W>) {
         let Encoder {
             chunks,
             layout,
             codec,
             delta,
-            stage,
+            writing,
+            reduce_color: _,
             num_frames,
             num_plays,
             frames_accepted,
             poisoned: _,
-            reduction,
-            peak_spool_bytes,
         } = self;
 
         (
-            stage,
+            writing,
             Parts {
                 chunks,
                 layout,
                 codec,
                 delta,
-                reduction,
-                peak_spool_bytes,
                 num_frames: *num_frames,
                 num_plays: *num_plays,
-                frames_accepted: *frames_accepted,
+                frame: *frames_accepted,
             },
         )
     }
@@ -354,8 +340,9 @@ impl<W: Write + Seek> Encoder<W> {
     /// または [`Encoder::finish`] で書き出す。
     ///
     /// # Errors
-    /// `data` の長さが合わないとき、宣言したフレーム数を超えたとき、書き出しに失敗したとき、
-    /// または過去の書き出し失敗でエンコーダが使用不能なとき。
+    /// `data` の長さが合わないとき、宣言したフレーム数を超えたとき、パレットに載る
+    /// 色数を超えたとき、書き出しに失敗したとき、または過去の失敗でエンコーダが
+    /// 使用不能なとき。
     ///
     /// 書き出しの失敗は1つ前に投入されたフレームのものになる。最後に投入したフレームの
     /// 書き出しは [`Encoder::finish`] で報告される。
@@ -385,23 +372,16 @@ impl<W: Write + Seek> Encoder<W> {
         Ok(())
     }
 
-    /// 投入されたフレームを段階に応じて処理し、段階が移ったらそれを覚える
+    /// 投入されたフレームを書き出す
+    ///
+    /// 先頭フレームだけは、書き出す前に出力の画素表現を決めてヘッダを書く。
     fn accept(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
-        let (stage, mut parts) = self.split();
-
-        let next = match stage {
-            Stage::Deciding(spool) => parts.spool_frame(spool, data, delay)?,
-            Stage::Streaming(streaming) => {
-                let index = parts.frames_accepted;
-                parts.write_frame(streaming, data, delay, index)?;
-                None
-            }
-        };
-
-        if let Some(next) = next {
-            *stage = next;
+        let (slot, mut parts) = self.split();
+        if slot.is_none() {
+            *slot = Some(parts.open(data)?);
         }
-        Ok(())
+        let writing = slot.as_mut().expect("先頭フレームで書き出しの状態が決まる");
+        parts.write_frame(writing, data, delay)
     }
 
     /// 終端して書き出し先を返す
@@ -421,9 +401,12 @@ impl<W: Write + Seek> Encoder<W> {
         }
 
         // 次のフレームが無いため、最後のフレームは捨てても復元される先が無い
-        let (stage, mut parts) = self.split();
-        if let Stage::Streaming(streaming) = stage {
-            parts.flush_pending(&mut streaming.pending, DISPOSE_OP_NONE)?;
+        let (slot, mut parts) = self.split();
+        if let Some(writing) = slot {
+            parts.flush_pending(&mut writing.pending, DISPOSE_OP_NONE)?;
+            if let Encoding::Indexed(palette) = &writing.encoding {
+                parts.settle(palette)?;
+            }
         }
 
         self.chunks.write(*b"IEND", &[])?;
@@ -431,23 +414,23 @@ impl<W: Write + Seek> Encoder<W> {
     }
 }
 
-/// [`Encoder`] から [`Stage`] 以外を借りたもの
+/// [`Encoder`] から [`Writing`] 以外を借りたもの
 ///
-/// 段階ごとの値は引数で受け取る。フレーム1つを処理する判断と書き出しを担う。
+/// 書き出しの状態は引数で受け取る。フレーム1つを処理する判断と書き出しを担う。
 struct Parts<'a, W: Write + Seek> {
     chunks: &'a mut ChunkWriter<W>,
     layout: &'a Layout,
     codec: &'a mut Codec,
     delta: &'a mut Delta,
-    reduction: &'a mut Option<ColorReduction>,
-    peak_spool_bytes: &'a mut usize,
     num_frames: u32,
     num_plays: u32,
-    frames_accepted: u32,
+    /// 処理しているフレームの、投入された順の位置
+    frame: u32,
 }
 
 impl<W: Write + Seek> Parts<'_, W> {
-    fn write_header(&mut self, output: Output, palette: Option<&Palette>) -> Result<(), Error> {
+    /// シグネチャと、画素データより前に置くチャンクを書き出す
+    fn write_header(&mut self, output: Output) -> Result<(), Error> {
         self.chunks.write_signature()?;
 
         let mut ihdr = [0u8; 13];
@@ -462,209 +445,67 @@ impl<W: Write + Seek> Parts<'_, W> {
         actl[4..8].copy_from_slice(&self.num_plays.to_be_bytes());
         self.chunks.write(*b"acTL", &actl)?;
 
-        // PLTEとtRNSは画素データより前に置く
-        if let Some(palette) = palette {
-            self.chunks.write(*b"PLTE", &palette.plte())?;
-            let trns = palette.trns();
-            if !trns.is_empty() {
-                self.chunks.write(*b"tRNS", &trns)?;
-            }
-        }
-
         Ok(())
     }
 
-    /// 溜めているフレームへ1つ加え、決めたとおりに処理する
+    /// 先頭フレームから出力の画素表現を決め、ヘッダを書き出す
     ///
-    /// 出力の色種別が決まるまでは、候補を実際に書き出す色種別で圧縮できず大きさを
-    /// 比べられない。溜めている間は保留を挟まずに溜め、決まったら溜めたぶんを流して
-    /// 書き出しの段階を返す。
-    fn spool_frame(
-        &mut self,
-        spool: &mut Spool,
-        data: &[u8],
-        delay: FrameDelay,
-    ) -> Result<Option<Stage>, Error> {
-        let rect = self
-            .delta
-            .kept_rect(self.layout, data, self.frames_accepted);
-        let region_len = rect.width as usize * rect.height as usize * self.layout.bytes_per_pixel;
+    /// 先頭フレームの矩形はキャンバス全体なので、ここで色数がパレットに収まらなければ
+    /// 全フレームの和集合も収まらない。収まったらパレット参照で書き出し、PLTEとtRNSは
+    /// 場所だけ確保して [`Encoder::finish`] で書き戻す。
+    fn open(&mut self, data: &[u8]) -> Result<Writing, Error> {
+        let mut colors = Colors::new();
+        colors.observe(data, self.layout.bytes_per_pixel);
+        if colors.exceeded() {
+            let output = Output::from(self.layout.input);
+            self.write_header(output)?;
+            return Ok(Writing::new(Encoding::Direct(output)));
+        }
 
-        // 抱えきれない大きさが来たら、入力の色種別で確定して溜めたぶんを流す
-        if !spool.can_hold(region_len) {
-            let mut streaming = self.commit(spool, Decision::Abandoned)?;
-            if streaming.output == Output::Rgba8 {
-                let index = self.frames_accepted;
-                self.write_frame(&mut streaming, data, delay, index)?;
-            } else {
-                self.emit_frame(data, rect, delay, streaming.output)?;
-                self.delta.advance(data, DISPOSE_OP_NONE);
+        self.write_header(Output::Indexed8)?;
+        let plte = self.chunks.position()?;
+        self.chunks.write(*b"PLTE", &[0u8; PLTE_LEN])?;
+        // アルファを持たない入力にはアルファが現れないため、tRNS自体が要らない
+        let trns = match self.layout.input {
+            ColorType::Rgb8 => None,
+            ColorType::Rgba8 => {
+                let at = self.chunks.position()?;
+                self.chunks.write(*b"tRNS", &[u8::MAX; TRNS_LEN])?;
+                Some(at)
             }
-            return Ok(Some(Stage::Streaming(streaming)));
-        }
-
-        spool.push(
-            data,
-            rect,
-            delay,
-            self.layout.stride,
-            self.layout.bytes_per_pixel,
-        );
-        *self.peak_spool_bytes = (*self.peak_spool_bytes).max(spool.len());
-
-        let is_last = self.frames_accepted + 1 == self.num_frames;
-        let Some(decision) = self.decide_output(spool, is_last) else {
-            self.delta.advance(data, DISPOSE_OP_NONE);
-            return Ok(None);
         };
 
-        let streaming = self.commit(spool, decision)?;
-        // 貼り直した経路は溜めたフレームを順に描き終えており、キャンバスは進んでいる
-        if streaming.output != Output::Rgba8 {
-            self.delta.advance(data, DISPOSE_OP_NONE);
-        }
-        Ok(Some(Stage::Streaming(streaming)))
+        Ok(Writing::new(Encoding::Indexed(Palette::new(
+            colors, plte, trns,
+        ))))
     }
 
-    /// 溜めたフレームから出力の画素表現を決める
-    ///
-    /// 色の和集合がパレットに収まっている間は候補が残るため、最後のフレームを見るまで
-    /// 決まらない。収まらないと分かった時点で入力の色種別に定まる。まだ決まらないときは
-    /// `None` を返す。
-    fn decide_output(&self, spool: &Spool, is_last: bool) -> Option<Decision> {
-        if !spool.colors_exceeded() {
-            return is_last.then_some(Decision::Fixed(Output::Indexed8));
-        }
-        Some(Decision::Fixed(Output::from(self.layout.input)))
-    }
-
-    /// 出力の画素表現を確定し、ヘッダに続けて溜めたフレームを書き出す
-    ///
-    /// パレット参照へ落とした場合の添字と色の対応は、ヘッダと溜めたフレームを
-    /// 書き終えるまでしか要らない。出力がパレット参照に決まるのは最後のフレームで、
-    /// 以降のフレームは来ないため、書き出しへ移った後に引くことがない。
-    fn commit(&mut self, spool: &mut Spool, decision: Decision) -> Result<Streaming, Error> {
-        let (frames, colors) = spool.drain();
-        let output = match decision {
-            Decision::Fixed(output) => output,
-            Decision::Abandoned => Output::from(self.layout.input),
-        };
-
-        let color_count = colors.count();
-        let palette = (output == Output::Indexed8).then(|| Palette::from_colors(colors));
-        *self.reduction = Some(match decision {
-            Decision::Abandoned => ColorReduction::Abandoned,
-            Decision::Fixed(Output::Indexed8) => ColorReduction::Palette {
-                colors: color_count,
-            },
-            Decision::Fixed(_) => ColorReduction::Kept,
-        });
-        self.write_header(output, palette.as_ref())?;
-
-        let mut streaming = Streaming::new(output);
-        // アルファを持つ出力だけが、キャンバスへ重ねる候補を立てられる
-        if output == Output::Rgba8 {
-            self.replay(&frames, &mut streaming)?;
-        } else {
-            self.flush_spooled(&frames, output, palette.as_ref())?;
-        }
-        Ok(streaming)
-    }
-
-    /// 溜めたフレームを矩形のまま順に書き出す
-    ///
-    /// アルファを持たない出力には重ねる先が無く、blend_opはSOURCEに定まる。
-    /// dispose_opは捨てる判断を経ずにNONEで書く。
-    fn flush_spooled(
-        &mut self,
-        frames: &[Spooled],
-        output: Output,
-        palette: Option<&Palette>,
-    ) -> Result<(), Error> {
-        for frame in frames {
-            let body = self
-                .compress_spooled(frame, output, palette)
-                .into_body(self.codec);
-            self.chunks.write_frame(
-                frame.rect,
-                frame.delay,
-                DISPOSE_OP_NONE,
-                BLEND_OP_SOURCE,
-                &body,
-            )?;
-            self.codec.give(body);
-        }
-        Ok(())
-    }
-
-    /// 溜めたフレームをキャンバスへ貼り直し、書き出しの経路へ通す
-    ///
-    /// 溜めた矩形は直前のフレームとの差分なので、投入された順に貼れば入力のフレームが
-    /// そのまま戻る。戻したフレームを流せば、溜めなかった場合と同じ判断でdispose_opと
-    /// blend_opが決まる。
-    ///
-    /// 溜めたぶんはこの中で書き終える。最後のフレームは次を見ずに書き出すため、
-    /// dispose_opはNONEになる。
-    fn replay(&mut self, frames: &[Spooled], streaming: &mut Streaming) -> Result<(), Error> {
-        if frames.is_empty() {
-            return Ok(());
-        }
-
-        let mut canvas = self.codec.take();
-        canvas.resize(self.layout.frame_len, 0);
-        self.delta.reset();
-        for (index, frame) in frames.iter().enumerate() {
-            paste(
-                &mut canvas,
-                &frame.data,
-                frame.rect,
-                self.layout.stride,
-                self.layout.bytes_per_pixel,
-            );
-            self.write_frame(streaming, &canvas, frame.delay, index as u32)?;
-        }
-        self.codec.give(canvas);
-
-        self.flush_pending(&mut streaming.pending, DISPOSE_OP_NONE)
-    }
-
-    /// 溜めるのをやめたフレームを1つ書き出す
-    ///
-    /// アルファを持たない出力には重ねる先が無く、捨てる判断も経ずに書き出す。
-    fn emit_frame(
-        &mut self,
-        data: &[u8],
-        rect: Rect,
-        delay: FrameDelay,
-        output: Output,
-    ) -> Result<(), Error> {
-        let body = self.compress_rect(data, rect, output).into_body(self.codec);
+    /// 場所を確保しておいた位置へPLTEとtRNSを書き戻す
+    fn settle(&mut self, palette: &Palette) -> Result<(), Error> {
         self.chunks
-            .write_frame(rect, delay, DISPOSE_OP_NONE, BLEND_OP_SOURCE, &body)?;
-        self.codec.give(body);
+            .rewrite(palette.plte_at(), *b"PLTE", &palette.plte())?;
+        if let Some(at) = palette.trns_at() {
+            self.chunks.rewrite(at, *b"tRNS", &palette.trns())?;
+        }
         Ok(())
     }
 
     /// 保留中のフレームを書き出し、投入されたフレームを保留にする
-    ///
-    /// `index` は投入された順の位置で、先頭フレームかどうかと、捨てられる過去が
-    /// あるかどうかを決める。
     fn write_frame(
         &mut self,
-        streaming: &mut Streaming,
+        writing: &mut Writing,
         data: &[u8],
         delay: FrameDelay,
-        index: u32,
     ) -> Result<(), Error> {
-        let output = streaming.output;
-        let disposal = self.choose_dispose(data, output, streaming.pending.is_some(), index);
+        let disposal =
+            self.choose_dispose(&mut writing.encoding, data, writing.pending.is_some())?;
         let (dispose, rect) = (disposal.op, disposal.rect);
         let (blend, candidate) =
-            self.choose_blend(data, disposal, output, &mut streaming.blend_pacing, index);
+            self.choose_blend(&writing.encoding, data, disposal, &mut writing.blend_pacing);
         let body = candidate.into_body(self.codec);
 
-        self.flush_pending(&mut streaming.pending, dispose)?;
-        streaming.pending = Some(Pending {
+        self.flush_pending(&mut writing.pending, dispose)?;
+        writing.pending = Some(Pending {
             rect,
             delay,
             blend,
@@ -681,38 +522,37 @@ impl<W: Write + Seek> Parts<'_, W> {
     /// 採った側を戻り値へ残して、退けた側のバッファはプールへ返す。同じ大きさなら捨てない。
     fn choose_dispose(
         &mut self,
+        encoding: &mut Encoding,
         data: &[u8],
-        output: Output,
         disposable: bool,
-        index: u32,
-    ) -> Disposal {
-        let kept = self.delta.kept_rect(self.layout, data, index);
+    ) -> Result<Disposal, Error> {
+        let kept = self.delta.kept_rect(self.layout, data, self.frame);
         let restored = self
             .delta
-            .restored_rect(self.layout, data, kept, index, disposable);
+            .restored_rect(self.layout, data, kept, self.frame, disposable);
 
-        let kept_candidate = self.compress_rect(data, kept, output);
+        let kept_candidate = self.compress_rect(encoding, data, kept)?;
         let keep = |candidate| Disposal {
             op: DISPOSE_OP_NONE,
             rect: kept,
             candidate,
         };
         let Some(restored) = restored else {
-            return keep(kept_candidate);
+            return Ok(keep(kept_candidate));
         };
 
-        let restored_candidate = self.compress_rect(data, restored, output);
+        let restored_candidate = self.compress_rect(encoding, data, restored)?;
 
         if restored_candidate.len() < kept_candidate.len() {
             kept_candidate.discard(self.codec);
-            Disposal {
+            Ok(Disposal {
                 op: DISPOSE_OP_PREVIOUS,
                 rect: restored,
                 candidate: restored_candidate,
-            }
+            })
         } else {
             restored_candidate.discard(self.codec);
-            keep(kept_candidate)
+            Ok(keep(kept_candidate))
         }
     }
 
@@ -723,16 +563,14 @@ impl<W: Write + Seek> Parts<'_, W> {
     /// 元の値に戻る。`disposal` の候補と両方を圧縮して小さい方を採り、採った側を
     /// 戻り値へ残して、退けた側のバッファはプールへ返す。同じ大きさならSOURCEを採る。
     ///
-    /// アルファを持たない出力には重ねる先が無いため、候補が立つのは出力がRGBA8のとき
-    /// だけになる。先頭フレームはキャンバスがまだ空で、重ねる先が無い。負けが続く間は
-    /// [`BlendPacing`] が候補を立てるのを休ませる。
+    /// 潰した画素を書けない出力では候補が立たない。先頭フレームはキャンバスがまだ空で、
+    /// 重ねる先が無い。負けが続く間は [`BlendPacing`] が候補を立てるのを休ませる。
     fn choose_blend(
         &mut self,
+        encoding: &Encoding,
         data: &[u8],
         disposal: Disposal,
-        output: Output,
         pacing: &mut BlendPacing,
-        index: u32,
     ) -> (u8, Candidate) {
         let Disposal {
             op: dispose,
@@ -740,10 +578,10 @@ impl<W: Write + Seek> Parts<'_, W> {
             candidate: source,
         } = disposal;
 
-        if output != Output::Rgba8 || index == 0 {
+        let Some(collapse) = encoding.collapse() else {
             return (BLEND_OP_SOURCE, source);
-        }
-        if !pacing.should_try() {
+        };
+        if self.frame == 0 || !pacing.should_try() {
             return (BLEND_OP_SOURCE, source);
         }
 
@@ -753,14 +591,20 @@ impl<W: Write + Seek> Parts<'_, W> {
         } else {
             &self.delta.canvas
         };
+        let stride = self.layout.stride;
         let mut over = self.codec.take();
-        let packed = over::pack_over(base, data, self.layout.stride, rect, &mut over);
+        let packed = match collapse {
+            Collapse::Transparent => over::pack_over(base, data, stride, rect, &mut over),
+            Collapse::Index(palette, transparent) => {
+                over::pack_over_indexed(base, data, stride, rect, palette, transparent, &mut over)
+            }
+        };
         if !packed {
             self.codec.give(over);
             return (BLEND_OP_SOURCE, source);
         }
 
-        let out_bpp = output.bytes_per_pixel();
+        let out_bpp = encoding.output().bytes_per_pixel();
         let over_candidate = self
             .codec
             .compress(&over, rect.width as usize * out_bpp, out_bpp);
@@ -794,65 +638,49 @@ impl<W: Write + Seek> Parts<'_, W> {
         Ok(())
     }
 
-    /// フレームから `rect` を切り出してフィルタして圧縮する
+    /// フレームから `rect` を切り出し、出力の表現へ直してフィルタして圧縮する
     ///
-    /// この経路を通るのは出力が決まった後のフレームだけで、その表現は入力と同じになる。
-    fn compress_rect(&mut self, data: &[u8], rect: Rect, output: Output) -> Candidate {
-        debug_assert_ne!(output, Output::Indexed8);
-
-        let stride = self.layout.stride;
-        let in_bpp = self.layout.bytes_per_pixel;
-        let out_bpp = output.bytes_per_pixel();
-        let region_stride = rect.width as usize * out_bpp;
-
-        if in_bpp == out_bpp && rect.width as usize * in_bpp == stride {
-            // 変換の要らない全幅の矩形は `data` 上で既に連続している
-            let head = rect.y as usize * stride;
-            let len = region_stride * rect.height as usize;
-            self.codec
-                .compress(&data[head..head + len], region_stride, out_bpp)
-        } else {
-            let mut cropped = self.codec.take();
-            crop(data, rect, stride, in_bpp, out_bpp, &mut cropped);
-            let candidate = self.codec.compress(&cropped, region_stride, out_bpp);
-            self.codec.give(cropped);
-            candidate
-        }
-    }
-
-    /// 溜めたフレームを `output` の表現へ直してフィルタして圧縮する
-    fn compress_spooled(
+    /// # Errors
+    /// パレットに載る色数を超えたとき。
+    fn compress_rect(
         &mut self,
-        frame: &Spooled,
-        output: Output,
-        palette: Option<&Palette>,
-    ) -> Candidate {
-        let out_bpp = output.bytes_per_pixel();
-        let region_stride = frame.rect.width as usize * out_bpp;
+        encoding: &mut Encoding,
+        data: &[u8],
+        rect: Rect,
+    ) -> Result<Candidate, Error> {
+        let stride = self.layout.stride;
+        let bpp = self.layout.bytes_per_pixel;
+        let row_len = rect.width as usize * bpp;
+        let head = rect.y as usize * stride + rect.x as usize * bpp;
 
-        if self.layout.bytes_per_pixel == out_bpp {
-            return self.codec.compress(&frame.data, region_stride, out_bpp);
-        }
+        match encoding {
+            Encoding::Direct(_) => {
+                if row_len == stride {
+                    // 全幅の矩形は `data` 上で既に連続している
+                    let len = row_len * rect.height as usize;
+                    return Ok(self.codec.compress(&data[head..head + len], row_len, bpp));
+                }
 
-        let mut converted = self.codec.take();
-        self.append_output(&frame.data, output, palette, &mut converted);
-        let candidate = self.codec.compress(&converted, region_stride, out_bpp);
-        self.codec.give(converted);
-        candidate
-    }
-
-    /// 入力の画素列を `output` の表現へ直しながら `out` へ追記する
-    fn append_output(
-        &self,
-        pixels: &[u8],
-        output: Output,
-        palette: Option<&Palette>,
-        out: &mut Vec<u8>,
-    ) {
-        let in_bpp = self.layout.bytes_per_pixel;
-        match palette {
-            Some(palette) => palette.append_indices(pixels, in_bpp, out),
-            None => append_pixels(pixels, in_bpp, output.bytes_per_pixel(), out),
+                let mut cropped = self.codec.take();
+                crop(data, rect, stride, bpp, bpp, &mut cropped);
+                let candidate = self.codec.compress(&cropped, row_len, bpp);
+                self.codec.give(cropped);
+                Ok(candidate)
+            }
+            Encoding::Indexed(palette) => {
+                let mut indices = self.codec.take();
+                indices.reserve(rect.width as usize * rect.height as usize);
+                for y in 0..rect.height as usize {
+                    let start = head + y * stride;
+                    if !palette.append_indices(&data[start..start + row_len], bpp, &mut indices) {
+                        self.codec.give(indices);
+                        return Err(Error::ColorLimitExceeded { frame: self.frame });
+                    }
+                }
+                let candidate = self.codec.compress(&indices, rect.width as usize, 1);
+                self.codec.give(indices);
+                Ok(candidate)
+            }
         }
     }
 }
@@ -1116,9 +944,9 @@ mod tests {
         }
     }
 
-    /// 色種別を落とす経路でも、溜めたフレームがプローブを通って戦略が決まる
+    /// 色種別をパレット参照へ落としても、プローブが戦略を決める
     #[test]
-    fn spooled_frames_go_through_the_probe() {
+    fn reducing_the_color_type_still_settles_the_strategy() {
         let config = Config {
             color_type: ColorType::Rgba8,
             reduce_color: true,
@@ -1141,36 +969,6 @@ mod tests {
         let bpp = output_bytes_per_pixel(&bytes);
         for (index, frame) in filter_types(&bytes, bpp).iter().enumerate() {
             assert!(frame.iter().any(|&f| f != 0), "フレーム {index}: {frame:?}");
-        }
-    }
-
-    /// 溜めたフレームで固めた戦略は、書き出しへ移った後も変わらない
-    ///
-    /// 色数が跳ねたフレームまでが溜まってまとめて圧縮されるため、そこでプローブが
-    /// 尽きる。それより後のフレームだけが書き出し経路を通る。
-    #[test]
-    fn the_strategy_fixed_by_spooled_frames_stays_fixed() {
-        /// 色数が跳ねて色種別が確定するフレームの位置
-        ///
-        /// ここまでの [`PROBE_FRAMES`] フレームを溜めたぶんの圧縮でプローブが尽きる。
-        const COMMIT: u32 = PROBE_FRAMES;
-
-        let config = Config {
-            color_type: ColorType::Rgba8,
-            reduce_color: true,
-            ..Config::default()
-        };
-
-        let mut input: Vec<Vec<u8>> = (0..COMMIT)
-            .map(|seed| with_alpha(&flat_frame(seed)))
-            .collect();
-        input.extend((0..4).map(|seed| with_alpha(&detailed_frame(seed))));
-
-        let bytes = encode(&input, config);
-        let types = filter_types(&bytes, 4);
-        assert_eq!(types.len(), input.len());
-        for (index, frame) in types.iter().enumerate().skip(COMMIT as usize + 1) {
-            assert!(frame.iter().all(|&f| f == 0), "フレーム {index}: {frame:?}");
         }
     }
 
@@ -1300,12 +1098,10 @@ mod tests {
         assert!(pacing.should_try(), "閾値に届く前に休みに入っている");
     }
 
-    /// 書き出しへ移ったエンコーダが持つ間合い
+    /// フレームを受け付けたエンコーダが持つ間合い
     fn pacing_of<W: Write + Seek>(encoder: &Encoder<W>) -> &BlendPacing {
-        match &encoder.stage {
-            Stage::Streaming(streaming) => &streaming.blend_pacing,
-            Stage::Deciding { .. } => panic!("書き出しへ移っている"),
-        }
+        let writing = encoder.writing.as_ref().expect("書き出しが始まっている");
+        &writing.blend_pacing
     }
 
     /// 書き出しの経路は、候補を立てる前に間合いを見る

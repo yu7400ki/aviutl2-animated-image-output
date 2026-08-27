@@ -1,8 +1,6 @@
 //! 出力したAPNGを`png`クレートでデコードし、入力フレームと一致することを確認する
 
-use apng_encoder::{
-    ColorReduction, ColorType, Config, DEFAULT_MAX_SPOOL_BYTES, Encoder, Error, FrameDelay,
-};
+use apng_encoder::{ColorReduction, ColorType, Config, Encoder, Error, FrameDelay};
 use std::io::{self, Cursor, Seek, SeekFrom, Write};
 
 /// 決定的な擬似乱数でフレームの内容を作る
@@ -934,20 +932,19 @@ fn set_rgba(frame: &mut [u8], x: u32, y: u32, color: [u8; 4]) {
     frame[at..at + 4].copy_from_slice(&color);
 }
 
-/// 溜め続けるフレームが使う色数
+/// パレットに収まるフレームが使う色数
 ///
-/// 塗り替える帯と合わせてもパレットに収まらない色数へ届く。
-const SPOOLED_BLEND_COLORS: u8 = 128;
+/// 塗り替える帯と合わせるとパレットに収まらない色数へ届く。
+const PALETTE_BLEND_COLORS: u8 = 128;
 
-/// [`SPOOLED_BLEND_COLORS`] 色から画素ごとに選んで敷いた不透明なRGBA8のフレーム
+/// [`PALETTE_BLEND_COLORS`] 色から画素ごとに選んで敷いた不透明なRGBA8のフレーム
 ///
-/// 隣り合う画素が揃わないのは [`blend_frame`] と同じで、色の和集合はパレットに
-/// 収まったままなので、出力の色種別は最後のフレームまで決まらない。
-fn spooled_blend_frame(seed: u32) -> Vec<u8> {
+/// 隣り合う画素が揃わないのは [`blend_frame`] と同じで、色数はパレットに収まる。
+fn palette_blend_frame(seed: u32) -> Vec<u8> {
     frame_data(BLEND_PIXELS, seed)
         .iter()
         .flat_map(|&byte| {
-            let index = byte % SPOOLED_BLEND_COLORS;
+            let index = byte % PALETTE_BLEND_COLORS;
             [index, index.wrapping_mul(3), index.wrapping_mul(7), 0xFF]
         })
         .collect()
@@ -1182,81 +1179,64 @@ fn an_over_rect_after_a_disposal_is_layered_on_the_restored_canvas() {
     assert_composites_to(&bytes, BLEND_WIDTH, ColorType::Rgba8, &input);
 }
 
-/// 溜めた区間でも、不透明でない画素へ変わった矩形はSOURCEで書く
+/// パレット参照の出力でも、変化した画素がわずかな矩形はOVERで書く
 ///
-/// 貼り直した矩形にも重ねる候補は立つが、半透明の画素はキャンバスと混ざって元の値に
-/// 戻らないため、その矩形だけは潰せない。
+/// 潰した画素はアルファが0の色の添字で書く。その色が載っていることが条件になる。
 #[test]
-fn a_translucent_change_in_the_spool_falls_back_to_source() {
-    let base = spooled_blend_frame(1);
-    let mut translucent = base.clone();
-    set_rgba(&mut translucent, 3, 3, [0x11, 0x22, 0x33, 0x80]);
-    let changed = with_opaque_corners(&translucent);
-    // 4フレーム目で色数が上限を超え、そこで色種別が確定して溜めたぶんが流れる
-    let burst = with_color_burst(&changed);
-
-    let input = vec![base, translucent, changed, burst];
-    let (bytes, _) = encode_with(
-        BLEND_WIDTH,
-        BLEND_HEIGHT,
-        reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
-        &input,
-    );
-
-    let (_, decoded) = decode(&bytes);
-    assert_eq!(
-        blend_ops(&decoded),
-        [
-            png::BlendOp::Source,
-            png::BlendOp::Source,
-            png::BlendOp::Over,
-            png::BlendOp::Source
-        ]
-    );
-    assert_composites_to(&bytes, BLEND_WIDTH, ColorType::Rgba8, &input);
-}
-
-/// 溜めた区間でも、変化した画素がわずかな矩形はOVERで書く
-///
-/// 溜めた矩形を投入された順に貼れば入力のフレームが戻るため、重ねる先が求まる。
-#[test]
-fn frames_spooled_for_the_color_type_are_written_with_over() {
-    let base = spooled_blend_frame(1);
+fn a_palette_with_a_transparent_color_is_written_with_over() {
+    let mut base = palette_blend_frame(1);
+    set_rgba(&mut base, 0, 0, [0x00, 0x00, 0x00, 0x00]);
     let changed = with_opaque_corners(&base);
-    // 3フレーム目で色数が上限を超え、そこで色種別が確定して溜めたぶんが流れる
-    let burst = with_color_burst(&changed);
 
-    let input = vec![base, changed, burst];
-    let (bytes, _) = encode_with(
+    let input = vec![base, changed];
+    let bytes = encode_with(
         BLEND_WIDTH,
         BLEND_HEIGHT,
-        reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+        reduce_config(ColorType::Rgba8),
         &input,
     );
 
+    assert_eq!(output_color_type(&bytes), png::ColorType::Indexed);
     let (_, decoded) = decode(&bytes);
     assert_eq!(
         blend_ops(&decoded),
-        [
-            png::BlendOp::Source,
-            png::BlendOp::Over,
-            png::BlendOp::Source
-        ]
+        [png::BlendOp::Source, png::BlendOp::Over]
     );
     assert_composites_to(&bytes, BLEND_WIDTH, ColorType::Rgba8, &input);
 }
 
-/// 溜めた区間でも、1フレームだけ現れる領域はPREVIOUSで捨てる
-///
-/// 貼り直したフレームからは捨てる前のキャンバスも組み立てられるため、溜めなかった
-/// 場合と同じ判断ができる。
+/// アルファが0の色が載っていないパレットは、潰した画素を書けないのでOVERを使わない
 #[test]
-fn frames_spooled_for_the_color_type_are_disposed_to_previous() {
+fn a_palette_without_a_transparent_color_stays_on_source() {
+    let base = palette_blend_frame(1);
+    let changed = with_opaque_corners(&base);
+
+    let input = vec![base, changed];
+    let bytes = encode_with(
+        BLEND_WIDTH,
+        BLEND_HEIGHT,
+        reduce_config(ColorType::Rgba8),
+        &input,
+    );
+
+    assert_eq!(output_color_type(&bytes), png::ColorType::Indexed);
+    let (_, decoded) = decode(&bytes);
+    assert!(
+        blend_ops(&decoded)
+            .iter()
+            .all(|op| matches!(op, png::BlendOp::Source))
+    );
+    assert_composites_to(&bytes, BLEND_WIDTH, ColorType::Rgba8, &input);
+}
+
+/// パレット参照の出力でも、1フレームだけ現れる領域はPREVIOUSで捨てる
+#[test]
+fn a_palette_is_disposed_to_previous() {
     const BLOCK: (u32, u32, u32, u32) = (2, 1, 3, 2);
     const TRIGGER: (u32, u32) = (20, 13);
 
-    // 塗り替える2色を足すと上限をちょうど1色超える
-    let base = palette_frame(MAX_PALETTE_COLORS - 1, 0);
+    // 塗り替える2色を足してもパレットに収まる色数
+    let base = palette_frame(MAX_PALETTE_COLORS - 8, 0);
     let mut marked = base.clone();
     for y in 0..BLOCK.3 as usize {
         for x in 0..BLOCK.2 as usize {
@@ -1264,16 +1244,15 @@ fn frames_spooled_for_the_color_type_are_disposed_to_previous() {
             marked[start..start + 3].fill(0x10);
         }
     }
-    // 3フレーム目で色数が上限を超え、そこで色種別が確定して溜めたぶんが流れる
     let mut restored = base.clone();
     let trigger = (TRIGGER.1 as usize * REDUCE_WIDTH as usize + TRIGGER.0 as usize) * 4;
     restored[trigger..trigger + 3].fill(0x20);
 
     let input = vec![base, marked, restored];
-    let (bytes, _) = encode_with(
+    let bytes = encode_with(
         REDUCE_WIDTH,
         REDUCE_HEIGHT,
-        reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+        reduce_config(ColorType::Rgba8),
         &input,
     );
 
@@ -1294,37 +1273,7 @@ fn frames_spooled_for_the_color_type_are_disposed_to_previous() {
             (TRIGGER.0, TRIGGER.1, 1, 1)
         ]
     );
-    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Rgba);
-}
-
-/// 溜めるのをやめた区間も、貼り直して捨てる判断と重ね方を選ぶ
-///
-/// 上限に達したときの出力は入力の色種別のままなのでアルファを持つ。そこまでに溜めた
-/// 矩形を貼り直せば、その区間も溜めなかった場合と同じ判断を受けられる。
-#[test]
-fn an_abandoned_spool_still_chooses_its_dispose_and_blend() {
-    let base = spooled_blend_frame(1);
-    let changed = with_opaque_corners(&base);
-    // 4フレーム目は全画面の差分になり、溜めきれずに解析が打ち切られる
-    let input = vec![base.clone(), changed, base, spooled_blend_frame(2)];
-    // 先頭3フレームは収まり、4フレーム目で溢れる上限
-    let limit = BLEND_PIXELS * 4 * 3;
-
-    let config = reduce_config(ColorType::Rgba8, limit);
-    assert_eq!(
-        reduction_of(BLEND_WIDTH, BLEND_HEIGHT, config, &input),
-        Some(ColorReduction::Abandoned)
-    );
-
-    let (bytes, peak) = encode_with(BLEND_WIDTH, BLEND_HEIGHT, config, &input);
-    assert!(peak <= limit, "{limit} バイトの上限に対して {peak} バイト");
-    assert_eq!(output_color_type(&bytes), png::ColorType::Rgba);
-
-    let (_, decoded) = decode(&bytes);
-    // 2フレーム目は変化した画素がわずかで、3フレーム目が内容を戻す
-    assert_eq!(blend_ops(&decoded)[1], png::BlendOp::Over);
-    assert_eq!(dispose_ops(&decoded)[1], png::DisposeOp::Previous);
-    assert_composites_to(&bytes, BLEND_WIDTH, ColorType::Rgba8, &input);
+    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
 }
 
 /// 捨てたフレームにしか無い内容は、復元されたキャンバスとの差分として残る
@@ -1438,16 +1387,20 @@ fn palette_frame(colors: usize, offset: usize) -> Vec<u8> {
 }
 
 /// 色種別を落とす設定
-fn reduce_config(color_type: ColorType, max_spool_bytes: usize) -> Config {
+fn reduce_config(color_type: ColorType) -> Config {
     Config {
         reduce_color: true,
-        max_spool_bytes,
         ..config(color_type)
     }
 }
 
-/// 符号化した結果と、溜めたバイト数の最大値を返す
-fn encode_with(width: u32, height: u32, config: Config, input: &[Vec<u8>]) -> (Vec<u8>, usize) {
+/// 符号化し、失敗したらそのエラーを返す
+fn try_encode_with(
+    width: u32,
+    height: u32,
+    config: Config,
+    input: &[Vec<u8>],
+) -> Result<Vec<u8>, Error> {
     let delay = FrameDelay::new(1001, 30000).unwrap();
     let mut encoder = Encoder::new(
         Cursor::new(Vec::new()),
@@ -1455,13 +1408,16 @@ fn encode_with(width: u32, height: u32, config: Config, input: &[Vec<u8>]) -> (V
         height,
         input.len() as u32,
         config,
-    )
-    .unwrap();
+    )?;
     for data in input {
-        encoder.add_frame(data, delay).unwrap();
+        encoder.add_frame(data, delay)?;
     }
-    let peak = encoder.peak_spool_bytes();
-    (encoder.finish().unwrap().into_inner(), peak)
+    Ok(encoder.finish()?.into_inner())
+}
+
+/// 符号化した結果を返す
+fn encode_with(width: u32, height: u32, config: Config, input: &[Vec<u8>]) -> Vec<u8> {
+    try_encode_with(width, height, config, input).expect("符号化に失敗した")
 }
 
 /// IHDRが示す出力の色種別
@@ -1539,62 +1495,28 @@ fn assert_reduced_roundtrip(bytes: &[u8], input: &[Vec<u8>], expected: png::Colo
     }
 }
 
-/// 先頭フレームで確定すれば、出力は保留しない場合と一致する
-#[test]
-fn deciding_early_produces_the_same_bytes_as_not_reducing() {
-    let input = distinct_frames(ColorType::Rgba8, 4);
-    let plain = encode(REDUCE_WIDTH, REDUCE_HEIGHT, ColorType::Rgba8, &input);
-    let (reduced, _) = encode_with(
-        REDUCE_WIDTH,
-        REDUCE_HEIGHT,
-        reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
-        &input,
-    );
-
-    assert_eq!(reduced, plain);
-}
-
-/// 色数が上限を超えるRGB8の入力は、先頭フレームで確定して溜めるのをやめる
+/// 先頭フレームの色数が収まらなければ、出力は落とさない場合と一致する
 ///
-/// 抱えるのは先頭フレームの1つだけで、書き出したバイト列は溜めない場合と変わらない。
+/// 落とすかどうかは先頭フレームだけで決まり、そこで諦めれば以降は同じ経路を通る。
 #[test]
-fn rgb_input_over_the_color_limit_is_decided_on_the_first_frame() {
-    let input = distinct_frames(ColorType::Rgb8, 4);
-    let plain = encode(REDUCE_WIDTH, REDUCE_HEIGHT, ColorType::Rgb8, &input);
-    let (reduced, peak) = encode_with(
-        REDUCE_WIDTH,
-        REDUCE_HEIGHT,
-        reduce_config(ColorType::Rgb8, DEFAULT_MAX_SPOOL_BYTES),
-        &input,
-    );
+fn giving_up_on_the_first_frame_produces_the_same_bytes_as_not_reducing() {
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        let input = distinct_frames(color_type, 4);
+        let plain = encode(REDUCE_WIDTH, REDUCE_HEIGHT, color_type, &input);
+        let reduced = encode_with(
+            REDUCE_WIDTH,
+            REDUCE_HEIGHT,
+            reduce_config(color_type),
+            &input,
+        );
 
-    assert_eq!(reduced, plain);
-    let frame_len = REDUCE_PIXELS * 3;
-    assert!(
-        (frame_len..frame_len * 2).contains(&peak),
-        "{frame_len} バイトの画素に対して抱えたのは {peak} バイト"
-    );
+        assert_eq!(reduced, plain, "{color_type:?}");
+    }
 }
 
-/// 先頭フレームすら溜められない上限でも、保留せずに書き出せる
+/// パレットで出るフレームも、矩形と遅延を保ったまま順に書き出される
 #[test]
-fn a_zero_spool_limit_writes_everything_as_it_arrives() {
-    let input = distinct_frames(ColorType::Rgba8, 3);
-    let plain = encode(REDUCE_WIDTH, REDUCE_HEIGHT, ColorType::Rgba8, &input);
-    let (bytes, peak) = encode_with(
-        REDUCE_WIDTH,
-        REDUCE_HEIGHT,
-        reduce_config(ColorType::Rgba8, 0),
-        &input,
-    );
-
-    assert_eq!(bytes, plain);
-    assert_eq!(peak, 0);
-}
-
-/// 溜めたフレームは矩形と遅延を保ったまま順に書き出される
-#[test]
-fn spooled_frames_keep_their_rects_and_order() {
+fn palette_frames_keep_their_rects_and_order() {
     let mut input = vec![vec![0xFFu8; REDUCE_FRAME_LEN]];
     let positions = [(1u32, 1u32), (6, 4), (3, 2)];
     for (index, &(x, y)) in positions.iter().enumerate() {
@@ -1604,10 +1526,10 @@ fn spooled_frames_keep_their_rects_and_order() {
         input.push(frame);
     }
 
-    let (bytes, _) = encode_with(
+    let bytes = encode_with(
         REDUCE_WIDTH,
         REDUCE_HEIGHT,
-        reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+        reduce_config(ColorType::Rgba8),
         &input,
     );
 
@@ -1631,10 +1553,10 @@ fn a_single_frame_input_is_decided_on_that_frame() {
         ),
         (distinct_frames(ColorType::Rgba8, 1), png::ColorType::Rgba),
     ] {
-        let (bytes, _) = encode_with(
+        let bytes = encode_with(
             REDUCE_WIDTH,
             REDUCE_HEIGHT,
-            reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+            reduce_config(ColorType::Rgba8),
             &input,
         );
 
@@ -1659,15 +1581,15 @@ fn transient_frames() -> Vec<Vec<u8>> {
     vec![base.clone(), marked.clone(), base.clone(), marked, base]
 }
 
-/// 溜めるのをやめた後のdispose_opは、最初から溜めない場合と変わらない
+/// パレットを諦めた後のdispose_opは、最初から落とさない場合と変わらない
 #[test]
-fn disposal_after_the_spool_matches_not_reducing() {
+fn disposal_after_giving_up_the_palette_matches_not_reducing() {
     let input = transient_frames();
     let plain = encode(REDUCE_WIDTH, REDUCE_HEIGHT, ColorType::Rgba8, &input);
-    let (reduced, _) = encode_with(
+    let reduced = encode_with(
         REDUCE_WIDTH,
         REDUCE_HEIGHT,
-        reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+        reduce_config(ColorType::Rgba8),
         &input,
     );
 
@@ -1676,70 +1598,6 @@ fn disposal_after_the_spool_matches_not_reducing() {
     let (_, decoded) = decode(&reduced);
     assert!(dispose_ops(&decoded).contains(&png::DisposeOp::Previous));
     assert_reduced_roundtrip(&reduced, &input, png::ColorType::Rgba);
-}
-
-/// 溜めるのをやめた直後のフレームには、捨てられる保留フレームが無い
-///
-/// そこで捨てる判断をすると、書き出し済みのフレームは戻らないのに、次のフレームは
-/// 戻ったキャンバスとの差分で書かれてしまう。
-#[test]
-fn the_frame_after_a_commit_has_nothing_to_dispose() {
-    const BLOCK: (u32, u32, u32, u32) = (2, 1, 4, 2);
-
-    // 2フレーム目で色数が上限を超え、そこで色種別が確定して溜めたぶんが流れる
-    let base = palette_frame(MAX_PALETTE_COLORS - 6, 0);
-    let mut marked = base.clone();
-    for y in 0..BLOCK.3 as usize {
-        for x in 0..BLOCK.2 as usize {
-            let start = ((BLOCK.1 as usize + y) * REDUCE_WIDTH as usize + BLOCK.0 as usize + x) * 4;
-            let color = MAX_PALETTE_COLORS + y * BLOCK.2 as usize + x;
-            marked[start..start + 3].copy_from_slice(&[
-                color as u8,
-                (color >> 8) as u8,
-                (color >> 16) as u8,
-            ]);
-        }
-    }
-
-    let input = vec![base.clone(), marked, base];
-    let (bytes, _) = encode_with(
-        REDUCE_WIDTH,
-        REDUCE_HEIGHT,
-        reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
-        &input,
-    );
-
-    let (_, decoded) = decode(&bytes);
-    assert!(
-        dispose_ops(&decoded)
-            .iter()
-            .all(|op| matches!(op, png::DisposeOp::None))
-    );
-    assert_eq!(
-        rects(&decoded),
-        [(0, 0, REDUCE_WIDTH, REDUCE_HEIGHT), BLOCK, BLOCK]
-    );
-    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Rgba);
-}
-
-/// 溜めている間は出力の色種別が決まらず候補を比べられないため、捨てない
-#[test]
-fn spooled_frames_are_never_disposed() {
-    let input = transient_palette_frames();
-    let (bytes, _) = encode_with(
-        REDUCE_WIDTH,
-        REDUCE_HEIGHT,
-        reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
-        &input,
-    );
-
-    let (_, decoded) = decode(&bytes);
-    assert!(
-        dispose_ops(&decoded)
-            .iter()
-            .all(|op| matches!(op, png::DisposeOp::None))
-    );
-    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
 }
 
 /// 透過する色と不透明な色を混ぜたRGBA8のフレームを作る
@@ -1755,15 +1613,14 @@ fn mixed_alpha_frame() -> Vec<u8> {
         .collect()
 }
 
-/// 色種別を落とす既定の設定で符号化する
+/// 色種別を落とす設定で符号化する
 fn encode_reduced(color_type: ColorType, input: &[Vec<u8>]) -> Vec<u8> {
     encode_with(
         REDUCE_WIDTH,
         REDUCE_HEIGHT,
-        reduce_config(color_type, DEFAULT_MAX_SPOOL_BYTES),
+        reduce_config(color_type),
         input,
     )
-    .0
 }
 
 /// 色数が上限に収まる入力は、1色でも上限ちょうどでもパレットで出る
@@ -1774,8 +1631,40 @@ fn an_input_within_the_color_limit_is_written_as_indexed_color() {
         let bytes = encode_reduced(ColorType::Rgba8, &input);
 
         assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
-        assert_eq!(plte(&bytes).len() / 3, colors, "{colors} 色");
     }
+}
+
+/// PLTEとtRNSは載せた色数に関わらず上限いっぱいのエントリ数で書く
+///
+/// 添字を振り終える前にフレームを書き出すため、色数が決まる前に場所を確保する。
+/// 載せた色の後ろは、PLTEが0でtRNSが不透明の詰め物になる。
+#[test]
+fn the_palette_chunks_are_padded_to_a_fixed_number_of_entries() {
+    const COLORS: usize = 8;
+
+    let input = vec![mixed_alpha_frame()];
+    let bytes = encode_reduced(ColorType::Rgba8, &input);
+
+    let plte = plte(&bytes);
+    assert_eq!(plte.len() / 3, MAX_PALETTE_COLORS);
+    assert!(plte[COLORS * 3..].iter().all(|&byte| byte == 0));
+
+    let trns = trns(&bytes);
+    assert_eq!(trns.len(), MAX_PALETTE_COLORS);
+    assert!(trns[COLORS..].iter().all(|&alpha| alpha == u8::MAX));
+
+    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
+}
+
+/// 添字は色を見つけた順に振る
+///
+/// 全フレームを見終わる前に添字を焼くため、明るさなどでは並べ替えられない。
+#[test]
+fn the_palette_follows_the_order_the_colors_were_found() {
+    let input = vec![palette_frame(4, 0)];
+    let bytes = encode_reduced(ColorType::Rgba8, &input);
+
+    assert_eq!(plte(&bytes)[..12], [0, 0, 0, 1, 0, 0, 2, 0, 0, 3, 0, 0]);
 }
 
 /// 色数が上限を1つ超えると、パレットをやめて入力の色種別へ落とす
@@ -1790,11 +1679,11 @@ fn one_color_over_the_limit_gives_up_the_palette() {
     assert_reduced_roundtrip(&bytes, &beyond, png::ColorType::Rgba);
 }
 
-/// 収まるかどうかは全フレームの色の和集合で決める
+/// 先頭フレームで賭けた後に色数が溢れたら、そのフレームを指して失敗する
 ///
-/// フレームごとに数えると、どのフレームも上限に収まるためパレットで出てしまう。
+/// 添字は既に焼かれているため、後から入力の色種別へ戻ることはできない。
 #[test]
-fn the_color_limit_is_measured_over_the_union_of_every_frame() {
+fn a_color_beyond_the_palette_fails_on_the_frame_that_brings_it() {
     const PER_FRAME: usize = 200;
 
     let single = vec![palette_frame(PER_FRAME, 0)];
@@ -1803,10 +1692,45 @@ fn the_color_limit_is_measured_over_the_union_of_every_frame() {
 
     let union = vec![
         palette_frame(PER_FRAME, 0),
+        palette_frame(PER_FRAME, 0),
         palette_frame(PER_FRAME, PER_FRAME),
     ];
-    let bytes = encode_reduced(ColorType::Rgba8, &union);
-    assert_reduced_roundtrip(&bytes, &union, png::ColorType::Rgba);
+    assert!(matches!(
+        try_encode_with(
+            REDUCE_WIDTH,
+            REDUCE_HEIGHT,
+            reduce_config(ColorType::Rgba8),
+            &union
+        ),
+        Err(Error::ColorLimitExceeded { frame: 2 })
+    ));
+}
+
+/// 色数が溢れた後のエンコーダは使用不能になる
+#[test]
+fn a_color_beyond_the_palette_poisons_the_encoder() {
+    let base = palette_blend_frame(1);
+    let burst = with_color_burst(&base);
+    let delay = FrameDelay::new(1001, 30000).unwrap();
+
+    let mut encoder = Encoder::new(
+        Cursor::new(Vec::new()),
+        BLEND_WIDTH,
+        BLEND_HEIGHT,
+        3,
+        reduce_config(ColorType::Rgba8),
+    )
+    .unwrap();
+    encoder.add_frame(&base, delay).unwrap();
+    assert!(matches!(
+        encoder.add_frame(&burst, delay),
+        Err(Error::ColorLimitExceeded { frame: 1 })
+    ));
+    assert!(matches!(
+        encoder.add_frame(&base, delay),
+        Err(Error::Poisoned)
+    ));
+    assert!(matches!(encoder.finish(), Err(Error::Poisoned)));
 }
 
 /// アルファを持つ色はtRNSに載り、画素は元のまま戻る
@@ -1816,28 +1740,20 @@ fn a_palette_keeps_the_alpha_of_every_color() {
     let bytes = encode_reduced(ColorType::Rgba8, &input);
 
     assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
-    assert_eq!(plte(&bytes).len() / 3, 8);
+    assert_eq!(trns(&bytes)[..3], [0x00, 0x40, 0x80]);
 }
 
-/// tRNSは透過する色のぶんだけで、末尾の不透明なエントリは省く
+/// アルファを持つ入力のパレットは、透過が現れなくてもtRNSを持つ
 ///
-/// 仕様がエントリ数の不足を255として扱うため、後ろへ寄せた不透明な色は書かない。
+/// tRNSを書くかどうかは先頭フレームで決まり、そこでは後のフレームのアルファが
+/// まだ分からない。
 #[test]
-fn the_trailing_opaque_entries_are_omitted_from_the_trns() {
-    let input = vec![mixed_alpha_frame()];
-    let bytes = encode_reduced(ColorType::Rgba8, &input);
-
-    assert_eq!(trns(&bytes), [0x00, 0x40, 0x80]);
-}
-
-/// すべて不透明なパレットにはtRNSを書かない
-#[test]
-fn an_opaque_palette_is_written_without_a_trns() {
+fn a_palette_from_an_alpha_input_always_carries_a_trns() {
     let input = vec![palette_frame(4, 0)];
     let bytes = encode_reduced(ColorType::Rgba8, &input);
 
     assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
-    assert!(chunk_types(&bytes).iter().all(|kind| kind != b"tRNS"));
+    assert!(trns(&bytes).iter().all(|&alpha| alpha == u8::MAX));
 }
 
 /// PLTEとtRNSは画素データより前に置く
@@ -1861,7 +1777,7 @@ fn the_palette_chunks_come_before_the_pixel_data() {
     assert!(at(b"fcTL") < at(b"IDAT"));
 }
 
-/// RGB8の入力もパレットへ落とす
+/// RGB8の入力もパレットへ落とす。アルファが現れ得ないためtRNSは書かない
 #[test]
 fn rgb_input_within_the_color_limit_is_written_as_indexed_color() {
     let frame: Vec<u8> = palette_frame(16, 0)
@@ -1872,28 +1788,8 @@ fn rgb_input_within_the_color_limit_is_written_as_indexed_color() {
     let bytes = encode_reduced(ColorType::Rgb8, &input);
 
     assert_eq!(output_color_type(&bytes), png::ColorType::Indexed);
-    assert_eq!(plte(&bytes).len() / 3, 16);
     assert!(chunk_types(&bytes).iter().all(|kind| kind != b"tRNS"));
     assert_composites_to(&bytes, REDUCE_WIDTH, ColorType::Rgb8, &input);
-}
-
-/// 上限を超えるフレームが来たら、色数が収まっていてもパレットを諦める
-#[test]
-fn exceeding_the_spool_limit_gives_up_the_palette() {
-    let input = vec![palette_frame(4, 0), palette_frame(4, 8)];
-    let plain = encode(REDUCE_WIDTH, REDUCE_HEIGHT, ColorType::Rgba8, &input);
-    // 2フレーム目を溜められない上限
-    let limit = REDUCE_FRAME_LEN + REDUCE_FRAME_LEN / 2;
-    let (bytes, peak) = encode_with(
-        REDUCE_WIDTH,
-        REDUCE_HEIGHT,
-        reduce_config(ColorType::Rgba8, limit),
-        &input,
-    );
-
-    assert_eq!(bytes, plain);
-    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Rgba);
-    assert!(peak <= limit);
 }
 
 /// [`palette_frame`] と同じ色をRGB8で敷き詰めたフレームを作る
@@ -1906,60 +1802,24 @@ fn palette_frame_rgb(colors: usize, offset: usize) -> Vec<u8> {
 
 /// 全画面が交互に入れ替わる、色数が上限に収まるRGB8のフレーム列
 ///
-/// どのフレームも直前と全画素が違うため、溜める量はフレームごとに1画面ぶん増える。
-/// 1つ飛ばしのフレームは内容が戻るので、溜めなければ捨てる判断が立つ。
+/// どのフレームも直前と全画素が違い、1つ飛ばしのフレームは内容が戻る。
 fn alternating_palette_frames(count: usize) -> Vec<Vec<u8>> {
     (0..count)
         .map(|index| palette_frame_rgb(4, index % 2 * 8))
         .collect()
 }
 
-/// 色数が上限に収まるRGB8の入力でも、溜める上限に達したらパレットを諦める
-///
-/// 溜めた区間はdispose_opを決められないまま書き出されるので、溜めなければ
-/// 立っていた捨てる判断がその区間から消える。
+/// 先頭フレームの後に現れた色も、パレットに収まる限り同じ表へ載る
 #[test]
-fn an_rgb_input_that_fills_the_spool_gives_up_the_palette() {
-    const SPOOLED: usize = 2;
-
-    let input = alternating_palette_frames(5);
-    let frame_len = REDUCE_PIXELS * 3;
-    // フレームごとの管理領域を多めに見ても SPOOLED 枚で尽きる上限
-    let limit = SPOOLED * (frame_len + 128);
-    let (bytes, peak) = encode_with(
-        REDUCE_WIDTH,
-        REDUCE_HEIGHT,
-        reduce_config(ColorType::Rgb8, limit),
-        &input,
-    );
-
-    assert_eq!(output_color_type(&bytes), png::ColorType::Rgb);
-    assert!(peak <= limit, "{peak} バイト抱えた (上限 {limit})");
-    assert_composites_to(&bytes, REDUCE_WIDTH, ColorType::Rgb8, &input);
-
-    // 溜めた区間は捨てる判断を経ずに書き出される
-    let (_, decoded) = decode(&bytes);
-    assert!(
-        dispose_ops(&decoded)[..SPOOLED]
-            .iter()
-            .all(|op| matches!(op, png::DisposeOp::None)),
-        "{:?}",
-        dispose_ops(&decoded)
-    );
-    // 溜めずに書き出せば、同じ入力で捨てる判断が立つ
-    let plain = encode(REDUCE_WIDTH, REDUCE_HEIGHT, ColorType::Rgb8, &input);
-    assert!(dispose_ops(&decode(&plain).1).contains(&png::DisposeOp::Previous));
-}
-
-/// 上限に届かなければ、同じ入力がパレットで出る
-#[test]
-fn the_same_rgb_input_becomes_a_palette_when_the_spool_holds() {
+fn colors_found_after_the_first_frame_join_the_palette() {
     let input = alternating_palette_frames(5);
     let bytes = encode_reduced(ColorType::Rgb8, &input);
 
     assert_eq!(output_color_type(&bytes), png::ColorType::Indexed);
-    assert_eq!(plte(&bytes).len() / 3, 8);
     assert_composites_to(&bytes, REDUCE_WIDTH, ColorType::Rgb8, &input);
+
+    let (_, decoded) = decode(&bytes);
+    assert!(dispose_ops(&decoded).contains(&png::DisposeOp::Previous));
 }
 
 /// パレットで出る素材は、部分矩形とdispose_opをまたいでも可逆であること
@@ -2076,24 +1936,21 @@ fn both_filter_strategies_are_reversible() {
 #[test]
 fn both_filter_strategies_are_reversible_while_reducing_color() {
     // 4色しか使わない素材はパレットで、色数が上限を超える素材は入力の色種別で出る
-    // 不透明なパレットだけがtRNSを持たず、RGB8へ展開される
     let sources = [
         (
             flat_frame as fn(ColorType, u32) -> Vec<u8>,
             png::ColorType::Indexed,
-            ColorType::Rgb8,
         ),
-        (detailed_frame, png::ColorType::Rgba, ColorType::Rgba8),
+        (detailed_frame, png::ColorType::Rgba),
     ];
     let config = Config {
         reduce_color: true,
         ..config(ColorType::Rgba8)
     };
 
-    for (source, output, opaque_composite) in sources {
+    for (source, output) in sources {
         for count in [1u32, 3, 5, 9] {
-            // 先頭画素を透過させると、パレットはtRNSを持ってRGBA8へ展開される
-            for (alpha, composite) in [(0xFF, opaque_composite), (0x80, ColorType::Rgba8)] {
+            for alpha in [0xFF, 0x80] {
                 let mut input: Vec<Vec<u8>> = (0..count)
                     .map(|seed| source(ColorType::Rgba8, seed))
                     .collect();
@@ -2101,16 +1958,12 @@ fn both_filter_strategies_are_reversible_while_reducing_color() {
                     frame[3] = alpha;
                 }
 
-                let (bytes, _) = encode_with(FILTER_WIDTH, FILTER_HEIGHT, config, &input);
+                let bytes = encode_with(FILTER_WIDTH, FILTER_HEIGHT, config, &input);
                 let at = format!("{count} フレーム α={alpha:#04X}");
                 assert_eq!(output_color_type(&bytes), output, "{at}");
-                assert_eq!(composite_color_type(&bytes), composite, "{at}");
-
-                let expected: Vec<Vec<u8>> = match composite {
-                    ColorType::Rgb8 => input.iter().map(|frame| without_alpha(frame)).collect(),
-                    ColorType::Rgba8 => input.clone(),
-                };
-                assert_composites_to(&bytes, FILTER_WIDTH, composite, &expected);
+                // アルファを持つ入力の出力は、パレットでもRGBA8へ展開される
+                assert_eq!(composite_color_type(&bytes), ColorType::Rgba8, "{at}");
+                assert_composites_to(&bytes, FILTER_WIDTH, ColorType::Rgba8, &input);
             }
         }
     }
@@ -2135,7 +1988,7 @@ fn reduction_of(
     for data in input {
         encoder.add_frame(data, delay).unwrap();
     }
-    // 色種別は遅くとも最後のフレームで決まるため、終端の前に読める
+    // 色種別は先頭フレームで決まるため、終端の前に読める
     let reduction = encoder.color_reduction();
     encoder.finish().unwrap();
     reduction
@@ -2150,7 +2003,7 @@ fn a_palette_is_reported_with_its_color_count() {
             reduction_of(
                 REDUCE_WIDTH,
                 REDUCE_HEIGHT,
-                reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES),
+                reduce_config(ColorType::Rgba8),
                 &input
             ),
             Some(ColorReduction::Palette {
@@ -2170,132 +2023,13 @@ fn a_kept_color_type_is_reported() {
             reduction_of(
                 REDUCE_WIDTH,
                 REDUCE_HEIGHT,
-                reduce_config(color_type, DEFAULT_MAX_SPOOL_BYTES),
+                reduce_config(color_type),
                 &input
             ),
             Some(ColorReduction::Kept),
             "{color_type:?}"
         );
     }
-}
-
-/// 色数が上限を超えたフレームで確定し、そこから先は溜めない
-///
-/// 最後のフレームまで溜めると、抱えるメモリが素材の長さに比例して増えるうえ、
-/// 溜めた区間はdispose_opを決められないまま書き出される。
-#[test]
-fn an_input_over_the_color_limit_stops_spooling_where_it_exceeds() {
-    const WITHIN: usize = 2;
-
-    // 色の集合は変えず並びだけをずらすので、全画素が変化して和集合は上限に収まる
-    let mut input: Vec<Vec<u8>> = (0..WITHIN)
-        .map(|offset| {
-            (0..REDUCE_PIXELS)
-                .flat_map(|pixel| {
-                    let color = (pixel + offset) % MAX_PALETTE_COLORS;
-                    [color as u8, (color >> 8) as u8, (color >> 16) as u8, 0xFF]
-                })
-                .collect()
-        })
-        .collect();
-    // 次のフレームで上限を超える
-    input.extend(distinct_frames(ColorType::Rgba8, 3));
-
-    let config = reduce_config(ColorType::Rgba8, DEFAULT_MAX_SPOOL_BYTES);
-    let (bytes, peak) = encode_with(REDUCE_WIDTH, REDUCE_HEIGHT, config, &input);
-
-    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Rgba);
-    // 超えたフレームまでは溜め、それより後のフレームは溜めない
-    let held = REDUCE_FRAME_LEN * (WITHIN + 1);
-    assert!(
-        (held..held + REDUCE_FRAME_LEN).contains(&peak),
-        "{held} バイトの画素に対して抱えたのは {peak} バイト"
-    );
-}
-
-/// 上限に達して解析をやめたことは、収まらなかった場合と区別して分かる
-#[test]
-fn an_abandoned_analysis_is_reported() {
-    // 色数が上限に収まる間だけ溜め続けるため、上限に達するのはこの素材だけ
-    let input: Vec<Vec<u8>> = (0..4)
-        .map(|index| palette_frame(4, index % 2 * 8))
-        .collect();
-    // 2フレーム目を溜められない上限
-    let limit = REDUCE_FRAME_LEN + REDUCE_FRAME_LEN / 2;
-    assert_eq!(
-        reduction_of(
-            REDUCE_WIDTH,
-            REDUCE_HEIGHT,
-            reduce_config(ColorType::Rgba8, limit),
-            &input
-        ),
-        Some(ColorReduction::Abandoned)
-    );
-    assert_eq!(
-        reduction_of(
-            REDUCE_WIDTH,
-            REDUCE_HEIGHT,
-            reduce_config(ColorType::Rgba8, 0),
-            &input
-        ),
-        Some(ColorReduction::Abandoned)
-    );
-}
-
-/// 上限を明示しない設定は、現実的な長さの素材を溜めきる
-///
-/// 色の和集合がパレットに収まる間は候補が残るため、最後のフレームまで溜め続ける。
-/// [`DEFAULT_MAX_SPOOL_BYTES`] がこの区間を抱えきれなければ解析は打ち切られ、
-/// パレットへ落とせないまま入力の色種別で出る。
-#[test]
-fn the_default_spool_limit_holds_a_realistic_clip() {
-    const WIDTH: u32 = 320;
-    const HEIGHT: u32 = 240;
-    const COUNT: usize = 8;
-    /// 1フレームぶんの入力バイト数 (RGBA8)
-    const FRAME_LEN: usize = WIDTH as usize * HEIGHT as usize * 4;
-
-    // 色の集合は変えず並びだけをずらすので、全画素が変化してパレットにも収まる
-    let input: Vec<Vec<u8>> = (0..COUNT)
-        .map(|offset| {
-            (0..FRAME_LEN / 4)
-                .flat_map(|pixel| {
-                    let color = (pixel + offset) % MAX_PALETTE_COLORS;
-                    [color as u8, 0x40, 0x80, 0xFF]
-                })
-                .collect()
-        })
-        .collect();
-
-    let config = Config {
-        reduce_color: true,
-        ..config(ColorType::Rgba8)
-    };
-    let delay = FrameDelay::new(1001, 30000).unwrap();
-    let mut encoder =
-        Encoder::new(Cursor::new(Vec::new()), WIDTH, HEIGHT, COUNT as u32, config).unwrap();
-    for data in &input {
-        encoder.add_frame(data, delay).unwrap();
-    }
-    let reduction = encoder.color_reduction();
-    let peak = encoder.peak_spool_bytes();
-    let bytes = encoder.finish().unwrap().into_inner();
-
-    // 打ち切らずに溜めきれば、抱えた量は全フレームの画素を下回らない
-    assert!(
-        peak >= FRAME_LEN * COUNT,
-        "{} バイトの画素に対して抱えたのは {peak} バイト",
-        FRAME_LEN * COUNT
-    );
-    assert_eq!(
-        reduction,
-        Some(ColorReduction::Palette {
-            colors: MAX_PALETTE_COLORS as u16
-        })
-    );
-
-    let expected: Vec<Vec<u8>> = input.iter().map(|frame| without_alpha(frame)).collect();
-    assert_composites_to(&bytes, WIDTH, ColorType::Rgb8, &expected);
 }
 
 /// 落とす設定でなければ結果も無い

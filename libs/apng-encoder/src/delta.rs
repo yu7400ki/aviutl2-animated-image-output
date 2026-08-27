@@ -26,14 +26,6 @@ impl Delta {
         }
     }
 
-    /// 先頭フレームを迎える前の状態へ戻す
-    ///
-    /// 確保済みの容量はそのまま残す。
-    pub(crate) fn reset(&mut self) {
-        self.previous.clear();
-        self.canvas.clear();
-    }
-
     /// 投入されたフレームを直前のフレームとして覚え、キャンバスを進める
     pub(crate) fn advance(&mut self, data: &[u8], dispose: u8) {
         // 捨てない場合だけ、直前のフレームがそのままキャンバスとして残る

@@ -27,7 +27,6 @@ fn encoder_config(config: &Config) -> EncoderConfig {
         compression_level: config.compression_level,
         num_plays: config.repeat,
         reduce_color: config.reduce_color,
-        ..EncoderConfig::default()
     }
 }
 
@@ -39,10 +38,6 @@ fn color_reduction_message(reduction: ColorReduction) -> String {
         }
         ColorReduction::Kept => {
             "色数の最適化: 色数が多いため、カラーフォーマットのまま出力しました".into()
-        }
-        ColorReduction::Abandoned => {
-            "色数の最適化: 解析に使えるメモリを超えたため、カラーフォーマットのまま出力しました"
-                .into()
         }
     }
 }
@@ -76,7 +71,7 @@ fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
     })
     .map_err(|e| e.to_string())?;
 
-    // 色種別は最後のフレームまでに決まるが、書き出しの成否は終端まで分からない
+    // 色種別は先頭フレームで決まるが、書き出しの成否は終端まで分からない
     let reduction = encoder.color_reduction();
 
     encoder
@@ -231,7 +226,6 @@ mod tests {
                 "パレットに置き換え",
             ),
             (ColorReduction::Kept, "色数が多いため"),
-            (ColorReduction::Abandoned, "メモリを超えたため"),
         ];
 
         let messages: Vec<String> = cases

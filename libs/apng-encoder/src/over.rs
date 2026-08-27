@@ -1,5 +1,6 @@
 //! blend_op=OVERで合成する画素の詰め方
 
+use crate::palette::Palette;
 use anim_core::Rect;
 
 /// RGBA8の1画素のバイト数
@@ -21,18 +22,23 @@ fn region_rows<'a>(
 }
 
 /// 行の組を上から順に潰して `out` へ追記する
-fn pack_over_rows<'a>(rows: impl Iterator<Item = (&'a [u8], &'a [u8])>, out: &mut Vec<u8>) -> bool {
-    const TRANSPARENT: [u8; RGBA] = [0; RGBA];
-
+///
+/// 変化しなかった画素は `transparent` へ、変化した画素は `keep` が書く値へ写す。
+fn pack_over_rows<'a>(
+    rows: impl Iterator<Item = (&'a [u8], &'a [u8])>,
+    transparent: &[u8],
+    keep: impl Fn(&[u8], &mut Vec<u8>),
+    out: &mut Vec<u8>,
+) -> bool {
     let start = out.len();
     let mut collapsed = false;
     for (prev_row, curr_row) in rows {
         for (p, c) in prev_row.chunks_exact(RGBA).zip(curr_row.chunks_exact(RGBA)) {
             if p == c {
                 collapsed = true;
-                out.extend_from_slice(&TRANSPARENT);
+                out.extend_from_slice(transparent);
             } else if c[RGBA - 1] == u8::MAX {
-                out.extend_from_slice(c);
+                keep(c, out);
             } else {
                 out.truncate(start);
                 return false;
@@ -63,8 +69,38 @@ pub(crate) fn pack_over(
     rect: Rect,
     out: &mut Vec<u8>,
 ) -> bool {
+    const TRANSPARENT: [u8; RGBA] = [0; RGBA];
+
     out.reserve(rect.width as usize * rect.height as usize * RGBA);
-    pack_over_rows(region_rows(prev, curr, stride, rect), out)
+    pack_over_rows(
+        region_rows(prev, curr, stride, rect),
+        &TRANSPARENT,
+        |pixel, out| out.extend_from_slice(pixel),
+        out,
+    )
+}
+
+/// 矩形を添字へ写し、`prev` と一致する画素を `transparent` の添字にして `out` へ追記する
+///
+/// 条件は [`pack_over`] と同じで、書き出す値だけが1バイトの添字になる。
+/// `transparent` はアルファが0の色の添字、`rect` の中の画素は `palette` が
+/// 添字を振り終えていること。
+pub(crate) fn pack_over_indexed(
+    prev: &[u8],
+    curr: &[u8],
+    stride: usize,
+    rect: Rect,
+    palette: &Palette,
+    transparent: u8,
+    out: &mut Vec<u8>,
+) -> bool {
+    out.reserve(rect.width as usize * rect.height as usize);
+    pack_over_rows(
+        region_rows(prev, curr, stride, rect),
+        &[transparent],
+        |pixel, out| out.push(palette.index_of(pixel, RGBA).expect("添字の無い色")),
+        out,
+    )
 }
 
 #[cfg(test)]

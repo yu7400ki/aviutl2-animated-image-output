@@ -1,76 +1,102 @@
-//! 明るさで並べたパレットの組み立て
+//! 見つけた順に添字を振る色表と、後から書き戻すPLTE・tRNSの置き場
 
-use anim_core::{Colors, Indexed};
+use anim_core::{Colors, MAX_COLORS};
 
-/// 色の明るさの目安
+/// PLTEのデータ部の長さ
 ///
-/// 緑を重く青を軽く見る整数の重み付けで、絶対値ではなく色どうしの前後だけを使う。
-fn luminance(color: u32) -> u32 {
-    let (r, g, b) = (color & 0xFF, (color >> 8) & 0xFF, (color >> 16) & 0xFF);
-    r * 2 + g * 5 + b
-}
+/// 添字を振り終える前にフレームを書き出すため、色数が決まる前に場所を確保する。
+/// エントリ数は上限いっぱいで固定し、載せた色の後ろは詰め物になる。
+pub(crate) const PLTE_LEN: usize = MAX_COLORS * 3;
 
-/// PLTEとtRNSへ落とせるパレット
+/// tRNSのデータ部の長さ
+///
+/// 理由は [`PLTE_LEN`] と同じ。
+pub(crate) const TRNS_LEN: usize = MAX_COLORS;
+
+/// PLTEとtRNSを引く添字の表
+///
+/// 添字は色を見つけた順に振る。全フレームを見終わる前に添字を焼くため、
+/// 並べ替えはできない。
 pub(crate) struct Palette {
-    indexed: Indexed,
+    colors: Colors,
+    /// 確保したPLTEのファイル上の位置
+    plte: u64,
+    /// 確保したtRNSのファイル上の位置
+    ///
+    /// アルファを持たない入力にはアルファが現れないため、tRNS自体を書かない。
+    trns: Option<u64>,
 }
 
 impl Palette {
-    /// 数えた色を並べてパレットにする
-    ///
-    /// 明るさの順に置く。隣り合う画素の色が近いほど添字も数として近くなるため、
-    /// 行ごとの適応フィルタが添字の面でも効く。明るさが同じ色は見つけた順に残る。
-    ///
-    /// # Panics
-    /// 色数が上限を超えているとき。
-    pub(crate) fn from_colors(colors: Colors) -> Self {
-        Palette {
-            indexed: colors.into_indexed(luminance),
-        }
+    /// 先頭フレームで数えた色から始める
+    pub(crate) fn new(colors: Colors, plte: u64, trns: Option<u64>) -> Self {
+        Palette { colors, plte, trns }
     }
 
-    /// PLTEチャンクのデータ部
-    ///
-    /// 添字順に3バイトのR,G,Bを並べたもの。
-    pub(crate) fn plte(&self) -> Vec<u8> {
-        self.indexed
-            .colors()
-            .iter()
-            .flat_map(|&color| [color as u8, (color >> 8) as u8, (color >> 16) as u8])
-            .collect()
+    /// 添字を振った色数
+    pub(crate) fn colors(&self) -> u16 {
+        self.colors.count()
     }
 
-    /// tRNSチャンクのデータ部
-    ///
-    /// 添字順に1バイトのアルファを並べたもの。エントリ数がパレットに満たない
-    /// ぶんは255とみなされるため、末尾の255は省く。すべて不透明なら空になり、
-    /// この場合はチャンク自体が要らない。
-    pub(crate) fn trns(&self) -> Vec<u8> {
-        let colors = self.indexed.colors();
-        let opaque = colors
-            .iter()
-            .rev()
-            .take_while(|&&color| color >> 24 == u32::from(u8::MAX))
-            .count();
+    /// 確保したPLTEのファイル上の位置
+    pub(crate) fn plte_at(&self) -> u64 {
+        self.plte
+    }
 
-        colors[..colors.len() - opaque]
-            .iter()
-            .map(|&color| (color >> 24) as u8)
-            .collect()
+    /// 確保したtRNSのファイル上の位置
+    pub(crate) fn trns_at(&self) -> Option<u64> {
+        self.trns
+    }
+
+    /// 完全に透明な色の添字。まだ現れていなければ `None`
+    ///
+    /// この添字はアルファが0なので、blend_op=OVERで重ねるとキャンバスが残る。
+    pub(crate) fn transparent(&self) -> Option<u8> {
+        let index = self.colors.colors().position(|color| color >> 24 == 0)?;
+        Some(index as u8)
+    }
+
+    /// 画素の色の添字。まだ振っていなければ `None`
+    ///
+    /// 引数の条件は [`Colors::index_of_pixel`] と同じ。
+    pub(crate) fn index_of(&self, pixel: &[u8], bpp: usize) -> Option<u8> {
+        self.colors.index_of_pixel(pixel, bpp)
     }
 
     /// 画素列を添字へ写して `out` へ追記する
     ///
-    /// 引数の条件は [`Indexed::append_indices`] と同じ。
-    pub(crate) fn append_indices(&self, pixels: &[u8], bpp: usize, out: &mut Vec<u8>) {
-        self.indexed.append_indices(pixels, bpp, out);
+    /// 引数の条件は [`Colors::append_indices`] と同じ。載せられる色数を超えたら
+    /// `out` を呼び出し前の長さへ戻して偽を返す。
+    pub(crate) fn append_indices(&mut self, pixels: &[u8], bpp: usize, out: &mut Vec<u8>) -> bool {
+        self.colors.append_indices(pixels, bpp, out)
+    }
+
+    /// PLTEのデータ部
+    ///
+    /// 添字順に3バイトのR,G,Bを並べ、載せた色の後ろは0で埋める。
+    pub(crate) fn plte(&self) -> [u8; PLTE_LEN] {
+        let mut plte = [0u8; PLTE_LEN];
+        for (entry, color) in plte.chunks_exact_mut(3).zip(self.colors.colors()) {
+            entry.copy_from_slice(&[color as u8, (color >> 8) as u8, (color >> 16) as u8]);
+        }
+        plte
+    }
+
+    /// tRNSのデータ部
+    ///
+    /// 添字順に1バイトのアルファを並べ、載せた色の後ろは不透明で埋める。
+    pub(crate) fn trns(&self) -> [u8; TRNS_LEN] {
+        let mut trns = [u8::MAX; TRNS_LEN];
+        for (entry, color) in trns.iter_mut().zip(self.colors.colors()) {
+            *entry = (color >> 24) as u8;
+        }
+        trns
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anim_core::MAX_COLORS;
 
     /// RGBA8の画素列を作る
     fn rgba(pixels: &[[u8; 4]]) -> Vec<u8> {
@@ -84,193 +110,103 @@ mod tests {
             .collect()
     }
 
+    /// 先頭フレームを数えた表を、位置を持たせずに作る
     fn palette_of(pixels: &[u8], bpp: usize) -> Palette {
         let mut colors = Colors::new();
         colors.observe(pixels, bpp);
-        Palette::from_colors(colors)
+        Palette::new(colors, 0, Some(0))
     }
 
-    /// 1画素だけの入力は1エントリのパレットになる
+    /// 添字は色を見つけた順に振られる
     #[test]
-    fn a_single_pixel_yields_a_one_entry_palette() {
-        let palette = palette_of(&[1, 2, 3, 0x80], 4);
-        assert_eq!(palette.plte(), [1, 2, 3]);
-        assert_eq!(palette.trns(), [0x80]);
+    fn indices_follow_the_order_the_colors_were_found() {
+        let mut palette = palette_of(&[0x30, 0, 0], 3);
+        let mut indices = Vec::new();
+        assert!(palette.append_indices(&[0x30, 0, 0, 0x10, 0, 0, 0x20, 0, 0], 3, &mut indices));
+
+        assert_eq!(indices, [0, 1, 2]);
+        assert_eq!(palette.plte()[..9], [0x30, 0, 0, 0x10, 0, 0, 0x20, 0, 0]);
     }
 
-    /// 同じ色の繰り返しは1つにまとまる
+    /// 同じ色は同じ添字へ写る
     #[test]
-    fn repeated_colors_collapse_into_one_entry() {
-        let palette = palette_of(&rgba(&[[1, 2, 3, 0xFF]; 16]), 4);
-        assert_eq!(palette.plte().len() / 3, 1);
-        assert_eq!(palette.plte(), [1, 2, 3]);
+    fn a_repeated_color_keeps_its_index() {
+        let pixels = rgba(&[[1, 2, 3, 0xFF], [4, 5, 6, 0x80], [1, 2, 3, 0xFF]]);
+        let mut palette = palette_of(&pixels, 4);
+
+        let mut indices = Vec::new();
+        assert!(palette.append_indices(&pixels, 4, &mut indices));
+        assert_eq!(indices, [0, 1, 0]);
+        assert_eq!(palette.colors(), 2);
     }
 
-    /// アルファだけが違う色は別の色として数える
+    /// アルファだけが違う色は別の添字になる
     #[test]
     fn colors_differing_only_in_alpha_are_distinct() {
         let palette = palette_of(&rgba(&[[1, 2, 3, 0xFF], [1, 2, 3, 0x80]]), 4);
-        assert_eq!(palette.plte().len() / 3, 2);
+        assert_eq!(palette.colors(), 2);
+        assert_eq!(palette.trns()[..2], [0xFF, 0x80]);
+    }
+
+    /// PLTEとtRNSは長さが固定で、載せた色の後ろは詰め物になる
+    #[test]
+    fn the_chunks_are_padded_to_a_fixed_length() {
+        let palette = palette_of(&rgba(&[[1, 2, 3, 0x40]]), 4);
+
+        let plte = palette.plte();
+        assert_eq!(plte.len(), PLTE_LEN);
+        assert_eq!(plte[..3], [1, 2, 3]);
+        assert!(plte[3..].iter().all(|&b| b == 0));
+
+        let trns = palette.trns();
+        assert_eq!(trns.len(), TRNS_LEN);
+        assert_eq!(trns[0], 0x40);
+        assert!(trns[1..].iter().all(|&b| b == u8::MAX));
     }
 
     /// RGB8の画素はアルファ255の色として数える
     #[test]
     fn rgb_pixels_are_counted_as_opaque_colors() {
         let palette = palette_of(&[1, 2, 3, 1, 2, 3, 4, 5, 6], 3);
-        assert_eq!(palette.plte().len() / 3, 2);
-        assert!(palette.trns().is_empty());
+        assert_eq!(palette.colors(), 2);
+        assert!(palette.trns().iter().all(|&a| a == u8::MAX));
+        assert_eq!(palette.transparent(), None);
     }
 
-    /// ちょうど上限までの色は数え切り、1つ超えると打ち切る
+    /// 完全に透明な色があれば、その添字が引ける
+    #[test]
+    fn a_fully_transparent_color_is_found_by_its_index() {
+        let palette = palette_of(&rgba(&[[1, 2, 3, 0xFF], [4, 5, 6, 0x00]]), 4);
+        assert_eq!(palette.transparent(), Some(1));
+
+        // 半透明はキャンバスと混ざるため、重ねる先を残せない
+        let palette = palette_of(&rgba(&[[1, 2, 3, 0xFF], [4, 5, 6, 0x01]]), 4);
+        assert_eq!(palette.transparent(), None);
+    }
+
+    /// 画素から添字を引ける。振っていない色は `None`
+    #[test]
+    fn a_pixel_is_looked_up_by_its_bytes() {
+        let palette = palette_of(&rgba(&[[1, 2, 3, 0xFF], [4, 5, 6, 0xFF]]), 4);
+
+        assert_eq!(palette.index_of(&[1, 2, 3, 0xFF], 4), Some(0));
+        assert_eq!(palette.index_of(&[4, 5, 6], 3), Some(1));
+        assert_eq!(palette.index_of(&[7, 8, 9], 3), None);
+    }
+
+    /// ちょうど上限までの色は写せて、1つ超えると写せない
     #[test]
     fn the_limit_is_reached_before_it_is_exceeded() {
-        let mut colors = Colors::new();
-        colors.observe(&distinct_rgb(MAX_COLORS), 3);
-        assert!(!colors.exceeded());
-        assert_eq!(Palette::from_colors(colors).plte().len() / 3, MAX_COLORS);
-
-        let mut colors = Colors::new();
-        colors.observe(&distinct_rgb(MAX_COLORS + 1), 3);
-        assert!(colors.exceeded());
-    }
-
-    /// 上限を超えるのは呼び出しをまたいでも同じで、超えた後は何も数えない
-    #[test]
-    fn the_union_spans_every_call() {
-        let mut colors = Colors::new();
-        for chunk in distinct_rgb(MAX_COLORS + 1).chunks(3 * 8) {
-            colors.observe(chunk, 3);
-        }
-        assert!(colors.exceeded());
-
-        let mut colors = Colors::new();
-        colors.observe(&distinct_rgb(MAX_COLORS), 3);
-        colors.observe(&distinct_rgb(MAX_COLORS), 3);
-        assert!(!colors.exceeded());
-    }
-
-    /// 添字は画素の色と一対一に対応する
-    #[test]
-    fn indices_map_back_to_the_colors_they_came_from() {
-        let pixels = rgba(&[
-            [0x10, 0x20, 0x30, 0xFF],
-            [0x40, 0x50, 0x60, 0x80],
-            [0x10, 0x20, 0x30, 0xFF],
-            [0x00, 0x00, 0x00, 0x00],
-        ]);
-        let palette = palette_of(&pixels, 4);
-
+        let full = distinct_rgb(MAX_COLORS);
+        let mut palette = palette_of(&full, 3);
         let mut indices = Vec::new();
-        palette.append_indices(&pixels, 4, &mut indices);
-        assert_eq!(indices.len(), 4);
-        assert_eq!(indices[0], indices[2]);
+        assert!(palette.append_indices(&full, 3, &mut indices));
+        assert_eq!(palette.colors(), MAX_COLORS as u16);
 
-        let plte = palette.plte();
-        let trns = palette.trns();
-        for (index, pixel) in indices.iter().zip(pixels.chunks_exact(4)) {
-            let at = *index as usize;
-            assert_eq!(&plte[at * 3..at * 3 + 3], &pixel[..3]);
-            let alpha = trns.get(at).copied().unwrap_or(u8::MAX);
-            assert_eq!(alpha, pixel[3]);
-        }
-    }
-
-    /// 上限いっぱいの色でも添字は一対一に対応する
-    #[test]
-    fn a_full_palette_still_maps_one_to_one() {
-        let pixels = distinct_rgb(MAX_COLORS);
-        let palette = palette_of(&pixels, 3);
-
+        let over = distinct_rgb(MAX_COLORS + 1);
+        let mut palette = palette_of(&[0, 0, 0], 3);
         let mut indices = Vec::new();
-        palette.append_indices(&pixels, 3, &mut indices);
-        indices.sort_unstable();
-        indices.dedup();
-        assert_eq!(indices.len(), MAX_COLORS);
-    }
-
-    /// 表の末尾で衝突した色も、それぞれの添字でパレットを引ける
-    ///
-    /// この2色は開放アドレス法の表で同じ位置を指し、2色目は表の端を越えて
-    /// 先頭から空きを探すことになる。
-    #[test]
-    fn colors_colliding_at_the_last_slot_keep_distinct_indices() {
-        /// 表の最後の位置へ写る色 (詰めると `0x0000_03DB`)
-        const FIRST: [u8; 4] = [0xDB, 0x03, 0x00, 0x00];
-        /// 同じ位置へ写るもう1つの色 (詰めると `0x0000_07B6`)
-        const SECOND: [u8; 4] = [0xB6, 0x07, 0x00, 0x00];
-
-        let pixels = rgba(&[FIRST, SECOND]);
-        let palette = palette_of(&pixels, 4);
-        let plte = palette.plte();
-        assert_eq!(plte.len() / 3, 2);
-
-        let mut indices = Vec::new();
-        palette.append_indices(&pixels, 4, &mut indices);
-        assert_ne!(indices[0], indices[1]);
-        for (index, pixel) in indices.iter().zip(pixels.chunks_exact(4)) {
-            let at = *index as usize;
-            assert_eq!(&plte[at * 3..at * 3 + 3], &pixel[..3]);
-        }
-    }
-
-    /// 添字は既にある内容の後ろへ足される
-    #[test]
-    fn indices_are_appended_after_the_existing_content() {
-        let palette = palette_of(&[1, 2, 3], 3);
-        let mut out = vec![0xAA];
-        palette.append_indices(&[1, 2, 3], 3, &mut out);
-        assert_eq!(out, [0xAA, 0]);
-    }
-
-    /// 暗い色ほど前に並ぶ
-    #[test]
-    fn darker_colors_come_first() {
-        let palette = palette_of(&[0x30, 0, 0, 0x10, 0, 0, 0x20, 0, 0], 3);
-        assert_eq!(palette.plte(), [0x10, 0, 0, 0x20, 0, 0, 0x30, 0, 0]);
-    }
-
-    /// 明るさが同じ色は見つけた順に並ぶ
-    #[test]
-    fn colors_of_the_same_luminance_keep_their_order() {
-        // 重み付けは (2, 5, 1) なので、この3色の明るさは等しい
-        let palette = palette_of(&[5, 0, 0, 0, 2, 0, 0, 0, 10], 3);
-        assert_eq!(palette.plte(), [5, 0, 0, 0, 2, 0, 0, 0, 10]);
-    }
-
-    /// アルファは並べ替えた後の添字と対応する
-    #[test]
-    fn the_trns_follows_the_palette_order() {
-        let pixels = rgba(&[
-            [0x30, 0x30, 0x30, 0x80],
-            [0x10, 0x10, 0x10, 0xFF],
-            [0x20, 0x20, 0x20, 0x00],
-        ]);
-        let palette = palette_of(&pixels, 4);
-
-        assert_eq!(
-            palette.plte(),
-            [0x10, 0x10, 0x10, 0x20, 0x20, 0x20, 0x30, 0x30, 0x30]
-        );
-        assert_eq!(palette.trns(), [0xFF, 0x00, 0x80]);
-    }
-
-    /// tRNSの末尾に並ぶ255は省かれる
-    #[test]
-    fn the_trailing_opaque_entries_are_dropped_from_the_trns() {
-        let pixels = rgba(&[
-            [0x10, 0x10, 0x10, 0x00],
-            [0x40, 0x40, 0x40, 0xFF],
-            [0x80, 0x80, 0x80, 0xFF],
-        ]);
-        let palette = palette_of(&pixels, 4);
-
-        assert_eq!(palette.trns(), [0x00]);
-    }
-
-    /// すべて不透明ならtRNSは空になる
-    #[test]
-    fn an_opaque_palette_needs_no_trns() {
-        let palette = palette_of(&rgba(&[[1, 2, 3, 0xFF], [4, 5, 6, 0xFF]]), 4);
-        assert!(palette.trns().is_empty());
+        assert!(!palette.append_indices(&over, 3, &mut indices));
+        assert!(indices.is_empty(), "写せない画素列の添字が残っている");
     }
 }

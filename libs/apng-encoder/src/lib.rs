@@ -10,12 +10,11 @@ mod filter;
 mod layout;
 mod over;
 mod palette;
-mod spool;
 mod zlib;
 
 pub use anim_core::FrameDelay;
 pub use delay::delay_parts;
-pub use encoder::{COMPRESSION_LEVELS, ColorReduction, Config, DEFAULT_MAX_SPOOL_BYTES, Encoder};
+pub use encoder::{COMPRESSION_LEVELS, ColorReduction, Config, Encoder};
 pub use error::Error;
 pub use layout::ColorType;
 

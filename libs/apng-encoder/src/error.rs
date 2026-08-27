@@ -21,6 +21,8 @@ pub enum Error {
     FrameCountMismatch { expected: u32, actual: u32 },
     /// チャンク長がPNGの上限を超えた
     ChunkTooLarge { len: usize },
+    /// パレットに載る色数を超えた
+    ColorLimitExceeded { frame: u32 },
     /// 書き出し先のI/Oエラー
     Io(std::io::Error),
     /// 書き出しに失敗したエンコーダを再利用しようとした
@@ -55,6 +57,9 @@ impl fmt::Display for Error {
             }
             Error::ChunkTooLarge { len } => {
                 write!(f, "チャンク長がPNGの上限を超えました: {len} バイト")
+            }
+            Error::ColorLimitExceeded { frame } => {
+                write!(f, "色数がパレットに収まりません: フレーム {frame}")
             }
             Error::Io(e) => write!(f, "書き出しに失敗しました: {e}"),
             Error::Poisoned => write!(f, "書き出しに失敗したエンコーダは再利用できません"),
