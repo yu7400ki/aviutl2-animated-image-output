@@ -89,14 +89,6 @@ pub(crate) struct Mapped {
     pub(crate) fit: Fit,
 }
 
-/// 据え直しても残すエントリ1つ
-#[derive(Clone, Copy)]
-pub(crate) struct Kept {
-    pub(crate) color: u32,
-    /// 最後に添字を出力へ書いたフレーム番号
-    pub(crate) last_used: u32,
-}
-
 /// 閉じたテーブルが持つ、完全一致が外れた色の写し方
 struct Settled {
     /// 完全一致が外れた色を写す先
@@ -127,10 +119,6 @@ pub(crate) struct Palette {
     substituted: u64,
     /// グローバルカラーテーブルではなく、フレームごとに書く色表か
     local: bool,
-    /// エントリごとの、最後に添字を出力へ書いたフレーム番号 (0は一度も無い)
-    last_used: Vec<u32>,
-    /// いま処理しているフレーム番号
-    frame: u32,
 }
 
 impl Palette {
@@ -144,43 +132,24 @@ impl Palette {
             approximated: 0,
             substituted: 0,
             local: false,
-            last_used: Vec::new(),
-            frame: 0,
         }
     }
 
-    /// 維持したエントリと残差の色でテーブルを据え直す
+    /// 渡した色だけを載せた、そのフレーム専用の閉じたテーブル
     ///
-    /// 非透過色は [`QUANTIZED_COLORS`] までに抑え、透過添字の余地を残す。
-    /// 維持したエントリの最終使用は据え直した後も引き継ぐ。据え直したテーブルは
-    /// フレームごとに書き出される。
-    ///
-    /// # Panics
-    /// 非透過色が1つも残らないとき。
-    pub(crate) fn from_rebuilt(kept: &[Kept], residual: &[u32]) -> Self {
+    /// 非透過色は [`QUANTIZED_COLORS`] までに抑えるので、透過添字が必ず取れる。
+    /// このテーブルは画像記述子のローカルカラーテーブルとして書き出される。
+    pub(crate) fn from_colors(colors: &[u32]) -> Self {
         let mut palette = Palette::new();
-        let colors = kept
-            .iter()
-            .map(|entry| entry.color)
-            .chain(residual.iter().copied());
-        for color in colors {
+        for &color in colors {
             if palette.entries.len() == QUANTIZED_COLORS {
                 break;
             }
             palette.push(color);
         }
-        assert!(
-            !palette.entries.is_empty(),
-            "据え直したテーブルに非透過色が無い"
-        );
 
         palette.local = true;
         palette.settle(&[]);
-        for entry in kept {
-            if let Some(index) = palette.lookup.index_of(entry.color) {
-                palette.last_used[usize::from(index)] = entry.last_used;
-            }
-        }
         palette
     }
 
@@ -255,38 +224,12 @@ impl Palette {
         });
     }
 
-    /// これから処理するフレーム番号を覚える
-    ///
-    /// 以降の [`Palette::mark_used`] はこの番号で最終使用を更新する。
-    pub(crate) fn set_frame(&mut self, frame: u32) {
-        self.frame = frame;
-    }
-
-    /// 添字を出力へ書いたことを覚える
-    ///
-    /// 透過添字は色を持たないため、最終使用を数えない。
-    pub(crate) fn mark_used(&mut self, index: u8) {
+    /// 添字を出力へ書いたことを確かめる
+    pub(crate) fn mark_used(&self, index: u8) {
         debug_assert!(
             usize::from(index) < self.entries.len() || Some(index) == self.transparent(),
             "割り当て済みの色でも透過添字でもない添字"
         );
-        if let Some(used) = self.last_used.get_mut(usize::from(index)) {
-            *used = self.frame;
-        }
-    }
-
-    /// 直近 `window` フレームの出力で使ったエントリ
-    pub(crate) fn recently_used(&self, window: u32) -> Vec<Kept> {
-        let oldest = self.frame.saturating_sub(window);
-        self.entries
-            .iter()
-            .zip(&self.last_used)
-            .filter(|&(_, &used)| used > 0 && used >= oldest)
-            .map(|(&color, &used)| Kept {
-                color,
-                last_used: used,
-            })
-            .collect()
     }
 
     /// このフレームに書くローカルカラーテーブル。グローバルのままなら `None`
@@ -410,7 +353,6 @@ impl Palette {
         let before = self.lookup.count();
         if self.lookup.observe_color(color) && self.lookup.count() != before {
             self.entries.push(color);
-            self.last_used.push(0);
         }
     }
 }
@@ -615,62 +557,21 @@ mod tests {
         assert_eq!(palette.color_at(mapped.index), OPAQUE_BLACK);
     }
 
-    /// 一度も添字を書いていないエントリは維持の対象にならない
+    /// フレームごとの色表は、渡した色を見つけた順に載せる
     #[test]
-    fn an_entry_that_was_never_written_is_not_kept() {
-        let mut palette = opened(&[1u8, 2, 3, 4, 5, 6], 3);
+    fn a_local_table_keeps_the_order_of_the_colors_it_was_given() {
+        let palette = Palette::from_colors(&[0xFF00_00FF, 0xFF00_0000]);
 
-        palette.set_frame(1);
-        palette.mark_used(0);
-
-        let kept = palette.recently_used(8);
-        assert_eq!(kept.len(), 1, "書いていないエントリまで維持している");
-        assert_eq!(kept[0].color, 0xFF03_0201);
+        assert_eq!(palette.colors(), 2);
+        assert_eq!(palette.color_at(0), 0xFF00_00FF);
+        assert!(palette.local_table().is_some(), "色表を運んでいない");
     }
 
-    /// 透過添字は色を持たないため、最終使用を数えない
+    /// フレームごとの色表は非透過色を [`QUANTIZED_COLORS`] までに抑える
     #[test]
-    fn the_transparent_index_is_never_kept() {
-        let mut palette = opened(&[1u8, 2, 3], 3);
-        let transparent = palette.transparent().expect("透過添字が無い");
-
-        palette.set_frame(1);
-        palette.mark_used(transparent);
-        assert!(palette.recently_used(8).is_empty());
-    }
-
-    /// 維持したエントリの最終使用は、据え直した後のテーブルへ引き継ぐ
-    #[test]
-    fn a_kept_entry_carries_its_last_use_into_the_rebuilt_table() {
-        let kept = [
-            Kept {
-                color: 0xFF00_0000,
-                last_used: 9,
-            },
-            Kept {
-                color: 0xFF00_00FF,
-                last_used: 2,
-            },
-        ];
-        let mut palette = Palette::from_rebuilt(&kept, &[]);
-        palette.set_frame(10);
-
-        let carried = palette.recently_used(4);
-        assert_eq!(carried.len(), 1, "最終使用が引き継がれていない");
-        assert_eq!(carried[0].color, 0xFF00_0000);
-        assert_eq!(carried[0].last_used, 9);
-    }
-
-    /// 据え直したテーブルは非透過色を [`QUANTIZED_COLORS`] までに抑える
-    #[test]
-    fn a_rebuilt_table_leaves_room_for_the_transparent_index() {
-        let kept: Vec<Kept> = (0..MAX_COLORS)
-            .map(|i| Kept {
-                color: 0xFF00_0000 | i as u32,
-                last_used: 1,
-            })
-            .collect();
-        let palette = Palette::from_rebuilt(&kept, &[]);
+    fn a_local_table_leaves_room_for_the_transparent_index() {
+        let colors: Vec<u32> = (0..MAX_COLORS).map(|i| 0xFF00_0000 | i as u32).collect();
+        let palette = Palette::from_colors(&colors);
 
         assert_eq!(palette.colors(), QUANTIZED_COLORS as u16);
         assert_eq!(palette.transparent(), Some(QUANTIZED_COLORS as u8));

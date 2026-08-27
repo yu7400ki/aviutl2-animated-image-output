@@ -1,6 +1,7 @@
 //! Wu量子化 (6-6-6ヒストグラム → 最大256色) と最近傍写像
 
-use crate::normalize::TRANSPARENT;
+use crate::layout::Layout;
+use crate::normalize::{TRANSPARENT, pack};
 
 /// 1軸あたりのビン数 (6bit)
 const BINS: usize = 64;
@@ -36,6 +37,50 @@ impl Moment for u128 {
     fn widen(self) -> i128 {
         i128::try_from(self).expect("二乗和が符号付きの範囲を超えた")
     }
+}
+
+/// ヒストグラムへ積む画素の選び方
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code, reason = "選ばれていない側は量子化の材料のつまみとして残す")]
+pub(crate) enum Material {
+    /// 窓の各フレームで、その1つ前のフレームから変わった画素
+    Changed,
+    /// 窓の全画素
+    Whole,
+}
+
+/// 窓のフレームから量子化の材料を積む
+///
+/// 透過標識は色を持たないため積まない。`base` は窓の1つ前のフレームの
+/// 正規化した入力で、先頭フレームでは空。`window` は書き出し位置から順に
+/// 並んだフレーム。
+pub(crate) fn material<'a>(
+    layout: &Layout,
+    material: Material,
+    base: &'a [u8],
+    window: impl Iterator<Item = &'a [u8]>,
+) -> Histogram {
+    let bpp = layout.bytes_per_pixel;
+    let mut histogram = Histogram::new();
+    let mut previous = base;
+    for frame in window {
+        for (at, pixel) in frame.chunks_exact(bpp).enumerate() {
+            let at = at * bpp;
+            if material == Material::Changed
+                && !previous.is_empty()
+                && previous[at..at + bpp] == *pixel
+            {
+                continue;
+            }
+            let color = pack(pixel, bpp);
+            if color == TRANSPARENT {
+                continue;
+            }
+            histogram.observe_color(color, 1);
+        }
+        previous = frame;
+    }
+    histogram
 }
 
 /// ビンごとの値を3次元の累積和へ置き換える
@@ -174,9 +219,7 @@ pub(crate) struct Histogram {
     blue: Box<[u64]>,
     /// 実値の二乗和
     squared: Box<[u128]>,
-    /// 重みが載ったビン (積んだ順、重複なし)
-    cells: Vec<usize>,
-    /// 捨てずに残っているビンの数
+    /// 重みが載ったビンの数
     distinct: usize,
 }
 
@@ -190,36 +233,15 @@ impl Histogram {
             green: zeros(),
             blue: zeros(),
             squared: vec![0u128; CELLS].into_boxed_slice(),
-            cells: Vec::new(),
             distinct: 0,
         }
     }
 
-    /// 捨てずに残っているビンの数
+    /// 重みが載ったビンの数
     ///
     /// 分割はビンの境界にしか置けないため、この数より多くの色は割り出せない。
     pub(crate) fn distinct(&self) -> usize {
         self.distinct
-    }
-
-    /// 重みが載ったビン
-    ///
-    /// [`Histogram::discard`] で捨てたビンも並びには残る。
-    pub(crate) fn cells(&self) -> &[usize] {
-        &self.cells
-    }
-
-    /// ビンに積んだものを捨てる
-    pub(crate) fn discard(&mut self, cell: usize) {
-        if self.weight[cell] == 0 {
-            return;
-        }
-        self.weight[cell] = 0;
-        self.red[cell] = 0;
-        self.green[cell] = 0;
-        self.blue[cell] = 0;
-        self.squared[cell] = 0;
-        self.distinct -= 1;
     }
 
     /// 色を `count` 画素ぶん積む
@@ -237,7 +259,6 @@ impl Histogram {
         );
         let (r, g, b) = (u64::from(r), u64::from(g), u64::from(b));
         if self.weight[cell] == 0 {
-            self.cells.push(cell);
             self.distinct += 1;
         }
         self.weight[cell] += count;
@@ -457,65 +478,6 @@ impl Histogram {
             mean(&self.blue),
             u8::MAX,
         ]))
-    }
-}
-
-/// ビンごとの印
-///
-/// 添字は [`Histogram`] のビンと同じもの。
-pub(crate) struct Marks {
-    flags: Box<[bool]>,
-}
-
-impl Marks {
-    /// どのビンにも印の無い表
-    pub(crate) fn new() -> Self {
-        Marks {
-            flags: vec![false; CELLS].into_boxed_slice(),
-        }
-    }
-
-    /// ビンに印があるか
-    pub(crate) fn has(&self, cell: usize) -> bool {
-        self.flags[cell]
-    }
-
-    /// 中心が `color` から二乗距離 `tolerance` 以内にあるビンへ印を付ける
-    pub(crate) fn mark_within(&mut self, color: u32, tolerance: u32) {
-        let [r, g, b, _] = color.to_le_bytes();
-        // 中心の座標が2倍なので、距離の二乗は4倍で比べる
-        let limit = tolerance as i64 * 4;
-        let radius = (tolerance as f64).sqrt().ceil() as i32 * 2;
-        let target = [i32::from(r) * 2, i32::from(g) * 2, i32::from(b) * 2];
-        let bins = |axis: usize| {
-            let low = (target[axis] - radius - 3)
-                .div_euclid(8)
-                .clamp(0, BINS as i32 - 1);
-            let high = (target[axis] + radius - 3)
-                .div_euclid(8)
-                .clamp(0, BINS as i32 - 1);
-            low as usize..=high as usize
-        };
-
-        let squared =
-            |axis: usize, bin: usize| i64::from((target[axis] - center_doubled(bin)).pow(2));
-        for red in bins(0) {
-            let to_red = squared(0, red);
-            if to_red > limit {
-                continue;
-            }
-            for green in bins(1) {
-                let to_green = to_red + squared(1, green);
-                if to_green > limit {
-                    continue;
-                }
-                for blue in bins(2) {
-                    if to_green + squared(2, blue) <= limit {
-                        self.flags[at(red + 1, green + 1, blue + 1)] = true;
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -760,52 +722,84 @@ mod tests {
         assert_eq!(nearest.index_of(0xFF01_0101), 1);
     }
 
-    /// 印が付くのは、中心が閾値の内側にあるビンだけ
+    fn layout() -> Layout {
+        Layout::new(2, 1, crate::layout::ColorType::Rgb8).unwrap()
+    }
+
+    /// 入力が変わっていない画素は積まない
+    #[test]
+    fn unchanged_pixels_are_left_out_of_the_changed_material() {
+        let base = [1u8, 1, 1, 200, 200, 200];
+        let frame = [1u8, 1, 1, 9, 9, 9];
+
+        let histogram = material(
+            &layout(),
+            Material::Changed,
+            &base,
+            std::iter::once(&frame[..]),
+        );
+        assert_eq!(histogram.distinct(), 1);
+    }
+
+    /// 窓の全画素を積む材料は、変わっていない画素も数える
+    #[test]
+    fn the_whole_material_counts_the_pixels_that_did_not_change() {
+        let base = [1u8, 1, 1, 200, 200, 200];
+        let frame = [1u8, 1, 1, 9, 9, 9];
+
+        let histogram = material(
+            &layout(),
+            Material::Whole,
+            &base,
+            std::iter::once(&frame[..]),
+        );
+        assert_eq!(histogram.distinct(), 2, "変わっていない画素を積んでいない");
+    }
+
+    /// 窓の中の後続フレームは、その1つ前のフレームとの差分で積む
     ///
-    /// ビン25が覆う実値は 100..=103 で中心は 101.5。隣のビン26の中心は 105.5。
+    /// 比較相手を書き出し位置の1つ前に固定すると、窓の中で元の色へ戻った画素が
+    /// 「変わっていない」と読める。
     #[test]
-    fn only_the_bins_whose_center_is_inside_the_tolerance_are_marked() {
-        let color = pack([100, 100, 100]);
-        let cell = |bin: usize| at(bin + 1, 25 + 1, 25 + 1);
+    fn later_frames_in_the_window_are_compared_with_the_one_before() {
+        let base = [1u8, 1, 1, 10, 10, 10];
+        let first = [1u8, 1, 1, 200, 200, 200];
+        let second = base;
+        let frames = [&first[..], &second[..]];
 
-        // 中心までの距離は (1.5, 1.5, 1.5) で二乗距離 6.75
-        let mut marks = Marks::new();
-        marks.mark_within(color, 6);
-        assert!(!marks.has(cell(25)), "閾値の外側に印が付いている");
-
-        let mut marks = Marks::new();
-        marks.mark_within(color, 7);
-        assert!(marks.has(cell(25)), "閾値の内側に印が付いていない");
-        // ビン26の中心までは (5.5, 1.5, 1.5) で二乗距離 34.75
-        assert!(!marks.has(cell(26)));
-
-        let mut marks = Marks::new();
-        marks.mark_within(color, 35);
-        assert!(marks.has(cell(26)));
-        // ビン24の中心までは (2.5, 1.5, 1.5) で二乗距離 10.75
-        assert!(marks.has(cell(24)));
+        let histogram = material(&layout(), Material::Changed, &base, frames.into_iter());
+        // 先頭で変わった色と、次のフレームで戻った色
+        assert_eq!(histogram.distinct(), 2);
     }
 
-    /// 印は立方体ではなく球で付く
+    /// 透過標識は積まない
     #[test]
-    fn the_marked_bins_form_a_ball_and_not_a_box() {
-        let color = pack([100, 100, 100]);
-        let mut marks = Marks::new();
-        marks.mark_within(color, 35);
+    fn the_transparent_marker_is_not_counted() {
+        let layout = Layout::new(2, 1, crate::layout::ColorType::Rgba8).unwrap();
+        let frame = [0u8, 0, 0, 0, 200, 200, 200, 255];
 
-        // 3軸すべてが隣のビンなら二乗距離 (5.5^2)*3 = 90.75 で外側
-        assert!(!marks.has(at(26 + 1, 26 + 1, 26 + 1)));
-    }
-
-    /// 端の色でもビンの範囲からはみ出さない
-    #[test]
-    fn a_color_at_the_edge_stays_inside_the_bins() {
-        for color in [pack([0, 0, 0]), pack([255, 255, 255])] {
-            let mut marks = Marks::new();
-            marks.mark_within(color, 195_075);
-            assert!(marks.has(at(1, 1, 1)));
-            assert!(marks.has(at(BINS, BINS, BINS)));
+        for kind in [Material::Changed, Material::Whole] {
+            let histogram = material(&layout, kind, &[], std::iter::once(&frame[..]));
+            assert_eq!(histogram.distinct(), 1, "{kind:?}");
         }
+    }
+
+    /// RGB8の入力に透過は無く、黒はそのまま積む
+    ///
+    /// 透過標識は詰めた色が (0,0,0,0) で、アルファを持たない画素の黒とは別物。
+    /// 取り違えると、黒い領域が量子化の材料から落ちる。
+    #[test]
+    fn black_is_counted_when_the_input_has_no_alpha() {
+        let frame = [0u8, 0, 0, 40, 40, 40];
+
+        let histogram = material(
+            &layout(),
+            Material::Changed,
+            &[],
+            std::iter::once(&frame[..]),
+        );
+        assert_eq!(histogram.distinct(), 2, "黒を積んでいない");
+        assert_eq!(histogram.quantize(1), vec![0xFF14_1414], "黒に重みが無い");
     }
 
     /// 等距離の候補は添字の小さい方へ写る

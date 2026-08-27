@@ -9,7 +9,6 @@ mod layout;
 mod lzw;
 mod normalize;
 mod quantize;
-mod rebuild;
 mod ring;
 mod table;
 

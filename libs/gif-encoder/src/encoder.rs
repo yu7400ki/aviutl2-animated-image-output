@@ -10,10 +10,10 @@ use crate::frame::{Canvas, Screen};
 use crate::layout::{ColorType, Layout};
 use crate::lzw;
 use crate::normalize::{self, Binarized, TRANSPARENT, pack};
-use crate::rebuild::{changed_colors, rebuild};
+use crate::quantize::{Material, material};
 use crate::ring::Ring;
 use crate::table::{ColorTable, Palette, QUANTIZED_COLORS};
-use anim_core::{FrameDelay, Rect};
+use anim_core::{Colors, FrameDelay, Rect};
 use std::borrow::Cow;
 use std::io::{Seek, SeekFrom, Write};
 
@@ -58,12 +58,10 @@ pub enum PaletteKind {
 pub struct Report {
     /// グローバルカラーテーブルの据え方
     pub palette: PaletteKind,
-    /// カラーテーブルを据え直した回数 (0ならグローバルの1枚で足りた)
-    pub rebuilds: u32,
     /// ローカルカラーテーブルを書いたフレーム数
     ///
-    /// グローバルカラーテーブルと違うテーブルで符号化したフレームは、色表を
-    /// 自分で運ぶ。GIFには前のフレームの色表を参照する手段が無い。
+    /// グローバルカラーテーブルで写しきれずに逃げたフレームは、自分の色表を
+    /// 運ぶ。GIFには前のフレームの色表を参照する手段が無い。
     pub local_tables: u32,
     /// 完全一致が無く最近傍へ写した画素数
     ///
@@ -101,19 +99,15 @@ pub struct Report {
 /// 含むので、リングに留まるのは `LOOKAHEAD - 1` フレーム。
 const LOOKAHEAD: usize = 8;
 
-/// カラーテーブルを据え直すかどうかを分ける、写した色との距離
+/// グローバルカラーテーブルから逃げるかどうかを分ける誤差の床
 ///
-/// これを超える誤差の画素が [`REBUILD_FLOOR_PERMILLE`] 以上現れたら据え直す。
-const REBUILD_TOLERANCE: u32 = 20;
+/// 単位は二乗距離 (RGB各軸の差の二乗和) の平均。入力が変わった画素をグローバル
+/// カラーテーブルへ写し、その二乗距離の平均がこれを超えたフレームは自分の色表を
+/// 運ぶ。この値は `private/bench` の全素材で決める。
+const BENCH_TUNED_ESCAPE_FLOOR: u64 = 256;
 
-/// 誤差が [`REBUILD_TOLERANCE`] を超えた画素が論理画面に占める割合の下限 (千分率)
-///
-/// この下限は近似だけを測る。もっと良く表せるだけの画素は、わずかな向上のために
-/// 据え直しを繰り返す値打ちが無い。
-const REBUILD_FLOOR_PERMILLE: u64 = 20;
-
-/// 維持するエントリを決める、直近の出力のフレーム数
-const KEEP_WINDOW: u32 = 8;
+/// 溢れたときに量子化の材料へ積む画素
+const QUANTIZE_MATERIAL: Material = Material::Changed;
 
 /// 描く直前へ戻す候補を試すのをやめるまでの連敗数
 const RESTORE_LOSS_STREAK: u32 = 6;
@@ -186,71 +180,123 @@ struct Pending {
     body: Vec<u8>,
 }
 
-/// いま据えているカラーテーブルと、保留中のフレームを符号化したもの
+/// グローバルカラーテーブルと、そこから逃げたフレームの色表
+///
+/// 逃げた色表はそのフレーム1枚のもので、次のフレームは再びグローバルから
+/// 判定する。保留中のフレームは自分が逃げた色表で符号化されているため、
+/// 書き終えるまでその色表を持つ。
 struct Palettes {
-    /// いま据えているテーブル
-    current: Palette,
-    /// 保留中のフレームを符号化したテーブル。現在と同じなら `None`
-    earlier: Option<Palette>,
-    /// 手放したテーブルが最近傍へ写した画素数の合計
+    /// グローバルカラーテーブル
+    global: Palette,
+    /// 書き出し位置のフレームが逃げた先。逃げていなければ `None`
+    escaped: Option<Palette>,
+    /// 保留中のフレームが逃げた先。逃げていなければ `None`
+    held: Option<Palette>,
+    /// 手放した色表が最近傍へ写した画素数の合計
     retired_approximated: u64,
-    /// 手放したテーブルが埋め草へ置いた画素数の合計
+    /// 手放した色表が埋め草へ置いた画素数の合計
     retired_substituted: u64,
-    /// 手放したテーブルが写す先として黒を足したか
+    /// 手放した色表が写す先として黒を足したか
     retired_fallback: bool,
 }
 
 impl Palettes {
-    fn new(palette: Palette) -> Self {
+    fn new(global: Palette) -> Self {
         Palettes {
-            current: palette,
-            earlier: None,
+            global,
+            escaped: None,
+            held: None,
             retired_approximated: 0,
             retired_substituted: 0,
             retired_fallback: false,
         }
     }
 
+    /// 書き出し位置のフレームを符号化するテーブル
+    fn current(&mut self) -> &mut Palette {
+        self.escaped.as_mut().unwrap_or(&mut self.global)
+    }
+
     /// 保留中のフレームを符号化したテーブル
     fn earlier(&mut self) -> &mut Palette {
-        self.earlier.as_mut().unwrap_or(&mut self.current)
+        self.held.as_mut().unwrap_or(&mut self.global)
     }
 
-    /// 据え直したテーブルへ移り、今までのものを保留中のフレームのために残す
-    fn replace(&mut self, palette: Palette) {
-        debug_assert!(self.earlier.is_none(), "1フレームで2度据え直している");
-        self.earlier = Some(std::mem::replace(&mut self.current, palette));
+    /// 書き出し位置のフレームをこの色表へ逃がす
+    fn escape(&mut self, palette: Palette) {
+        debug_assert!(self.escaped.is_none(), "1フレームで2度逃げている");
+        self.escaped = Some(palette);
     }
 
-    /// 保留中のフレームを書き終えたので、1つ前のテーブルを手放す
+    /// 保留中のフレームを書き終えたので、その色表を手放す
+    ///
+    /// 書き出し位置のフレームが逃げた色表は、そのまま保留中のものへ移る。
     fn retire(&mut self) {
-        if let Some(earlier) = self.earlier.take() {
-            self.retired_approximated += earlier.approximated();
-            self.retired_substituted += earlier.substituted();
-            self.retired_fallback |= earlier.black_fallback();
+        if let Some(held) = self.held.take() {
+            self.retired_approximated += held.approximated();
+            self.retired_substituted += held.substituted();
+            self.retired_fallback |= held.black_fallback();
         }
+        self.held = self.escaped.take();
+    }
+
+    /// 逃げた色表の集計を畳む
+    fn escaped_total(&self, of: impl Fn(&Palette) -> u64) -> u64 {
+        self.escaped.as_ref().map_or(0, &of) + self.held.as_ref().map_or(0, &of)
     }
 
     /// 手放したものも含め、最近傍へ写した画素数
     fn approximated(&self) -> u64 {
         self.retired_approximated
-            + self.current.approximated()
-            + self.earlier.as_ref().map_or(0, Palette::approximated)
+            + self.global.approximated()
+            + self.escaped_total(Palette::approximated)
     }
 
     /// 手放したものも含め、埋め草へ置いた画素数
     fn substituted(&self) -> u64 {
         self.retired_substituted
-            + self.current.substituted()
-            + self.earlier.as_ref().map_or(0, Palette::substituted)
+            + self.global.substituted()
+            + self.escaped_total(Palette::substituted)
     }
 
-    /// 手放したものも含め、どこかのテーブルが写す先として黒を足したか
+    /// 手放したものも含め、どこかの色表が写す先として黒を足したか
     fn black_fallback(&self) -> bool {
         self.retired_fallback
-            || self.current.black_fallback()
-            || self.earlier.as_ref().is_some_and(Palette::black_fallback)
+            || self.global.black_fallback()
+            || self.escaped.as_ref().is_some_and(Palette::black_fallback)
+            || self.held.as_ref().is_some_and(Palette::black_fallback)
     }
+}
+
+/// このフレームだけの色表を作る
+///
+/// 材料は入力が変わった画素の色。相異なる色が [`QUANTIZED_COLORS`] までなら
+/// その色をそのまま載せ、超えるときはこのフレームの変わった画素を量子化する。
+fn escape_table(layout: &Layout, previous: &[u8], pixels: &[u8]) -> Palette {
+    let bpp = layout.bytes_per_pixel;
+    let mut distinct = Colors::new();
+    let mut overflowed = false;
+    for (at, pixel) in pixels.chunks_exact(bpp).enumerate() {
+        let at = at * bpp;
+        if !previous.is_empty() && previous[at..at + bpp] == *pixel {
+            continue;
+        }
+        let color = pack(pixel, bpp);
+        if color == TRANSPARENT {
+            continue;
+        }
+        if !distinct.observe_color(color) || usize::from(distinct.count()) > QUANTIZED_COLORS {
+            overflowed = true;
+            break;
+        }
+    }
+
+    if !overflowed {
+        return Palette::from_colors(distinct.into_indexed(|_| ()).colors());
+    }
+
+    let histogram = material(layout, Material::Changed, previous, std::iter::once(pixels));
+    Palette::from_colors(&histogram.quantize(QUANTIZED_COLORS))
 }
 
 /// 書き出し位置のフレーム1つを処理する状態
@@ -262,8 +308,6 @@ impl Palettes {
 struct Writing {
     /// 書き出しに使うカラーテーブル
     palettes: Palettes,
-    /// 書き出しへ渡したフレーム数。エントリの最終使用を数える時計になる
-    frames: u32,
     /// 直前に書き出しへ渡されたフレームの正規化した入力
     previous: Vec<u8>,
     /// 描画後の色の面
@@ -282,7 +326,6 @@ impl Writing {
     fn new(layout: Layout) -> Self {
         Writing {
             palettes: Palettes::new(Palette::new()),
-            frames: 0,
             previous: Vec::new(),
             canvas: Canvas::new(layout),
             rendered: Vec::new(),
@@ -314,8 +357,6 @@ pub struct Encoder<W: Write + Seek> {
     poisoned: bool,
     /// グローバルカラーテーブルの据え方。書き戻すまでは `None`
     palette_kind: Option<PaletteKind>,
-    /// カラーテーブルを据え直した回数
-    rebuilds: u32,
     /// ローカルカラーテーブルを書いたフレーム数
     local_tables: u32,
     /// 2値化で見た目が変わった画素数
@@ -363,7 +404,6 @@ impl<W: Write + Seek> Encoder<W> {
             frames_accepted: 0,
             poisoned: false,
             palette_kind: None,
-            rebuilds: 0,
             local_tables: 0,
             binarized: Binarized::default(),
             hundredths: Hundredths::new(),
@@ -439,7 +479,7 @@ impl<W: Write + Seek> Encoder<W> {
             // 次のフレームが無く、廃棄方法が変えられるキャンバスの続きも無い
             parts.write_pending(pending, DISPOSAL_DO_NOT_DISPOSE)?;
         }
-        parts.settle_exact(&writing.palettes.current)?;
+        parts.settle_exact(&writing.palettes.global)?;
 
         let approximated_pixels = writing.palettes.approximated();
         let substituted_pixels = writing.palettes.substituted();
@@ -452,7 +492,6 @@ impl<W: Write + Seek> Encoder<W> {
             palette: self
                 .palette_kind
                 .expect("全フレームを書き終えた時点で色は決まっている"),
-            rebuilds: self.rebuilds,
             local_tables: self.local_tables,
             approximated_pixels,
             substituted_pixels,
@@ -475,7 +514,6 @@ impl<W: Write + Seek> Encoder<W> {
             frames_accepted: _,
             poisoned: _,
             palette_kind,
-            rebuilds,
             local_tables,
             binarized: _,
             hundredths,
@@ -489,7 +527,6 @@ impl<W: Write + Seek> Encoder<W> {
                 writer,
                 layout,
                 palette_kind,
-                rebuilds,
                 local_tables,
                 hundredths,
                 delay_clamped,
@@ -514,7 +551,6 @@ struct Parts<'a, W: Write + Seek> {
     writer: &'a mut W,
     layout: &'a Layout,
     palette_kind: &'a mut Option<PaletteKind>,
-    rebuilds: &'a mut u32,
     local_tables: &'a mut u32,
     hundredths: &'a mut Hundredths,
     delay_clamped: &'a mut bool,
@@ -543,7 +579,6 @@ impl<W: Write + Seek> Parts<'_, W> {
     ) -> Result<(), Error> {
         let Writing {
             palettes,
-            frames,
             previous,
             canvas,
             rendered,
@@ -551,66 +586,45 @@ impl<W: Write + Seek> Parts<'_, W> {
             pending,
             pacing,
         } = writing;
-        *frames += 1;
-        palettes.current.set_frame(*frames);
 
         // 開いたテーブルはこのフレームの色をまとめて受け入れる。収まらなければ
         // そこで閉じ、以降の色は最近傍へ写る
-        if palettes.current.is_open()
+        if palettes.global.is_open()
             && !palettes
-                .current
+                .global
                 .admit(self.layout.bytes_per_pixel, previous, pixels)
         {
-            self.settle(&mut palettes.current, ring, previous, pixels)?;
+            self.settle(&mut palettes.global, ring, previous, pixels)?;
         }
 
-        let tolerance = REBUILD_TOLERANCE * REBUILD_TOLERANCE;
-        let mut mapped =
-            canvas.render(previous, pixels, &mut palettes.current, tolerance, rendered);
+        let mut mapped = canvas.render(previous, pixels, &mut palettes.global, rendered);
         // 色で埋まったテーブルは透過添字を持たない。標識を書く先が無いフレームは
         // 表現できないため、閉じて透過添字を取り直す
-        if palettes.current.is_open() && self.lacks_transparent(&palettes.current, rendered, ring) {
-            self.settle(&mut palettes.current, ring, previous, pixels)?;
-            mapped = canvas.render(previous, pixels, &mut palettes.current, tolerance, rendered);
+        if palettes.global.is_open() && self.lacks_transparent(&palettes.global, rendered, ring) {
+            self.settle(&mut palettes.global, ring, previous, pixels)?;
+            mapped = canvas.render(previous, pixels, &mut palettes.global, rendered);
         }
 
-        // 写す先が無かった画素は1つでも据え直す。近似と違って誤差の大小では
-        // 測れず、据え直す以外にその色を出す手立てが無い
-        if mapped.substituted > 0
-            || mapped.exceeded > self.rebuild_floor()
-            || self.lacks_transparent(&palettes.current, rendered, ring)
+        // 変わった画素の誤差が床を超えたフレームと、透過添字の要るフレームは、
+        // このフレームだけの色表へ逃げる
+        if mapped.mean_error_exceeds(BENCH_TUNED_ESCAPE_FLOOR)
+            || self.lacks_transparent(&palettes.global, rendered, ring)
         {
             debug_assert!(
-                !palettes.current.is_open(),
-                "書き戻していないテーブルを据え直している"
+                !palettes.global.is_open(),
+                "書き戻していないテーブルから逃げている"
             );
-            let fresh = rebuild(
-                self.layout,
-                &palettes.current,
-                KEEP_WINDOW,
-                tolerance,
-                previous,
-                std::iter::once(pixels).chain(ring.window()),
-            );
-            palettes.replace(fresh);
-            palettes.current.set_frame(*frames);
-            mapped = canvas.render(previous, pixels, &mut palettes.current, tolerance, rendered);
-            *self.rebuilds += 1;
+            palettes.escape(escape_table(self.layout, previous, pixels));
+            mapped = canvas.render(previous, pixels, palettes.current(), rendered);
         }
-        palettes.current.note_approximated(mapped.approximated);
-        palettes.current.note_substituted(mapped.substituted);
+        palettes.current().note_approximated(mapped.approximated);
+        palettes.current().note_substituted(mapped.substituted);
 
         let (delay, clamped) = self.hundredths.next(delay);
         *self.delay_clamped |= clamped;
         match pending.take() {
             None => {
-                let laid = lay_out(
-                    canvas.kept(),
-                    rendered,
-                    &mut palettes.current,
-                    indices,
-                    delay,
-                );
+                let laid = lay_out(canvas.kept(), rendered, palettes.current(), indices, delay);
                 canvas.start(rendered);
                 *pending = Some(laid);
             }
@@ -651,8 +665,9 @@ impl<W: Write + Seek> Parts<'_, W> {
         let free = QUANTIZED_COLORS.saturating_sub(usize::from(palette.colors()));
         let mut quantized = Vec::new();
         if free > 0 {
-            let histogram = changed_colors(
+            let histogram = material(
                 self.layout,
+                QUANTIZE_MATERIAL,
                 previous,
                 std::iter::once(pixels).chain(ring.window()),
             );
@@ -708,12 +723,6 @@ impl<W: Write + Seek> Parts<'_, W> {
         marked(rendered) || ring.window().next().is_some_and(marked)
     }
 
-    /// 据え直しに踏み切る、誤差が閾値を超えた画素数の下限
-    fn rebuild_floor(&self) -> u64 {
-        let pixels = u64::from(self.layout.width) * u64::from(self.layout.height);
-        pixels * REBUILD_FLOOR_PERMILLE / 1000
-    }
-
     /// 保留していたフレームを `disposal` で書き出す
     fn write_pending(&mut self, pending: Pending, disposal: u8) -> Result<(), Error> {
         block::graphic_control(self.writer, disposal, pending.delay, pending.transparent)?;
@@ -754,13 +763,7 @@ fn choose_disposal(
     pacing: &mut RestorePacing,
 ) -> (u8, Pending) {
     if canvas.kept().expressible(rendered) {
-        let laid = lay_out(
-            canvas.kept(),
-            rendered,
-            &mut palettes.current,
-            indices,
-            delay,
-        );
+        let laid = lay_out(canvas.kept(), rendered, palettes.current(), indices, delay);
         return (DISPOSAL_DO_NOT_DISPOSE, laid);
     }
 
@@ -768,7 +771,7 @@ fn choose_disposal(
     // テーブルは必ず透過インデックスを持つ。抜いた画素を書かずに済ませる添字が
     // 無ければ、透過の位置そのものを表現できない
     debug_assert!(
-        palettes.current.transparent().is_some(),
+        palettes.current().transparent().is_some(),
         "透過インデックスの無いテーブルに透過画素が現れた"
     );
 
@@ -796,12 +799,12 @@ fn choose_disposal(
     );
 
     let previous = disposed.previous();
-    let cleared = lay_out(background, rendered, &mut palettes.current, indices, delay);
+    let cleared = lay_out(background, rendered, palettes.current(), indices, delay);
     if !previous.expressible(rendered) || !pacing.should_try() {
         return (DISPOSAL_RESTORE_TO_BACKGROUND, cleared);
     }
 
-    let restored = lay_out(previous, rendered, &mut palettes.current, indices, delay);
+    let restored = lay_out(previous, rendered, palettes.current(), indices, delay);
     let taken = restored.body.len() < cleared.body.len();
     pacing.record(taken);
     if taken {
@@ -855,6 +858,7 @@ fn encode_on(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::table::Fit;
     use std::io::Cursor;
 
     /// 1色だけの閉じたテーブル
@@ -865,78 +869,75 @@ mod tests {
         palette
     }
 
-    /// 手放したテーブルが最近傍へ写した画素も、報告に残る
+    /// 手放した色表が最近傍へ写した画素も、報告に残る
     ///
-    /// 据え直しを跨ぐと保留中のフレームは1つ前のテーブルで符号化され、そのテーブルは
-    /// 書き終えた時点で手放される。数え落とすと、劣化しているのに
+    /// 逃げたフレームは自分の色表で符号化され、その色表は書き終えた時点で
+    /// 手放される。数え落とすと、劣化しているのに
     /// [`Report::approximated_pixels`] が0を報せうる。
     #[test]
     fn a_retired_table_keeps_the_pixels_it_approximated() {
         let mut palettes = Palettes::new(table_of(&[1, 2, 3]));
-        palettes.current.note_approximated(3);
+        palettes.global.note_approximated(3);
 
-        palettes.replace(table_of(&[4, 5, 6]));
-        palettes.current.note_approximated(5);
+        palettes.escape(table_of(&[4, 5, 6]));
+        palettes.current().note_approximated(5);
         assert_eq!(palettes.approximated(), 8);
 
+        // 逃げた色表は保留中のフレームのものになり、その次で手放される
+        palettes.retire();
         palettes.retire();
         assert_eq!(
             palettes.approximated(),
             8,
-            "手放したテーブルが写した画素が消えている"
+            "手放した色表が写した画素が消えている"
         );
     }
 
-    const REBUILD_WIDTH: u32 = 20;
-    const REBUILD_HEIGHT: u32 = 20;
-
-    /// 画面が白へ切り替わるフレーム
-    ///
-    /// 閉じた時点の先読みの窓の外に置く。窓の中では、閉じたテーブルが白まで
-    /// 覆ってしまう。
-    const WHITENS_AT: usize = LOOKAHEAD + 1;
-
-    /// 色の散った画素で埋めたRGB8のフレーム
-    ///
-    /// 上限を超える色を1フレームに置き、先頭の書き出し位置でテーブルを閉じさせる。
-    fn scattered() -> Vec<u8> {
-        (0..REBUILD_WIDTH * REBUILD_HEIGHT)
-            .flat_map(|i| [(i % 64 * 4) as u8, (i / 64 * 4) as u8, 0x40])
-            .collect()
-    }
-
-    /// 据え直したテーブルは、いま処理しているフレームから最終使用を数える
-    ///
-    /// 番号を伝えないと、据え直したフレームで書いた添字が「一度も使っていない」の
-    /// ままになり、次の据え直しの維持から外れる。
+    /// 逃げた色表は1フレームで手放され、次のフレームはグローバルへ戻る
     #[test]
-    fn a_rebuilt_table_counts_its_entries_from_the_current_frame() {
-        // 先頭フレームで閉じ、画面を白で覆うフレームで据え直しへ踏み切らせる
-        let white = vec![0xFF; (REBUILD_WIDTH * REBUILD_HEIGHT) as usize * 3];
-        let mut frames = vec![scattered(); WHITENS_AT];
-        frames.resize(WHITENS_AT + LOOKAHEAD, white);
+    fn an_escaped_table_lasts_a_single_frame() {
+        let mut palettes = Palettes::new(table_of(&[1, 2, 3]));
+        palettes.escape(table_of(&[4, 5, 6]));
+        assert_eq!(palettes.current().color_at(0), 0xFF06_0504);
 
-        let mut encoder = Encoder::new(
-            Cursor::new(Vec::new()),
-            REBUILD_WIDTH,
-            REBUILD_HEIGHT,
-            frames.len() as u32,
-            Config::default(),
-        )
-        .unwrap();
-        let delay = FrameDelay::new(1, 30).unwrap();
-        for frame in &frames {
-            encoder.add_frame(frame, delay).unwrap();
-        }
-
-        // 白を書いたのは据え直したフレームだけで、その番号は1から数えたもの
-        let kept = encoder.writing.palettes.current.recently_used(KEEP_WINDOW);
-        let white = kept.iter().find(|entry| entry.color == 0xFFFF_FFFF);
+        palettes.retire();
         assert_eq!(
-            white.map(|entry| entry.last_used),
-            Some(WHITENS_AT as u32 + 1),
-            "据え直したフレームで書いた添字の最終使用が残っていない"
+            palettes.current().color_at(0),
+            0xFF03_0201,
+            "次のフレームが逃げた色表を引きずっている"
         );
+        assert_eq!(
+            palettes.earlier().color_at(0),
+            0xFF06_0504,
+            "保留中のフレームの色表が失われている"
+        );
+    }
+
+    /// 逃げた色表は変わった画素の色をそのまま載せる
+    #[test]
+    fn an_escape_table_takes_the_colors_of_the_changed_pixels() {
+        let layout = Layout::new(2, 1, ColorType::Rgb8).unwrap();
+        let previous = [1u8, 2, 3, 9, 9, 9];
+        let pixels = [1u8, 2, 3, 4, 5, 6];
+
+        let mut table = escape_table(&layout, &previous, &pixels);
+        assert_eq!(table.colors(), 1, "変わっていない画素まで載せている");
+        assert!(matches!(table.map(&[4, 5, 6], 3).fit, Fit::Exact));
+        assert!(table.transparent().is_some(), "透過スロットが無い");
+    }
+
+    /// 変わった画素の色が上限を超えるフレームは、そのフレームで量子化する
+    #[test]
+    fn an_escape_table_quantizes_a_frame_with_too_many_colors() {
+        const COLORS: u32 = 400;
+        let layout = Layout::new(COLORS, 1, ColorType::Rgb8).unwrap();
+        let pixels: Vec<u8> = (0..COLORS)
+            .flat_map(|i| [(i % 20) as u8 * 12, (i / 20) as u8 * 12, 0x40])
+            .collect();
+
+        let table = escape_table(&layout, &[], &pixels);
+        assert_eq!(table.colors() as usize, QUANTIZED_COLORS);
+        assert_eq!(table.transparent(), Some(QUANTIZED_COLORS as u8));
     }
 
     /// 連敗が続くと候補を立てるのを休み、休みが明けたらまた試す

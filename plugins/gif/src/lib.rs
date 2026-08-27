@@ -268,7 +268,6 @@ mod tests {
     fn clean_report() -> Report {
         Report {
             palette: PaletteKind::Exact { colors: 128 },
-            rebuilds: 0,
             local_tables: 0,
             approximated_pixels: 0,
             substituted_pixels: 0,
@@ -480,16 +479,13 @@ mod tests {
     #[test]
     fn the_internal_counters_stay_out_of_the_log() {
         let report = Report {
-            rebuilds: 37,
             local_tables: 41,
             approximated_pixels: 4096,
             ..clean_report()
         };
 
         for message in messages(&report) {
-            for hidden in ["37", "41"] {
-                assert!(!message.contains(hidden), "{message}");
-            }
+            assert!(!message.contains("41"), "{message}");
         }
     }
 }
