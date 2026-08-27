@@ -67,8 +67,9 @@ impl ColorTable {
 /// 画素をテーブルへ写せた度合い
 ///
 /// [`Self::Approximated`] と [`Self::Substituted`] は性質が違う。前者は
-/// 「もっと良く表せる」で、据え直す値打ちは寄った画素の数で決まる。後者は
-/// 「表す手立てが無い」で、画素の数に関わらず素材の色が失われる。
+/// 「もっと良く表せる」で素材の色に寄った色が画面に残り、後者は
+/// 「表す手立てが無い」で素材の色が失われる。どちらも写した先までの隔たりを
+/// 二乗距離で持つ。
 pub(crate) enum Fit {
     /// テーブルにその色がそのまま載っていた
     Exact,
@@ -78,7 +79,10 @@ pub(crate) enum Fit {
         error: u32,
     },
     /// 写す先が無く、[`OPAQUE_BLACK`] の埋め草へ置いた
-    Substituted,
+    Substituted {
+        /// 埋め草との二乗距離
+        error: u32,
+    },
 }
 
 /// 画素をテーブルへ写した結果
@@ -328,12 +332,11 @@ impl Palette {
             .as_mut()
             .expect("開いたテーブルに割り当てていない色を写している");
         let index = settled.nearest.index_of(color);
+        let error = distance(color, self.entries[usize::from(index)]);
         let fit = if settled.fallback == Some(index) {
-            Fit::Substituted
+            Fit::Substituted { error }
         } else {
-            Fit::Approximated {
-                error: distance(color, self.entries[usize::from(index)]),
-            }
+            Fit::Approximated { error }
         };
         Mapped { index, fit }
     }
@@ -551,7 +554,7 @@ mod tests {
 
         let mapped = palette.map(&[0x10, 0x20, 0x30, 0xFF], 4);
         assert!(
-            matches!(mapped.fit, Fit::Substituted),
+            matches!(mapped.fit, Fit::Substituted { .. }),
             "埋め草へ落ちた画素を近似として返している"
         );
         assert_eq!(palette.color_at(mapped.index), OPAQUE_BLACK);

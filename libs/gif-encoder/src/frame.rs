@@ -115,7 +115,7 @@ impl Screen<'_> {
                         let counter = match mapped.fit {
                             Fit::Exact => None,
                             Fit::Approximated { .. } => Some(&mut approximated),
-                            Fit::Substituted => Some(&mut substituted),
+                            Fit::Substituted { .. } => Some(&mut substituted),
                         };
                         if let Some(counter) = counter {
                             *counter += 1;
@@ -362,7 +362,10 @@ impl Canvas {
                     rendered.approximated += 1;
                     rendered.error += u64::from(error);
                 }
-                Fit::Substituted => rendered.substituted += 1,
+                Fit::Substituted { error } => {
+                    rendered.substituted += 1;
+                    rendered.error += u64::from(error);
+                }
             }
             out.extend_from_slice(&palette.color_at(mapped.index).to_le_bytes()[..bpp]);
         }
@@ -874,6 +877,32 @@ mod tests {
         assert_eq!(counted.mapped, 1, "写していない画素を分母に入れている");
         assert_eq!(counted.error, OFF_BY_ERROR);
         assert!(counted.mean_error_exceeds(OFF_BY_ERROR - 1));
+    }
+
+    /// [`SETTLED`] を埋め草の黒へ置いた二乗距離
+    const SUBSTITUTED_ERROR: u64 = 0x10 * 0x10 + 0x20 * 0x20 + 0x30 * 0x30;
+
+    /// 写す先が無い画素は、埋め草までの隔たりを平均へ持ち込む
+    ///
+    /// 分母だけ増やして誤差を0で足すと、最も遠い画素が平均を下げる。
+    #[test]
+    fn substituted_pixels_carry_their_distance_into_the_mean() {
+        let pixels = (WIDTH * HEIGHT) as usize;
+        let transparent = vec![0u8; pixels * 4];
+        let frame: Vec<u8> = SETTLED.repeat(pixels);
+
+        let mut palette = palette_of(&[&transparent], 4);
+        let canvas = Canvas::new(layout(ColorType::Rgba8));
+        let mut rendered = Vec::new();
+
+        let counted = canvas.render(&[], &frame, &mut palette, &mut rendered);
+        assert_eq!(counted.substituted, pixels as u64, "埋め草へ置いていない");
+        assert_eq!(counted.approximated, 0, "近似に数えている");
+        assert_eq!(counted.error, SUBSTITUTED_ERROR * pixels as u64);
+        assert!(
+            counted.mean_error_exceeds(SUBSTITUTED_ERROR - 1),
+            "埋め草へ置いた画素が平均を薄めている"
+        );
     }
 
     /// 1画素も写していないフレームは、どの床も超えない
