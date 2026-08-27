@@ -695,9 +695,41 @@ fn multiple_frames_share_one_exact_color_table() {
 
     let (_, report) = round_trip(WIDTH, HEIGHT, ColorType::Rgb8, &frames);
     let PaletteKind::Exact { colors } = report.palette else {
-        panic!("全フレームを見て据えていない: {:?}", report.palette)
+        panic!("溢れずに書き終えていない: {:?}", report.palette)
     };
     assert!(colors <= 64, "和集合が {colors} 色まで広がっている");
+}
+
+/// 一度も溢れなければ、最後に見つけた順の色をテーブルへ書き戻す
+///
+/// 書き戻しの前は場所を確保してあるだけなので、色は最後まで決まらない。
+#[test]
+fn a_table_that_never_overflows_is_written_back_at_the_end() {
+    const WIDTH: u32 = 4;
+    const HEIGHT: u32 = 2;
+    let color = ColorType::Rgb8;
+
+    // 2枚目で新しい色が現れる。書き戻した色は見つけた順に並ぶ
+    let first = solid(WIDTH, HEIGHT, color, &[0x10, 0x20, 0x30]);
+    let mut second = first.clone();
+    set_pixel(&mut second, WIDTH, color, 1, 1, &[0x40, 0x50, 0x60]);
+    let mut third = second.clone();
+    set_pixel(&mut third, WIDTH, color, 2, 0, &[0x70, 0x80, 0x90]);
+
+    let (bytes, report) = round_trip(WIDTH, HEIGHT, color, &[first, second, third]);
+    assert_eq!(report.palette, PaletteKind::Exact { colors: 3 });
+
+    let table = scan(&bytes).global_table;
+    assert_eq!(table.len(), 768, "確保した大きさが変わっている");
+    assert_eq!(
+        table[..9],
+        [0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90],
+        "見つけた順に色が並んでいない"
+    );
+    assert!(
+        table[9..].iter().all(|&byte| byte == 0),
+        "余りが黒で埋まっていない"
+    );
 }
 
 /// 動く画素の差分矩形だけが書かれ、先頭フレームは全画面になる

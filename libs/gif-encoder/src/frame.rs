@@ -481,6 +481,26 @@ mod tests {
         );
     }
 
+    /// 2枚目以降は、変わった画素をすべて含む矩形になる
+    #[test]
+    fn later_frames_are_cropped_against_the_screen() {
+        let mut canvas = Canvas::new(layout(ColorType::Rgba8));
+        let first = opaque(0x10);
+        start(&mut canvas, &first);
+
+        let mut next = first.clone();
+        next[(WIDTH as usize + 2) * 4] = 0xFF;
+        assert_eq!(
+            canvas.kept().rect_of(&next),
+            Rect {
+                x: 2,
+                y: 1,
+                width: 1,
+                height: 1
+            }
+        );
+    }
+
     /// 差分の無いフレームは1画素の矩形になる
     #[test]
     fn an_identical_frame_becomes_a_unit_rect() {
