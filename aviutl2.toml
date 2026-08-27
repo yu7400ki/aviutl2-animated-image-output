@@ -1,0 +1,42 @@
+[project]
+id = "aviutl2-animated-image-output"
+name = "AviUtl2 アニメーション画像出力"
+version = "2.0.0"
+
+[build_group]
+debug_all = ["cargo build"]
+release_all = ["cargo build --release"]
+
+[development]
+aviutl2_version = "latest"
+
+[preview]
+aviutl2_version = "latest"
+install_dir = "./.aviutl2-cli/preview"
+profile = "release"
+
+[release]
+output_dir = "release"
+profile = "release"
+
+[artifacts.png_output]
+destination = "Plugin/png_output.auo2"
+build = { group = "debug_all" }
+
+[artifacts.png_output.profiles.debug]
+source = "target/debug/png_output.dll"
+
+[artifacts.png_output.profiles.release]
+source = "target/release/png_output.dll"
+build = { group = "release_all" }
+
+[artifacts.gif_output]
+destination = "Plugin/gif_output.auo2"
+build = { group = "debug_all" }
+
+[artifacts.gif_output.profiles.debug]
+source = "target/debug/gif_output.dll"
+
+[artifacts.gif_output.profiles.release]
+source = "target/release/gif_output.dll"
+build = { group = "release_all" }

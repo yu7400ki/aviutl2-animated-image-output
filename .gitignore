@@ -167,3 +167,6 @@ vite.config.ts.timestamp-*
 # Wrangler
 .wrangler
 
+# AviUtl2 CLI
+.aviutl2-cli/
+release/
