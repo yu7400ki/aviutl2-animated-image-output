@@ -106,8 +106,8 @@ const LOOKAHEAD: usize = 8;
 /// 運ぶ。この値は `private/bench` の全素材で決める。
 const BENCH_TUNED_ESCAPE_FLOOR: u64 = 256;
 
-/// 溢れたときに量子化の材料へ積む画素
-const QUANTIZE_MATERIAL: Material = Material::Changed;
+/// グローバルカラーテーブルを量子化するときにヒストグラムへ積む画素
+const GLOBAL_QUANTIZE_MATERIAL: Material = Material::Changed;
 
 /// 描く直前へ戻す候補を試すのをやめるまでの連敗数
 const RESTORE_LOSS_STREAK: u32 = 6;
@@ -726,7 +726,7 @@ impl<W: Write + Seek> Parts<'_, W> {
         if free > 0 {
             let histogram = material(
                 self.layout,
-                QUANTIZE_MATERIAL,
+                GLOBAL_QUANTIZE_MATERIAL,
                 previous,
                 std::iter::once(pixels).chain(ring.window()),
             );

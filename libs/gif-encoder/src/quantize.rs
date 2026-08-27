@@ -41,7 +41,10 @@ impl Moment for u128 {
 
 /// ヒストグラムへ積む画素の選び方
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[allow(dead_code, reason = "選ばれていない側は量子化の材料のつまみとして残す")]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "選ばれていない側は量子化の材料のつまみとして残す")
+)]
 pub(crate) enum Material {
     /// 窓の各フレームで、その1つ前のフレームから変わった画素
     Changed,
