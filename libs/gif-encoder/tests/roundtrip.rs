@@ -1257,6 +1257,64 @@ fn a_frame_that_overflows_the_table_moves_to_quantization() {
     );
 }
 
+/// 割り当て済みの色が残っているまま閉じても、透過添字の余地が1つ残る
+///
+/// 量子化するのは空きのぶんだけで、割り当て済みの色はそのままの添字で残る。
+/// 空きを数え違えると、テーブルが色で埋まって透過添字を持てなくなる。
+#[test]
+fn a_table_settled_after_some_colors_leaves_room_for_the_transparent_index() {
+    const WIDTH: u32 = 20;
+    const HEIGHT: u32 = 16;
+    /// 先頭フレームで割り当てる色
+    const ALLOCATED: [[u8; 3]; 4] = [
+        [0x10, 0x20, 0x30],
+        [0x11, 0x21, 0x31],
+        [0x12, 0x22, 0x32],
+        [0x13, 0x23, 0x33],
+    ];
+    let color = ColorType::Rgb8;
+
+    let mut first = solid(WIDTH, HEIGHT, color, &ALLOCATED[0]);
+    for (at, pixel) in ALLOCATED.iter().enumerate().skip(1) {
+        set_pixel(&mut first, WIDTH, color, at as u32, 0, pixel);
+    }
+    // 2枚目で上限を超える色が一度に現れ、そこでテーブルが閉じる
+    let second: Vec<u8> = (0..WIDTH * HEIGHT)
+        .flat_map(|i| [(i % 64 * 4) as u8, (i / 64 * 4) as u8, 0x80])
+        .collect();
+
+    let (bytes, report) = encode(WIDTH, HEIGHT, color, &[first, second], 0).unwrap();
+    let PaletteKind::Quantized { colors } = report.palette else {
+        panic!("溢れていない: {:?}", report.palette)
+    };
+    assert!(
+        usize::from(colors) <= 255,
+        "透過添字の余地が残っていない: {colors}色"
+    );
+    assert!(
+        usize::from(colors) > ALLOCATED.len(),
+        "量子化した色が載っていない: {colors}色"
+    );
+
+    // 割り当て済みの色は添字も並びもそのまま残る
+    let table = scan(&bytes).global_table;
+    let head: Vec<u8> = ALLOCATED.concat();
+    assert_eq!(table[..head.len()], head, "割り当て済みの色が動いている");
+
+    let decoded = decode_with_gif(&bytes);
+    for (index, frame) in decoded.frames.iter().enumerate() {
+        assert!(
+            frame.transparent.is_some(),
+            "{index} 番目に透過インデックスが無い"
+        );
+    }
+    assert_eq!(
+        decoded.frames[1].transparent,
+        Some(colors as u8),
+        "透過添字が、色の載っていない最小の添字になっていない"
+    );
+}
+
 /// 色で埋まったテーブルに257色目が現れたら、その色は最近傍へ写る
 ///
 /// 先頭フレームが上限ちょうどの色を埋めるので、量子化の空きは残らない。

@@ -31,8 +31,7 @@ const GLOBAL_TABLE_SIZE: u8 = 7;
 pub(crate) const GLOBAL_TABLE_OFFSET: u64 = 13;
 /// 書き戻す前のグローバルカラーテーブルを埋める色
 ///
-/// 書き戻さないまま終わったファイルは、この色が並んだまま残る。黒で埋めると
-/// 真っ黒なアニメーションとして黙って読めてしまう。
+/// 書き戻さないまま終わったファイルは、この色が並んだまま残る。
 const PLACEHOLDER: [u8; 3] = [0xFF, 0x00, 0xFF];
 /// ループ回数を持つアプリケーション拡張の識別子と認証コード
 const NETSCAPE: &[u8; 11] = b"NETSCAPE2.0";
@@ -207,7 +206,10 @@ mod tests {
 
     /// 色の決まっていないグローバルカラーテーブルは、確保した位置と大きさを持つ
     #[test]
-    fn the_placeholder_fills_every_entry_with_a_visible_color() {
+    fn the_placeholder_fills_every_entry_with_magenta() {
+        /// 書き戻す前のエントリの色
+        const MAGENTA: [u8; 3] = [0xFF, 0x00, 0xFF];
+
         let mut bytes = Vec::new();
         header(&mut bytes).unwrap();
         logical_screen_descriptor(&mut bytes, 1, 1).unwrap();
@@ -217,8 +219,8 @@ mod tests {
         let table = &bytes[GLOBAL_TABLE_OFFSET as usize..];
         assert_eq!(table.len(), 768);
         assert!(
-            table.chunks_exact(3).all(|entry| entry == PLACEHOLDER),
-            "確保しただけのエントリが目立たない色になっている"
+            table.chunks_exact(3).all(|entry| entry == MAGENTA),
+            "確保しただけのエントリがマゼンタでない"
         );
     }
 

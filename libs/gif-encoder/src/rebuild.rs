@@ -234,6 +234,19 @@ mod tests {
         assert_eq!(histogram.distinct(), 1);
     }
 
+    /// RGB8の入力に透過は無く、黒はそのまま積む
+    ///
+    /// 透過標識は詰めた色が (0,0,0,0) で、アルファを持たない画素の黒とは別物。
+    /// 取り違えると、黒い領域が量子化の材料から落ちる。
+    #[test]
+    fn black_is_counted_when_the_input_has_no_alpha() {
+        let frame = [0u8, 0, 0, 40, 40, 40];
+
+        let histogram = changed_colors(&layout(), &[], std::iter::once(&frame[..]));
+        assert_eq!(histogram.distinct(), 2, "黒を積んでいない");
+        assert_eq!(histogram.quantize(1), vec![0xFF14_1414], "黒に重みが無い");
+    }
+
     /// 上限を埋めた不透明なテーブルからでも、維持は空きの数に収まる
     ///
     /// 収まらないと空きの引き算が桁あふれし、あふれた数がそのまま量子化の
