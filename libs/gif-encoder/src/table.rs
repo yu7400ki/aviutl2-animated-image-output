@@ -22,11 +22,6 @@ pub(crate) const QUANTIZED_COLORS: usize = MAX_COLORS - 1;
 /// 大きさの欄が `log2(エントリ数) - 1` なので、1色しか無くても2エントリ書く。
 const MIN_ENTRIES: usize = 2;
 
-/// LZWの最小符号長の下限
-///
-/// 1色や2色のテーブルでも符号長1は使えない。
-const MIN_CODE_SIZE: u8 = 2;
-
 /// 添字順に並べたRGBの三つ組
 #[derive(Clone)]
 pub(crate) struct ColorTable {
@@ -61,14 +56,9 @@ impl ColorTable {
         &self.bytes
     }
 
-    /// 論理画面記述子と画像記述子が持つカラーテーブルの大きさの欄
+    /// 画像記述子が持つローカルカラーテーブルの大きさの欄
     pub(crate) fn size_field(&self) -> u8 {
         self.len().trailing_zeros() as u8 - 1
-    }
-
-    /// このテーブルを引く添字のLZW最小符号長
-    pub(crate) fn min_code_size(&self) -> u8 {
-        (self.len().trailing_zeros() as u8).max(MIN_CODE_SIZE)
     }
 }
 
@@ -596,16 +586,5 @@ mod tests {
         assert_eq!(carried.len(), 1, "最終使用が引き継がれていない");
         assert_eq!(carried[0].color, 0xFF00_0000);
         assert_eq!(carried[0].last_used, 9);
-    }
-
-    #[test]
-    fn the_minimum_code_size_never_drops_below_two() {
-        for (colors, size) in [(1, 2), (2, 2), (3, 2), (4, 2), (5, 3), (255, 8), (256, 8)] {
-            assert_eq!(
-                ColorTable::new(&gray(colors)).min_code_size(),
-                size,
-                "{colors}色"
-            );
-        }
     }
 }

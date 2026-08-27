@@ -28,6 +28,16 @@ const BLOCK_TERMINATOR: u8 = 0x00;
 /// 最小符号長の範囲
 const MIN_CODE_SIZES: std::ops::RangeInclusive<u8> = 2..=8;
 
+/// `indices` を圧縮するのに要る最小符号長
+///
+/// 実際に使った最大の添字が収まる長さを返す。カラーテーブルの大きさとは独立で、
+/// 添字を引く先の大きさは復号側がカラーテーブルから知る。
+pub(crate) fn min_code_size(indices: &[u8]) -> u8 {
+    let largest = indices.iter().copied().max().unwrap_or(0);
+    let bits = (u8::BITS - largest.leading_zeros()) as u8;
+    bits.max(*MIN_CODE_SIZES.start())
+}
+
 /// `indices` をLZWで圧縮し、サブブロックへ分けて書き出す
 ///
 /// 先頭にClear、末尾にEOIを出し、ブロック終端で閉じる。`min_code_size` は
@@ -410,6 +420,31 @@ mod tests {
 
         let ramp: Vec<u8> = (0..40000).map(|i| (i % 251) as u8).collect();
         round_trip(&ramp, 8);
+    }
+
+    /// 最小符号長は使った最大の添字から決まり、2を下回らない
+    #[test]
+    fn the_minimum_code_size_follows_the_largest_index() {
+        for (largest, size) in [
+            (0u8, 2u8),
+            (1, 2),
+            (3, 2),
+            (4, 3),
+            (7, 3),
+            (8, 4),
+            (15, 4),
+            (16, 5),
+            (127, 7),
+            (128, 8),
+            (255, 8),
+        ] {
+            assert_eq!(
+                min_code_size(&[0, largest, 0]),
+                size,
+                "最大の添字 {largest}"
+            );
+        }
+        assert_eq!(min_code_size(&[]), 2, "空の添字の並び");
     }
 
     /// 最小符号長が変わっても元へ戻る

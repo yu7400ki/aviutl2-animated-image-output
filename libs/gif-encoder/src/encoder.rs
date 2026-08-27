@@ -203,16 +203,16 @@ impl RestorePacing {
 /// 廃棄方法は次のフレームを見るまで決まらず、グラフィック制御拡張は画像記述子の
 /// 前に置く必要があるため、書けるようになるまで1つぶんを保持する。
 ///
-/// 透過インデックス・最小符号長・ローカルカラーテーブルは、添字を作ったときの
-/// カラーテーブルから取って一緒に運ぶ。添字はそのテーブルを引くものなので、
-/// 書き出す時点のテーブルから引き直すと組み合わせが崩れうる。
+/// 透過インデックス・最小符号長・ローカルカラーテーブルは、添字を作ったときに
+/// 決めて一緒に運ぶ。添字はそのときのテーブルを引くものなので、書き出す時点の
+/// テーブルから取り直すと組み合わせが崩れうる。
 struct Pending {
     rect: Rect,
     /// 1/100秒へ丸めた遅延
     delay: u16,
     /// 添字を引いたテーブルの透過インデックス
     transparent: Option<u8>,
-    /// 添字を引いたテーブルのLZW最小符号長
+    /// 添字の並びが要するLZW最小符号長
     min_code_size: u8,
     /// このフレームに書くローカルカラーテーブル。グローバルのままなら `None`
     local: Option<ColorTable>,
@@ -949,7 +949,7 @@ fn encode_on(
     indices.clear();
     screen.append_indices(frame, rect, palette, indices);
 
-    let min_code_size = palette.table().min_code_size();
+    let min_code_size = lzw::min_code_size(indices);
     let mut body = Vec::new();
     lzw::compress(&mut body, indices, min_code_size).expect("Vecへの書き出しは失敗しない");
 
