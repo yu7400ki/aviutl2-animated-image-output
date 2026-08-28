@@ -68,13 +68,68 @@ impl EncodedFrame {
     }
 }
 
+/// 符号化を待つ、切り出し済みの1フレーム
+///
+/// 切り出した時点でキャンバスから独立し、符号化はこのバッファだけを読む。
+pub(crate) struct Job {
+    /// 矩形の中の画素。色種別のとおりに隙間なく並ぶ
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    color_type: ColorType,
+}
+
+impl Job {
+    /// `data` から `rect` を切り出す
+    ///
+    /// `data` は `layout` のとおりに並んでいること。`base` を渡すと、切り出した
+    /// 画素のうちそれと一致するものを完全透過へ置き換える。`base` はRGBAで、
+    /// `data` と同じ並びであること。`pixels` の元の内容は捨てる。
+    pub(crate) fn crop(
+        data: &[u8],
+        layout: &Layout,
+        rect: Rect,
+        base: Option<&[u8]>,
+        mut pixels: Vec<u8>,
+    ) -> Self {
+        pixels.clear();
+        crop(
+            data,
+            rect,
+            layout.stride,
+            layout.bytes_per_pixel,
+            layout.bytes_per_pixel,
+            &mut pixels,
+        );
+        if let Some(base) = base {
+            debug_assert_eq!(
+                layout.color_type,
+                ColorType::Rgba8,
+                "置き換えた画素を書けるのはαの欄があるときだけ"
+            );
+            substitute(&mut pixels, base, rect, layout.stride);
+        }
+
+        Job {
+            pixels,
+            width: rect.width,
+            height: rect.height,
+            color_type: layout.color_type,
+        }
+    }
+
+    /// 切り出しに使ったバッファを返す
+    pub(crate) fn into_pixels(self) -> Vec<u8> {
+        self.pixels
+    }
+}
+
 /// 設定を写した符号化器
+#[derive(Clone, Copy)]
 pub(crate) struct Codec {
     config: WebPConfig,
     /// キャンバスと一致した画素を完全透過へ置き換えられるか
     substitute: bool,
-    /// 矩形を切り出す先。フレームごとに使い回す
-    buffer: Vec<u8>,
 }
 
 impl Codec {
@@ -101,7 +156,6 @@ impl Codec {
         Ok(Codec {
             config: raw,
             substitute: config.lossless && config.color_type == ColorType::Rgba8,
-            buffer: Vec::new(),
         })
     }
 
@@ -113,43 +167,15 @@ impl Codec {
         self.substitute
     }
 
-    /// `data` から `rect` を切り出して符号化する
-    ///
-    /// `data` は `layout` のとおりに並んでいること。`base` を渡すと、切り出した
-    /// 画素のうちそれと一致するものを完全透過へ置き換える。`base` はRGBAで、
-    /// `data` と同じ並びであること。
+    /// 切り出し済みのフレームを符号化する
     ///
     /// # Errors
     /// 符号化に失敗したとき [`Error::Encode`]。結果のチャンク構成を読み取れない
     /// とき [`Error::MalformedOutput`]。
-    pub(crate) fn encode(
-        &mut self,
-        data: &[u8],
-        layout: &Layout,
-        rect: Rect,
-        base: Option<&[u8]>,
-    ) -> Result<EncodedFrame, Error> {
-        self.buffer.clear();
-        crop(
-            data,
-            rect,
-            layout.stride,
-            layout.bytes_per_pixel,
-            layout.bytes_per_pixel,
-            &mut self.buffer,
-        );
-        if let Some(base) = base {
-            debug_assert_eq!(
-                layout.color_type,
-                ColorType::Rgba8,
-                "置き換えた画素を書けるのはαの欄があるときだけ"
-            );
-            substitute(&mut self.buffer, base, rect, layout.stride);
-        }
+    pub(crate) fn encode(&self, job: &Job) -> Result<EncodedFrame, Error> {
+        let has_alpha = job.color_type == ColorType::Rgba8 && has_transparency(&job.pixels);
 
-        let has_alpha = layout.color_type == ColorType::Rgba8 && has_transparency(&self.buffer);
-
-        let picture = Picture::import(&self.buffer, rect.width, rect.height, layout.color_type)?;
+        let picture = Picture::import(&job.pixels, job.width, job.height, job.color_type)?;
         let bytes = picture.encode(&self.config)?;
         EncodedFrame::new(bytes, has_alpha)
     }
@@ -359,7 +385,7 @@ mod tests {
             }
         }
 
-        let mut codec = Codec::new(&Config {
+        let codec = Codec::new(&Config {
             color_type,
             lossless,
             quality: 75.0,
@@ -367,7 +393,9 @@ mod tests {
             num_plays: 0,
         })
         .unwrap();
-        codec.encode(&data, &layout, layout.whole(), None).unwrap()
+        codec
+            .encode(&Job::crop(&data, &layout, layout.whole(), None, Vec::new()))
+            .unwrap()
     }
 
     /// チャンクが持つペイロードのバイト数
@@ -398,7 +426,7 @@ mod tests {
             }
         }
 
-        let mut codec = Codec::new(&Config {
+        let codec = Codec::new(&Config {
             color_type: ColorType::Rgba8,
             lossless: false,
             quality: 75.0,
@@ -406,7 +434,9 @@ mod tests {
             num_plays: 0,
         })
         .unwrap();
-        let frame = codec.encode(&data, &layout, layout.whole(), None).unwrap();
+        let frame = codec
+            .encode(&Job::crop(&data, &layout, layout.whole(), None, Vec::new()))
+            .unwrap();
 
         let alpha = frame.alpha().unwrap();
         assert_eq!(&alpha[..4], b"ALPH");
@@ -534,7 +564,7 @@ mod tests {
             height: 7,
         };
 
-        let mut codec = Codec::new(&Config {
+        let codec = Codec::new(&Config {
             color_type: ColorType::Rgba8,
             lossless: true,
             quality: 75.0,
@@ -542,7 +572,9 @@ mod tests {
             num_plays: 0,
         })
         .unwrap();
-        let frame = codec.encode(&data, &layout, rect, None).unwrap();
+        let frame = codec
+            .encode(&Job::crop(&data, &layout, rect, None, Vec::new()))
+            .unwrap();
 
         let mut expected = Vec::new();
         crop(

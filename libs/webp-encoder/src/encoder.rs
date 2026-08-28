@@ -1,6 +1,6 @@
 //! 全体の駆動
 
-use crate::codec::{Codec, EncodedFrame};
+use crate::codec::{Codec, EncodedFrame, Job};
 use crate::delay::{Durations, MAX_DURATION, Milliseconds};
 use crate::error::Error;
 use crate::frame::Canvas;
@@ -56,7 +56,7 @@ impl<W: Write + Seek> Animation<W> {
     /// 保留中のフレームを `pending` へ入れ替え、入れ替わったフレームを書き出す
     ///
     /// `dispose` は入れ替わったフレームの廃棄方法。
-    fn push(&mut self, pending: Pending, dispose: bool, codec: &mut Codec) -> Result<(), Error> {
+    fn push(&mut self, pending: Pending, dispose: bool, codec: &Codec) -> Result<(), Error> {
         let previous = self.pending.replace(pending);
         self.write(previous, dispose, codec)
     }
@@ -72,7 +72,7 @@ impl<W: Write + Seek> Animation<W> {
     }
 
     /// 保留中のフレームを、次のフレームが無いものとして書き出す
-    fn flush(&mut self, codec: &mut Codec) -> Result<(), Error> {
+    fn flush(&mut self, codec: &Codec) -> Result<(), Error> {
         let pending = self.pending.take();
         self.write(pending, false, codec)
     }
@@ -84,7 +84,7 @@ impl<W: Write + Seek> Animation<W> {
         &mut self,
         pending: Option<Pending>,
         dispose: bool,
-        codec: &mut Codec,
+        codec: &Codec,
     ) -> Result<(), Error> {
         let Some(pending) = pending else {
             return Ok(());
@@ -133,11 +133,12 @@ impl<W: Write + Seek> Animation<W> {
 /// とき [`Error::MalformedOutput`]。
 fn filler<'a>(
     slot: &'a mut Option<EncodedFrame>,
-    codec: &mut Codec,
+    codec: &Codec,
 ) -> Result<&'a EncodedFrame, Error> {
     if slot.is_none() {
         let layout = Layout::new(1, 1, ColorType::Rgba8)?;
-        *slot = Some(codec.encode(&FILLER_PIXEL, &layout, layout.whole(), None)?);
+        let job = Job::crop(&FILLER_PIXEL, &layout, layout.whole(), None, Vec::new());
+        *slot = Some(codec.encode(&job)?);
     }
     Ok(slot.as_ref().expect("符号化した結果が入っている"))
 }
@@ -164,6 +165,8 @@ pub struct Encoder<W: Write + Seek> {
     codec: Codec,
     /// 前のフレームまでを描いたキャンバスと、正規化した入力
     canvas: Canvas,
+    /// 矩形を切り出す先。フレームごとに使い回す
+    buffer: Vec<u8>,
     num_frames: u32,
     /// [`Self::add_frame`] が受け付けたフレーム数
     frames_accepted: u32,
@@ -214,6 +217,7 @@ impl<W: Write + Seek> Encoder<W> {
             canvas: Canvas::new(&layout),
             layout,
             codec,
+            buffer: Vec::new(),
             num_frames,
             frames_accepted: 0,
             poisoned: false,
@@ -279,7 +283,7 @@ impl<W: Write + Seek> Encoder<W> {
 
         let Encoder {
             sink,
-            mut codec,
+            codec,
             material_has_alpha,
             ..
         } = self;
@@ -290,7 +294,7 @@ impl<W: Write + Seek> Encoder<W> {
                 (writer, false, 0)
             }
             Sink::Animation(mut animation) => {
-                animation.flush(&mut codec)?;
+                animation.flush(&codec)?;
                 let Animation {
                     riff,
                     delay_clamped,
@@ -332,8 +336,8 @@ impl<W: Write + Seek> Encoder<W> {
 
         let animation = match &mut self.sink {
             Sink::Still(writer) => {
-                let rect = self.layout.whole();
-                let encoded = self.codec.encode(source, &self.layout, rect, None)?;
+                let job = Job::crop(source, &self.layout, self.layout.whole(), None, Vec::new());
+                let encoded = self.codec.encode(&job)?;
                 return Ok(writer.write_all(encoded.still())?);
             }
             Sink::Animation(animation) => animation,
@@ -347,9 +351,16 @@ impl<W: Write + Seek> Encoder<W> {
 
         let base = (placement.blend && self.codec.substitutes_transparency())
             .then(|| self.canvas.base(placement.dispose));
-        let encoded = self
-            .codec
-            .encode(source, &self.layout, placement.rect, base)?;
+        let job = Job::crop(
+            source,
+            &self.layout,
+            placement.rect,
+            base,
+            std::mem::take(&mut self.buffer),
+        );
+        let encoded = self.codec.encode(&job);
+        self.buffer = job.into_pixels();
+        let encoded = encoded?;
         self.canvas.commit(placement.rect);
         animation.push(
             Pending {
@@ -359,7 +370,7 @@ impl<W: Write + Seek> Encoder<W> {
                 duration,
             },
             placement.dispose,
-            &mut self.codec,
+            &self.codec,
         )
     }
 }
