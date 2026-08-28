@@ -344,6 +344,24 @@ mod tests {
         assert!(pipeline.buffer().capacity() >= layout.frame_len);
     }
 
+    /// 群れを畳むと、抜ける前に旗が立つ
+    ///
+    /// 旗を読む側と立てる側を別々に問う。立てるのは畳むときだけなので、
+    /// 起こした直後は倒れている。
+    #[test]
+    fn dropping_the_pool_raises_the_flag() {
+        let codec = Codec::new(&config(ColorType::Rgba8)).unwrap();
+        let pool = spawn(codec, NonZeroUsize::new(2).unwrap()).unwrap();
+        let abandoned = Arc::clone(&pool.abandoned);
+
+        assert!(
+            !abandoned.load(Ordering::Relaxed),
+            "起こした直後に立っている"
+        );
+        drop(pool);
+        assert!(abandoned.load(Ordering::Relaxed), "畳んでも立っていない");
+    }
+
     /// 畳んだ後に取り出したジョブは、符号化せずに捨てる
     ///
     /// 結末を返さないので、捨てたぶんの番号は誰にも指されない。
