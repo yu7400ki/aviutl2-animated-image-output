@@ -325,9 +325,6 @@ mod tests {
     }
 
     /// RIFFのサイズ欄を最後に書く
-    ///
-    /// 途中で落ちたファイルのサイズ欄は0のままになり、ALPHAフラグだけが
-    /// 欠けた一見完成しているファイルは残らない。
     #[test]
     fn the_riff_size_is_the_last_thing_written() {
         let writer = Trace {

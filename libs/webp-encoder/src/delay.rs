@@ -3,8 +3,6 @@
 use anim_core::FrameDelay;
 
 /// 表示時間の下限 (ms)
-///
-/// 0の解釈はデコーダ間で揃わないため、それを避ける下限を置く。
 const MIN_DURATION: u32 = 1;
 
 /// ANMFの表示時間の欄に収まる上限 (ms)
@@ -14,14 +12,10 @@ const MAX_DURATION: u32 = 0x00FF_FFFF;
 ///
 /// フレーム0..N-1 の遅延の総和を `T_N` として、N番目のフレームへ
 /// `round(T_{N+1} * 1000) - round(T_N * 1000)` を割り当てる。丸めは
-/// `floor(x + 1/2)` で、整数の平行移動で不変なので、総和そのものを持たずに
-/// 「総和を丸めたときの残差」だけで同じ列が出せる。
+/// `floor(x + 1/2)` の最近傍。
 ///
-/// 連続するフレームの割り当てを足すと中間の境界が消え、両端の丸めだけが残る。
-/// フレームを併合しても、丸めの区間は書き出すフレームの境界で取られる。
-///
-/// 残差は既約分数で持つ。絶対値は常に 1/2 未満なので、フレーム数がいくら
-/// 増えても分子・分母は分母の最小公倍数より大きくならない。
+/// 連続するフレームの割り当てを足したものは、その区間をまとめて丸めた値と
+/// 一致する。
 pub(crate) struct Milliseconds {
     /// 残差の分子 (ms)。絶対値は `denominator / 2` 以下
     numerator: i64,
@@ -55,8 +49,7 @@ impl Milliseconds {
     /// 残差と `denominator` に共通の分母を取る
     ///
     /// 最小公倍数が `u64` に収まらないときは、残差を `denominator` の刻みへ
-    /// 丸め直してからその分母を返す。丸めの誤差は 1/(2000 * `denominator`) 秒で、
-    /// 分母が互いに素で大きいときにしか起きない。
+    /// 丸め直してからその分母を返す。
     fn align(&mut self, denominator: u64) -> u64 {
         let common = u128::from(self.denominator) / gcd(self.denominator, denominator)
             * u128::from(denominator);
@@ -81,7 +74,6 @@ impl Milliseconds {
 
 /// 表示時間をANMFの欄に収まる列へ分ける
 ///
-/// 先頭を書き出すフレームが載せ、続きはキャンバスを書き換えないフレームへ回す。
 /// 列は必ず1つ以上になる。
 pub(crate) struct Durations {
     /// まだ載せていない表示時間 (ms)
@@ -93,7 +85,7 @@ pub(crate) struct Durations {
 impl Durations {
     /// `total` ミリ秒を分ける
     ///
-    /// 下限に満たない時間は下限まで切り上げる。切り上げたぶんは累積へ戻さない。
+    /// 下限に満たない時間は下限まで切り上げる。
     pub(crate) fn new(total: u64) -> Self {
         Durations {
             remaining: total.max(u64::from(MIN_DURATION)),

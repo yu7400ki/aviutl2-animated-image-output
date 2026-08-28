@@ -304,7 +304,10 @@ impl<W: Write + Seek> Encoder<W> {
         if self.layout.color_type == ColorType::Rgba8 {
             self.material_has_alpha |= has_transparency(data);
         }
-        self.canvas.stage(data, self.layout.color_type);
+        // 写した画素を読むのは、差分を取るときと、RGBAを符号化へ渡すとき
+        if self.layout.color_type == ColorType::Rgba8 || !matches!(self.sink, Sink::Still(_)) {
+            self.canvas.stage(data, self.layout.color_type);
+        }
         let source = match self.layout.color_type {
             ColorType::Rgb8 => data,
             ColorType::Rgba8 => self.canvas.staged(),
