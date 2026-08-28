@@ -162,9 +162,11 @@ method=3
     }
 
     /// 認識しないキーだけのセクションは既定値になる
+    ///
+    /// 他のプラグインの設定を写した ini でも、こちらの既定は動かない。
     #[test]
     fn unknown_keys_are_ignored() {
-        let config = load(&[("alpha_compression", "1"), ("thread_level", "1")]);
+        let config = load(&[("compression_level", "6"), ("reduce_color", "true")]);
         let default = Config::default();
 
         assert_eq!(config.repeat, default.repeat);
