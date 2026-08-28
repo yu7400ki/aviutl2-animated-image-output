@@ -18,8 +18,9 @@ use crate::layout::Layout;
 ///
 /// # Errors
 /// 寸法が0か16383を超えるとき [`Error::InvalidDimensions`]。`data` の長さが
-/// 寸法と色種別に合わないとき [`Error::FrameSizeMismatch`]。符号化に失敗した
-/// とき [`Error::Encode`]。
+/// 寸法と色種別に合わないとき [`Error::FrameSizeMismatch`]。設定が値域の外か
+/// 符号化に失敗したとき [`Error::Encode`]。符号化された画像のチャンク構成を
+/// 読み取れないとき [`Error::MalformedOutput`]。
 pub fn encode(
     width: u32,
     height: u32,

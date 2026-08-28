@@ -82,7 +82,7 @@ impl Codec {
         raw.method = c_int::from(config.method);
         raw.exact = c_int::from(config.lossless);
 
-        if unsafe { WebPValidateConfig(&raw) } == 0 {
+        if !config.quality.is_finite() || unsafe { WebPValidateConfig(&raw) } == 0 {
             return Err(Error::Encode(EncodingError::InvalidConfiguration));
         }
 
@@ -288,13 +288,15 @@ mod tests {
     }
 
     /// 素材と設定から符号化した単葉
-    fn encode(color_type: ColorType, lossless: bool, seed: u32) -> EncodedFrame {
+    ///
+    /// `alpha` を載せるのはRGBAの素材だけで、RGBの素材は不透明になる。
+    fn encode(color_type: ColorType, lossless: bool, alpha: u8) -> EncodedFrame {
         let (width, height) = (32, 24);
         let layout = Layout::new(width, height, color_type).unwrap();
-        let mut data = noise(layout.frame_len, seed);
+        let mut data = noise(layout.frame_len, 0x5EED);
         if color_type == ColorType::Rgba8 {
             for pixel in data.chunks_exact_mut(4) {
-                pixel[3] = 0x80;
+                pixel[3] = alpha;
             }
         }
 
@@ -308,60 +310,165 @@ mod tests {
         codec.encode(&data, &layout, layout.whole()).unwrap()
     }
 
+    /// チャンクが持つペイロードのバイト数
+    fn payload_len(chunk: &[u8]) -> usize {
+        u32::from_le_bytes(chunk[4..8].try_into().unwrap()) as usize
+    }
+
     #[test]
     fn a_lossless_frame_comes_back_as_a_single_vp8l_chunk() {
-        let frame = encode(ColorType::Rgba8, true, 0x5EED);
+        let frame = encode(ColorType::Rgba8, true, 0x80);
         assert_eq!(frame.alpha(), None);
         assert_eq!(&frame.image()[..4], b"VP8L");
         assert_eq!(&frame.still()[..4], b"RIFF");
+
+        // 詰めを踏む素材であることが、この形の検出力を支える
+        let payload = payload_len(frame.image());
+        assert_eq!(payload % 2, 1);
+        assert_eq!(frame.image().len(), CHUNK_HEADER + payload + 1);
     }
 
     #[test]
     fn a_lossy_frame_with_alpha_comes_back_as_an_alpha_and_a_vp8_chunk() {
-        let frame = encode(ColorType::Rgba8, false, 0x1234);
-        assert_eq!(&frame.alpha().unwrap()[..4], b"ALPH");
+        let layout = Layout::new(24, 18, ColorType::Rgba8).unwrap();
+        let mut data = noise(layout.frame_len, 0x5EED);
+        for (index, pixel) in data.chunks_exact_mut(4).enumerate() {
+            if index % 5 == 0 {
+                pixel.fill(0);
+            }
+        }
+
+        let mut codec = Codec::new(&Config {
+            color_type: ColorType::Rgba8,
+            lossless: false,
+            quality: 75.0,
+            method: 4,
+        })
+        .unwrap();
+        let frame = codec.encode(&data, &layout, layout.whole()).unwrap();
+
+        let alpha = frame.alpha().unwrap();
+        assert_eq!(&alpha[..4], b"ALPH");
         assert_eq!(&frame.image()[..4], b"VP8 ");
+
+        // 詰めを踏む素材であることが、この形の検出力を支える
+        let payload = payload_len(alpha);
+        assert_eq!(payload % 2, 1);
+        assert_eq!(alpha.len(), CHUNK_HEADER + payload + 1);
     }
 
+    /// αを持たない素材はVP8XもALPHも伴わない。条件は入力の色種別ではなく
+    /// 透過画素の有無で、不透明なRGBAも単独のVP8チャンクで来る
     #[test]
     fn an_opaque_lossy_frame_comes_back_as_a_single_vp8_chunk() {
-        let frame = encode(ColorType::Rgb8, false, 0x1234);
-        assert_eq!(frame.alpha(), None);
-        assert_eq!(&frame.image()[..4], b"VP8 ");
-    }
-
-    #[test]
-    fn a_quality_or_method_outside_the_range_is_refused() {
-        for config in [
-            Config {
-                color_type: ColorType::Rgba8,
-                lossless: false,
-                quality: 101.0,
-                method: 4,
-            },
-            Config {
-                color_type: ColorType::Rgba8,
-                lossless: false,
-                quality: 75.0,
-                method: 7,
-            },
-        ] {
-            assert!(matches!(
-                Codec::new(&config),
-                Err(Error::Encode(EncodingError::InvalidConfiguration))
-            ));
+        for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+            let frame = encode(color_type, false, 0xFF);
+            assert_eq!(frame.alpha(), None, "{color_type:?}");
+            assert_eq!(&frame.image()[..4], b"VP8 ", "{color_type:?}");
         }
     }
 
     #[test]
-    fn a_sub_rect_is_encoded_at_its_own_size() {
+    fn only_a_lossless_config_asks_libwebp_to_keep_every_byte() {
+        let config = Config {
+            color_type: ColorType::Rgba8,
+            lossless: true,
+            quality: 60.0,
+            method: 3,
+        };
+
+        let lossless = Codec::new(&config).unwrap().config;
+        assert_eq!((lossless.lossless, lossless.exact), (1, 1));
+        assert_eq!((lossless.quality, lossless.method), (60.0, 3));
+
+        let lossy = Codec::new(&Config {
+            lossless: false,
+            ..config
+        })
+        .unwrap()
+        .config;
+        assert_eq!((lossy.lossless, lossy.exact), (0, 0));
+        assert_eq!((lossy.quality, lossy.method), (60.0, 3));
+
+        assert_eq!((lossless.thread_level, lossy.thread_level), (0, 0));
+    }
+
+    #[test]
+    fn a_quality_or_method_outside_the_range_is_refused() {
+        let base = Config {
+            color_type: ColorType::Rgba8,
+            lossless: false,
+            quality: 75.0,
+            method: 4,
+        };
+        for config in [
+            Config {
+                quality: 101.0,
+                ..base
+            },
+            Config {
+                quality: -1.0,
+                ..base
+            },
+            Config {
+                quality: f32::NAN,
+                ..base
+            },
+            Config {
+                quality: f32::INFINITY,
+                ..base
+            },
+            Config { method: 7, ..base },
+        ] {
+            assert!(
+                matches!(
+                    Codec::new(&config),
+                    Err(Error::Encode(EncodingError::InvalidConfiguration))
+                ),
+                "quality {} method {}",
+                config.quality,
+                config.method
+            );
+        }
+    }
+
+    /// 画素ごとに値の違うRGBAのキャンバス
+    fn ramp_rgba(width: u32, height: u32) -> Vec<u8> {
+        (0..height)
+            .flat_map(|y| {
+                (0..width).flat_map(move |x| [(x * 7) as u8, (y * 11) as u8, (x + y) as u8, 0xFF])
+            })
+            .collect()
+    }
+
+    /// `image-webp` でデコードした生RGBA
+    fn decode(bytes: &[u8], width: u32, height: u32) -> Vec<u8> {
+        let mut decoder = image_webp::WebPDecoder::new(std::io::Cursor::new(bytes))
+            .expect("image-webp が読めない");
+        assert_eq!(decoder.dimensions(), (width, height));
+        let mut buffer = vec![0u8; decoder.output_buffer_size().expect("出力の大きさ")];
+        decoder
+            .read_image(&mut buffer)
+            .expect("image-webp のデコード");
+        if decoder.has_alpha() {
+            buffer
+        } else {
+            buffer
+                .chunks_exact(3)
+                .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 0xFF])
+                .collect()
+        }
+    }
+
+    #[test]
+    fn a_sub_rect_carries_the_pixels_inside_it() {
         let layout = Layout::new(32, 24, ColorType::Rgba8).unwrap();
-        let data = vec![0xFF; layout.frame_len];
+        let data = ramp_rgba(layout.width, layout.height);
         let rect = Rect {
-            x: 4,
+            x: 5,
             y: 6,
-            width: 8,
-            height: 5,
+            width: 9,
+            height: 7,
         };
 
         let mut codec = Codec::new(&Config {
@@ -373,9 +480,19 @@ mod tests {
         .unwrap();
         let frame = codec.encode(&data, &layout, rect).unwrap();
 
-        // VP8Lのヘッダは符号1バイトのあとに幅-1、高さ-1を14bitずつ詰める
-        let header = u32::from_le_bytes(frame.image()[9..13].try_into().unwrap());
-        assert_eq!(header & 0x3FFF, rect.width - 1);
-        assert_eq!((header >> 14) & 0x3FFF, rect.height - 1);
+        let mut expected = Vec::new();
+        crop(
+            &data,
+            rect,
+            layout.stride,
+            layout.bytes_per_pixel,
+            layout.bytes_per_pixel,
+            &mut expected,
+        );
+        assert_eq!(
+            decode(frame.still(), rect.width, rect.height),
+            expected,
+            "{rect:?}"
+        );
     }
 }
