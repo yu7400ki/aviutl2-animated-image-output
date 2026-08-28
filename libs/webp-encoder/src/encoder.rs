@@ -112,7 +112,8 @@ impl<W: Write + Seek> Animation<W> {
 /// 透明1画素のフレームを、まだ無ければ符号化して返す
 ///
 /// # Errors
-/// 符号化に失敗したとき [`Error::Encode`]。
+/// 符号化に失敗したとき [`Error::Encode`]。結果のチャンク構成を読み取れない
+/// とき [`Error::MalformedOutput`]。
 fn filler<'a>(
     slot: &'a mut Option<EncodedFrame>,
     codec: &mut Codec,
@@ -213,8 +214,10 @@ impl<W: Write + Seek> Encoder<W> {
     /// バイト数が寸法と色種別から決まる長さと違うとき
     /// [`Error::FrameSizeMismatch`]。宣言したフレーム数を超えたとき
     /// [`Error::FrameCountMismatch`]。符号化に失敗したとき [`Error::Encode`]。
-    /// ファイルがRIFFの上限を超えるとき [`Error::FileTooLarge`]。以前の投入が
-    /// 書き出しに失敗しているとき [`Error::Poisoned`]。
+    /// 符号化した内容のチャンク構成を読み取れないとき
+    /// [`Error::MalformedOutput`]。ファイルがRIFFの上限を超えるとき
+    /// [`Error::FileTooLarge`]。書き出しに失敗したとき [`Error::Io`]。
+    /// 以前の投入が書き出しに失敗しているとき [`Error::Poisoned`]。
     pub fn add_frame(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
         if self.poisoned {
             return Err(Error::Poisoned);
@@ -243,8 +246,9 @@ impl<W: Write + Seek> Encoder<W> {
     /// # Errors
     /// 投入されたフレーム数が宣言したフレーム数に満たないとき
     /// [`Error::FrameCountMismatch`]。以前の投入が書き出しに失敗しているとき
-    /// [`Error::Poisoned`]。保留中のフレームの符号化に失敗したとき
-    /// [`Error::Encode`]。書き出しに失敗したとき [`Error::Io`]。
+    /// [`Error::Poisoned`]。表示時間を分けるフレームの符号化に失敗したとき
+    /// [`Error::Encode`] か [`Error::MalformedOutput`]。ファイルがRIFFの上限を
+    /// 超えるとき [`Error::FileTooLarge`]。書き出しに失敗したとき [`Error::Io`]。
     pub fn finish(self) -> Result<(W, Report), Error> {
         if self.poisoned {
             return Err(Error::Poisoned);
