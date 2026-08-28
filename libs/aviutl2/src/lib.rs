@@ -24,6 +24,6 @@ pub mod __private;
 mod macros;
 
 pub use config::IniConfig;
-pub use output::{FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo};
+pub use output::{FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, write_or_discard};
 pub use pipeline::PipelineError;
 pub use pixel::ColorFormat;

@@ -6,13 +6,11 @@ use apng_encoder::{
 };
 use aviutl2::{
     FileFilter, IniConfig, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
-    register_logger, register_output_plugin,
+    register_logger, register_output_plugin, write_or_discard,
 };
 use config::{ColorFormat, Config};
 use dialog::show_config_dialog;
-use std::fs::File;
 use std::io::BufWriter;
-use std::path::Path;
 use win32_dialog::MessageBox;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
 
@@ -68,22 +66,6 @@ fn frame_delay(scale: i32, rate: i32) -> std::result::Result<FrameDelay, String>
     let scale = to_u32(scale, "フレームレートのスケール")?;
     let rate = to_u32(rate, "フレームレート")?;
     FrameDelay::new(scale, rate).map_err(|e| format!("フレームレート設定エラー: {}", e))
-}
-
-/// `path` を作って `write` へ渡し、失敗したら書きかけのファイルを消す
-///
-/// `write` はファイルを持ったまま呼ばれ、戻るときに閉じる。開いたまま消すと
-/// 削除は最後のハンドルが閉じるまで効かないため、閉じてから消す。
-fn write_or_discard<F>(path: &Path, write: F) -> std::result::Result<(), String>
-where
-    F: FnOnce(File) -> std::result::Result<(), String>,
-{
-    let file = File::create(path).map_err(|e| format!("ファイル作成エラー: {}", e))?;
-
-    write(file).map_err(|error| match std::fs::remove_file(path) {
-        Ok(()) => error,
-        Err(e) => format!("{} (書きかけのファイルが残りました: {})", error, e),
-    })
 }
 
 fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
@@ -183,6 +165,7 @@ register_logger!();
 mod tests {
     use super::*;
     use apng_encoder::delay_parts;
+    use std::fs::File;
     use std::io::{Seek, SeekFrom, Write};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -270,19 +253,6 @@ mod tests {
         let error = EncoderError::InvalidFrameDelay;
 
         assert_eq!(encoder_error_message(&error), error.to_string());
-    }
-
-    /// 書き出しに成功したら、出力先のファイルはそのまま残る
-    #[test]
-    fn a_completed_write_keeps_its_file() {
-        let path = temp_path();
-        let result = write_or_discard(&path, |mut file| {
-            file.write_all(b"APNG").map_err(|e| e.to_string())
-        });
-
-        assert_eq!(result, Ok(()));
-        assert!(path.exists(), "{}", path.display());
-        std::fs::remove_file(&path).unwrap();
     }
 
     /// 色数がパレットから溢れた書き出しは、書きかけのファイルを残さない

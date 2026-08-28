@@ -3,7 +3,7 @@ mod dialog;
 
 use aviutl2::{
     FileFilter, IniConfig, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
-    register_logger, register_output_plugin,
+    register_logger, register_output_plugin, write_or_discard,
 };
 use config::{ColorFormat, Config};
 use dialog::show_config_dialog;
@@ -161,11 +161,6 @@ fn frame_delay(scale: i32, rate: i32) -> std::result::Result<FrameDelay, String>
 }
 
 fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
-    let output_path = info.savefile();
-
-    let output_file =
-        std::fs::File::create(&output_path).map_err(|e| format!("ファイル作成エラー: {}", e))?;
-
     let delay = frame_delay(info.scale(), info.rate())?;
 
     let width = to_u32(info.width(), "幅")?;
@@ -173,35 +168,37 @@ fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Res
     let num_frames = to_u32(info.num_frames(), "フレーム数")?;
     let total_pixels = u64::from(width) * u64::from(height) * u64::from(num_frames);
 
-    let mut encoder = Encoder::new(
-        BufWriter::new(output_file),
-        width,
-        height,
-        num_frames,
-        encoder_config(config),
-    )
-    .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
+    write_or_discard(&info.savefile(), |output_file| {
+        let mut encoder = Encoder::new(
+            BufWriter::new(output_file),
+            width,
+            height,
+            num_frames,
+            encoder_config(config),
+        )
+        .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
 
-    info.encode_frames(config.color_format, |frame_data| {
-        encoder.add_frame(&frame_data, delay)
-    })
-    .map_err(|e| e.to_string())?;
+        info.encode_frames(config.color_format, |frame_data| {
+            encoder.add_frame(&frame_data, delay)
+        })
+        .map_err(|e| e.to_string())?;
 
-    let (writer, report) = encoder
-        .finish()
-        .map_err(|e| format!("エンコーダー終了エラー: {}", e))?;
+        let (writer, report) = encoder
+            .finish()
+            .map_err(|e| format!("エンコーダー終了エラー: {}", e))?;
 
-    writer
-        .into_inner()
-        .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
+        writer
+            .into_inner()
+            .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
 
-    for (severity, message) in report_messages(&report, total_pixels) {
-        match severity {
-            Severity::Info => logger::info(&message),
-            Severity::Warn => logger::warn(&message),
+        for (severity, message) in report_messages(&report, total_pixels) {
+            match severity {
+                Severity::Info => logger::info(&message),
+                Severity::Warn => logger::warn(&message),
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 struct GifOutputPlugin;

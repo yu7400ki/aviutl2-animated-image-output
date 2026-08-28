@@ -3,7 +3,8 @@
 use crate::pixel::ColorFormat;
 use crate::sys;
 use std::ffi::c_void;
-use std::path::PathBuf;
+use std::fs::File;
+use std::path::{Path, PathBuf};
 use widestring::U16CStr;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
 
@@ -273,4 +274,20 @@ pub trait OutputPlugin {
     fn config_text() -> String {
         String::new()
     }
+}
+
+/// `path` を作って `write` へ渡し、失敗したら書きかけのファイルを消す
+///
+/// `write` はファイルを持ったまま呼ばれ、戻るときに閉じる。開いたまま消すと
+/// 削除は最後のハンドルが閉じるまで効かないため、閉じてから消す。
+pub fn write_or_discard<F>(path: &Path, write: F) -> std::result::Result<(), String>
+where
+    F: FnOnce(File) -> std::result::Result<(), String>,
+{
+    let file = File::create(path).map_err(|e| format!("ファイル作成エラー: {}", e))?;
+
+    write(file).map_err(|error| match std::fs::remove_file(path) {
+        Ok(()) => error,
+        Err(e) => format!("{} (書きかけのファイルが残りました: {})", error, e),
+    })
 }
