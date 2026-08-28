@@ -12,4 +12,4 @@ pub use delay::FrameDelay;
 pub use diff::{Rect, dirty_rect};
 pub use error::Error;
 pub use palette::{Colors, MAX_COLORS};
-pub use region::{append_pixels, crop, paste};
+pub use region::{append_pixels, crop};

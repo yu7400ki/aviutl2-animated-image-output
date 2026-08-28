@@ -1,4 +1,4 @@
-//! 矩形領域の切り出しと貼り戻し、1画素あたりのバイト数の詰め替え
+//! 矩形領域の切り出しと、1画素あたりのバイト数の詰め替え
 
 use crate::diff::Rect;
 
@@ -35,20 +35,6 @@ pub fn crop(
     for y in 0..rect.height as usize {
         let start = head + y * stride;
         append_pixels(&data[start..start + row_len], in_bpp, out_bpp, out);
-    }
-}
-
-/// 連続バッファ `region` を `rect` の位置へ書き戻す
-///
-/// [`crop`] の逆で、`data` は `stride` バイトの行が隙間なく並んでいること。
-/// `region` は画素表現を変えずに切り出したものであること。
-pub fn paste(data: &mut [u8], region: &[u8], rect: Rect, stride: usize, bpp: usize) {
-    let row_len = rect.width as usize * bpp;
-    debug_assert_eq!(region.len(), row_len * rect.height as usize);
-    let head = rect.y as usize * stride + rect.x as usize * bpp;
-    for (y, row) in region.chunks_exact(row_len).enumerate() {
-        let start = head + y * stride;
-        data[start..start + row_len].copy_from_slice(row);
     }
 }
 
@@ -116,31 +102,5 @@ mod tests {
         let mut out = vec![0xAA];
         append_pixels(&[1, 2, 3, 4], 4, 4, &mut out);
         assert_eq!(out, [0xAA, 1, 2, 3, 4]);
-    }
-
-    /// 切り出した領域を貼り戻すと元のキャンバスに戻り、矩形の外は動かない
-    #[test]
-    fn pasting_a_cropped_region_restores_the_canvas() {
-        let original = canvas();
-        let rect = Rect {
-            x: 1,
-            y: 1,
-            width: 2,
-            height: 2,
-        };
-
-        let mut region = Vec::new();
-        crop(&original, rect, STRIDE, 4, 4, &mut region);
-
-        let mut target = vec![0xAA; original.len()];
-        paste(&mut target, &region, rect, STRIDE, 4);
-
-        for (index, byte) in target.iter().enumerate() {
-            let pixel = index / 4;
-            let (x, y) = (pixel % 4, pixel / 4);
-            let inside = (1..3).contains(&x) && (1..3).contains(&y);
-            let expected = if inside { original[index] } else { 0xAA };
-            assert_eq!(*byte, expected, "({x}, {y}) の {} バイト目", index % 4);
-        }
     }
 }
