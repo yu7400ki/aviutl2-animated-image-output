@@ -74,3 +74,102 @@ impl IniConfig for Config {
             .set("method", self.method.to_string());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load(entries: &[(&str, &str)]) -> Config {
+        let mut ini = Ini::new();
+        let mut section = ini.with_section(Some(Config::SECTION));
+        for (key, value) in entries {
+            section.set(*key, *value);
+        }
+        Config::load_from(ini.section(Some(Config::SECTION)))
+    }
+
+    #[test]
+    fn missing_section_falls_back_to_default() {
+        let config = Config::load_from(None);
+        let default = Config::default();
+
+        assert_eq!(config.repeat, default.repeat);
+        assert!(config.color_format == default.color_format);
+        assert_eq!(config.lossless, default.lossless);
+        assert_eq!(config.quality, default.quality);
+        assert_eq!(config.method, default.method);
+    }
+
+    #[test]
+    fn a_saved_config_loads_back_unchanged() {
+        let saved = Config {
+            repeat: 3,
+            color_format: ColorFormat::Rgba32,
+            lossless: true,
+            quality: 100.0,
+            method: 6,
+        };
+
+        let mut ini = Ini::new();
+        saved.save_to(&mut ini);
+        let loaded = Config::load_from(ini.section(Some(Config::SECTION)));
+
+        assert_eq!(loaded.repeat, saved.repeat);
+        assert!(loaded.color_format == saved.color_format);
+        assert_eq!(loaded.lossless, saved.lossless);
+        assert_eq!(loaded.quality, saved.quality);
+        assert_eq!(loaded.method, saved.method);
+    }
+
+    /// 設定ファイルの中身をそのまま読み、セクション名と項目名まで含めて確かめる
+    #[test]
+    fn a_config_file_written_before_still_loads() {
+        let text = "\
+[Config]
+repeat=5
+color_format=1
+lossless=true
+quality=90
+method=3
+";
+        let ini = Ini::load_from_str(text).unwrap();
+        let config = Config::load_from(ini.section(Some(Config::SECTION)));
+
+        assert_eq!(config.repeat, 5);
+        assert!(config.color_format == ColorFormat::Rgba32);
+        assert!(config.lossless);
+        assert_eq!(config.quality, 90.0);
+        assert_eq!(config.method, 3);
+    }
+
+    /// 値域の外の品質とメソッドは、エンコーダが受け取れる範囲へ収まる
+    #[test]
+    fn out_of_range_quality_and_method_are_clamped() {
+        let config = load(&[("quality", "1000"), ("method", "99")]);
+
+        assert_eq!(config.quality, 100.0);
+        assert_eq!(config.method, 6);
+    }
+
+    /// 読めない値の項目だけが既定値へ落ちる
+    #[test]
+    fn an_unreadable_value_falls_back_on_its_own() {
+        let config = load(&[("repeat", "many"), ("lossless", "true")]);
+        let default = Config::default();
+
+        assert_eq!(config.repeat, default.repeat);
+        assert!(config.lossless);
+    }
+
+    /// 認識しないキーだけのセクションは既定値になる
+    #[test]
+    fn unknown_keys_are_ignored() {
+        let config = load(&[("alpha_compression", "1"), ("thread_level", "1")]);
+        let default = Config::default();
+
+        assert_eq!(config.repeat, default.repeat);
+        assert_eq!(config.lossless, default.lossless);
+        assert_eq!(config.quality, default.quality);
+        assert_eq!(config.method, default.method);
+    }
+}
