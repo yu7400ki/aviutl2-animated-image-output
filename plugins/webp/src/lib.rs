@@ -168,9 +168,102 @@ register_logger!();
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     /// テストで使うフレーム数
     const NUM_FRAMES: u32 = 120;
+
+    /// 書き出しを通すフレームの大きさ
+    const FRAME_WIDTH: u32 = 32;
+    const FRAME_HEIGHT: u32 = 16;
+
+    /// まだ存在しない一時ファイルの場所
+    fn temp_path() -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        std::env::temp_dir().join(format!(
+            "webp-output-{}-{}.webp",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    /// 画素ごとに値の違う不透明なRGBA
+    fn frame_of(seed: u32) -> Vec<u8> {
+        (0..FRAME_HEIGHT)
+            .flat_map(|y| {
+                (0..FRAME_WIDTH)
+                    .flat_map(move |x| [(x * 7) as u8, (y * 11) as u8, seed as u8, 0xFF])
+            })
+            .collect()
+    }
+
+    /// フレームを `declared` 枚宣言し、`frames` 枚だけ投入して閉じる
+    fn write_animation(
+        path: &std::path::Path,
+        declared: u32,
+        frames: u32,
+    ) -> std::result::Result<(), String> {
+        let config = Config {
+            color_format: ColorFormat::Rgba32,
+            ..Config::default()
+        };
+        let delay = frame_delay(1, 30).unwrap();
+
+        write_or_discard(path, |output_file| {
+            let mut encoder = Encoder::new(
+                BufWriter::new(output_file),
+                FRAME_WIDTH,
+                FRAME_HEIGHT,
+                declared,
+                encoder_config(&config),
+            )
+            .map_err(|e| e.to_string())?;
+
+            for seed in 0..frames {
+                encoder
+                    .add_frame(&frame_of(seed), delay)
+                    .map_err(|e| e.to_string())?;
+            }
+
+            encoder
+                .finish()
+                .map_err(|e| e.to_string())?
+                .0
+                .into_inner()
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+    }
+
+    /// 書き出しの経路がRIFFのサイズを書き戻す
+    ///
+    /// 後埋めは末尾まで書いた後のシークで起きるので、`BufWriter` を挟んだ
+    /// ファイルでも効くことをここで確かめる。
+    #[test]
+    fn a_written_file_carries_the_riff_size() {
+        let path = temp_path();
+
+        write_animation(&path, 4, 4).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WEBP");
+        let size = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        assert_eq!(size as usize, bytes.len() - 8);
+    }
+
+    /// 失敗した書き出しは、書きかけのファイルを残さない
+    #[test]
+    fn a_failed_write_leaves_no_file() {
+        let path = temp_path();
+
+        write_animation(&path, 4, 3).expect_err("宣言より少ないので閉じられない");
+
+        assert!(!path.exists(), "{}", path.display());
+    }
 
     /// 何も起きなかったときのレポート
     fn clean_report() -> Report {
