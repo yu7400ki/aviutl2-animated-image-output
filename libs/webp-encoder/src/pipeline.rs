@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
 /// ワーカーに付ける名前
@@ -53,9 +53,13 @@ impl Drop for Pool {
 }
 
 /// ジョブを1つずつ取り、符号化して結末を返す
+///
+/// 巻き戻しで抜けたワーカーは抱えていたジョブの結末を返さず、駆動はその番号を
+/// 待ち続ける。符号化の巻き戻しは結末として持ち帰り、受け口の毒も取り出しだけは
+/// 通して、この関数から巻き戻しの出口を無くす。
 fn work(codec: &Codec, jobs: &Mutex<Receiver<(usize, Job)>>, results: &Sender<Done>) {
     loop {
-        let received = jobs.lock().expect("ジョブの受け口").recv();
+        let received = jobs.lock().unwrap_or_else(PoisonError::into_inner).recv();
         let Ok((index, job)) = received else {
             return;
         };
