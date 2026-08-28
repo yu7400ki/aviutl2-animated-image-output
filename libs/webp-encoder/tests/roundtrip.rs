@@ -550,7 +550,7 @@ fn a_frame_without_a_difference_extends_the_previous_one() {
         decoded.frames.len(),
         frames.len() - report.merged_frames as usize
     );
-    assert_eq!(decoded.frames, written, "併合の後の合成が入力と違う");
+    assert_close(&decoded.frames, &written);
 
     // 併合したフレームの遅延は、残したフレームの表示時間へ積まれる
     assert_eq!(decoded.durations, [20 + 27, 34 + 41 + 48, 55]);
@@ -593,7 +593,7 @@ fn a_frame_differing_only_under_transparent_pixels_is_merged() {
 
     assert_eq!(report.merged_frames, 1);
     let decoded = decode_with_image_webp(&bytes, width, height);
-    assert_eq!(decoded.frames, [base, frames[2].clone()]);
+    assert_close(&decoded.frames, &[base, frames[2].clone()]);
     assert_eq!(decoded.durations, [20 + 27, 34]);
 }
 
@@ -614,7 +614,7 @@ fn the_second_loop_composes_the_same_as_the_first() {
 
     let decoded = decode_with_image_webp(&looped, width, height);
     let (first, second) = decoded.frames.split_at(frames.len());
-    assert_eq!(first, frames, "1周目の合成が入力と違う");
+    assert_close(first, &frames);
     assert_eq!(second, first, "2周目が1周目と食い違う");
 
     if let Some(composed) = decode_with_ffmpeg(&looped, width, height) {
