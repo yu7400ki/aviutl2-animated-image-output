@@ -1,76 +1,113 @@
 mod config;
 mod dialog;
-mod encoder;
 
-use crate::encoder::{AnimEncoder, AnimFrame, WebPConfig};
 use aviutl2::{
     FileFilter, IniConfig, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
     register_logger, register_output_plugin, write_or_discard,
 };
 use config::{ColorFormat, Config};
 use dialog::show_config_dialog;
+use std::io::BufWriter;
+use webp_encoder::{ColorType, Config as EncoderConfig, Encoder, FrameDelay, Report};
 use win32_dialog::MessageBox;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
 
-fn create_webp_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
-    let mut webp_config = WebPConfig::new().map_err(|_| "WebPConfig初期化エラー")?;
+/// 負の値をエンコーダへ渡さないためのi32からu32への変換
+fn to_u32(value: i32, name: &str) -> std::result::Result<u32, String> {
+    u32::try_from(value).map_err(|_| format!("{}が不正です: {}", name, value))
+}
 
-    webp_config.quality = config.quality;
-    webp_config.method = config.method as i32;
-    webp_config.lossless = if config.lossless { 1 } else { 0 };
-    webp_config.alpha_compression = 1;
-    webp_config.thread_level = 1;
+/// プラグイン設定をエンコーダの設定へ対応付ける
+fn encoder_config(config: &Config) -> EncoderConfig {
+    EncoderConfig {
+        color_type: match config.color_format {
+            ColorFormat::Rgb24 => ColorType::Rgb8,
+            ColorFormat::Rgba32 => ColorType::Rgba8,
+        },
+        lossless: config.lossless,
+        quality: config.quality,
+        method: config.method,
+        // 再生回数は0が無限ループなので、負の値もそこへ寄せる
+        num_plays: config.repeat.max(0) as u32,
+    }
+}
+
+/// ログの深刻さ
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Severity {
+    Info,
+    Warn,
+}
+
+/// 出力が素材の見え方や並びと変わったところを並べる
+///
+/// 何も起きなければ1行も出さない。素材の透過の有無は変化ではないので載せない。
+fn report_messages(report: &Report, num_frames: u32) -> Vec<(Severity, String)> {
+    let mut messages = Vec::new();
+
+    if report.merged_frames > 0 {
+        messages.push((
+            Severity::Info,
+            format!(
+                "フレームの併合: 前フレームと同じ{}フレームを表示時間の延長にまとめました (全{}フレーム)",
+                report.merged_frames, num_frames
+            ),
+        ));
+    }
+
+    if report.delay_clamped {
+        messages.push((
+            Severity::Warn,
+            "表示時間: 素材より遅く再生されます (1/1000秒へ引き上げ)".into(),
+        ));
+    }
+
+    messages
+}
+
+/// 1フレームの表示時間 (scale / rate 秒) を求める
+fn frame_delay(scale: i32, rate: i32) -> std::result::Result<FrameDelay, String> {
+    let scale = to_u32(scale, "フレームレートのスケール")?;
+    let rate = to_u32(rate, "フレームレート")?;
+    FrameDelay::new(scale, rate).map_err(|e| format!("フレームレート設定エラー: {}", e))
+}
+
+fn create_webp_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
+    let delay = frame_delay(info.scale(), info.rate())?;
+
+    let width = to_u32(info.width(), "幅")?;
+    let height = to_u32(info.height(), "高さ")?;
+    let num_frames = to_u32(info.num_frames(), "フレーム数")?;
 
     write_or_discard(&info.savefile(), |output_file| {
-        let mut encoder = AnimEncoder::new(
-            info.width() as u32,
-            info.height() as u32,
-            &webp_config,
-            output_file,
+        let mut encoder = Encoder::new(
+            BufWriter::new(output_file),
+            width,
+            height,
+            num_frames,
+            encoder_config(config),
         )
         .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
 
-        encoder.set_loop_count(config.repeat);
+        info.encode_frames(config.color_format, |frame_data| {
+            encoder.add_frame(&frame_data, delay)
+        })
+        .map_err(|e| e.to_string())?;
 
-        let duration_ms = (1000.0 * info.scale() as f64 / info.rate() as f64).max(1.0) as i32;
-        let mut timestamp = 0;
+        let (writer, report) = encoder
+            .finish()
+            .map_err(|e| format!("エンコーダー終了エラー: {}", e))?;
 
-        for frame in 0..info.num_frames() {
-            if info.is_abort() {
-                return Err("処理が中断されました".into());
+        writer
+            .into_inner()
+            .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
+
+        for (severity, message) in report_messages(&report, num_frames) {
+            match severity {
+                Severity::Info => logger::info(&message),
+                Severity::Warn => logger::warn(&message),
             }
-
-            let image_data = info.get_video_frame(frame, config.color_format);
-
-            if let Some(pixel_data) = image_data {
-                let anim_frame = match config.color_format {
-                    ColorFormat::Rgb24 => AnimFrame::from_rgb(
-                        &pixel_data,
-                        info.width() as u32,
-                        info.height() as u32,
-                        timestamp,
-                    ),
-                    ColorFormat::Rgba32 => AnimFrame::from_rgba(
-                        &pixel_data,
-                        info.width() as u32,
-                        info.height() as u32,
-                        timestamp,
-                    ),
-                };
-
-                encoder
-                    .add_frame(anim_frame)
-                    .map_err(|e| format!("フレーム追加エラー: {}", e))?;
-            }
-
-            timestamp += duration_ms;
-            info.rest_time_disp(frame, info.num_frames());
         }
-
-        encoder
-            .finalize()
-            .map_err(|e| format!("エンコード完了エラー: {}", e))?;
-
         Ok(())
     })
 }
@@ -127,3 +164,148 @@ impl OutputPlugin for WebpOutputPlugin {
 
 register_output_plugin!(WebpOutputPlugin);
 register_logger!();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// テストで使うフレーム数
+    const NUM_FRAMES: u32 = 120;
+
+    /// 何も起きなかったときのレポート
+    fn clean_report() -> Report {
+        Report {
+            merged_frames: 0,
+            delay_clamped: false,
+            has_alpha: false,
+        }
+    }
+
+    #[test]
+    fn invalid_frame_rates_are_rejected() {
+        assert!(frame_delay(1, 0).is_err());
+        assert!(frame_delay(1, -30).is_err());
+        assert!(frame_delay(-1, 30).is_err());
+        assert!(frame_delay(1001, 30000).is_ok());
+    }
+
+    #[test]
+    fn negative_dimensions_are_rejected() {
+        assert_eq!(to_u32(1920, "幅").unwrap(), 1920);
+        assert!(to_u32(-1, "幅").is_err());
+    }
+
+    #[test]
+    fn color_format_maps_to_the_matching_color_type() {
+        let rgb = encoder_config(&Config {
+            color_format: ColorFormat::Rgb24,
+            ..Config::default()
+        });
+        assert_eq!(rgb.color_type, ColorType::Rgb8);
+
+        let rgba = encoder_config(&Config {
+            color_format: ColorFormat::Rgba32,
+            ..Config::default()
+        });
+        assert_eq!(rgba.color_type, ColorType::Rgba8);
+    }
+
+    #[test]
+    fn repeat_is_passed_through_as_the_number_of_plays() {
+        for repeat in [0, 1, 5, 65535, i32::MAX] {
+            assert_eq!(
+                encoder_config(&Config {
+                    repeat,
+                    ..Config::default()
+                })
+                .num_plays,
+                repeat as u32
+            );
+        }
+    }
+
+    /// 負のループ回数は無限ループとして渡る
+    #[test]
+    fn a_negative_repeat_becomes_an_infinite_loop() {
+        assert_eq!(
+            encoder_config(&Config {
+                repeat: -1,
+                ..Config::default()
+            })
+            .num_plays,
+            0
+        );
+    }
+
+    #[test]
+    fn the_compression_settings_are_passed_through() {
+        let lossy = encoder_config(&Config {
+            lossless: false,
+            quality: 80.0,
+            method: 2,
+            ..Config::default()
+        });
+        assert!(!lossy.lossless);
+        assert_eq!(lossy.quality, 80.0);
+        assert_eq!(lossy.method, 2);
+
+        let lossless = encoder_config(&Config {
+            lossless: true,
+            quality: 100.0,
+            method: 6,
+            ..Config::default()
+        });
+        assert!(lossless.lossless);
+        assert_eq!(lossless.quality, 100.0);
+        assert_eq!(lossless.method, 6);
+    }
+
+    /// 素材のとおりに書けた出力は何も報せない
+    #[test]
+    fn a_faithful_output_says_nothing() {
+        assert!(report_messages(&clean_report(), NUM_FRAMES).is_empty());
+    }
+
+    /// 素材に透過があること自体は変化ではないので報せない
+    #[test]
+    fn the_transparency_of_the_material_is_not_reported() {
+        let report = Report {
+            has_alpha: true,
+            ..clean_report()
+        };
+
+        assert!(report_messages(&report, NUM_FRAMES).is_empty());
+    }
+
+    /// 併合したフレーム数は、全体のフレーム数を添えた1行になる
+    #[test]
+    fn merged_frames_are_reported_with_the_whole_count() {
+        let report = Report {
+            merged_frames: 42,
+            ..clean_report()
+        };
+
+        let messages = report_messages(&report, NUM_FRAMES);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].0, Severity::Info);
+        assert!(messages[0].1.contains("42"), "{messages:?}");
+        assert!(messages[0].1.contains("120"), "{messages:?}");
+    }
+
+    /// 表示時間を切り上げたことは警告になる
+    ///
+    /// 素材より遅く再生されるので、併合と違って見え方が変わる。
+    #[test]
+    fn a_raised_duration_is_warned() {
+        let report = Report {
+            merged_frames: 3,
+            delay_clamped: true,
+            ..clean_report()
+        };
+
+        let messages = report_messages(&report, NUM_FRAMES);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].0, Severity::Warn);
+        assert!(messages[1].1.contains("1/1000秒"), "{messages:?}");
+    }
+}
