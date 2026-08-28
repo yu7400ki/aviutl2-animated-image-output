@@ -9,11 +9,12 @@
 use image_webp::{LoopCount, WebPDecoder};
 use std::cell::RefCell;
 use std::io::{Cursor, Seek, SeekFrom, Write};
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroUsize};
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::thread::available_parallelism;
 use webp_encoder::{ColorType, Config, Encoder, Error, FrameDelay, Report};
 
 /// 決定的な擬似乱数列
@@ -1058,6 +1059,14 @@ impl Seek for SharedWriter {
 /// ヘッダ (RIFF + VP8X + ANIM) のバイト数
 const HEAD_BYTES: usize = 44;
 
+/// 仕掛かりの上限を `extra` フレーム超えるフレーム数
+///
+/// 符号化を待たせておけるのはワーカー数の2倍までで、そこを超えたぶんから
+/// ANMFが流れ出す。閉じる前の書き出しを見るテストはこの数を要る。
+fn frames_past_the_backlog(extra: usize) -> usize {
+    available_parallelism().map_or(1, NonZeroUsize::get) * 2 + extra
+}
+
 /// 閉じていないファイルはRIFFのサイズが0のまま残り、厳密な読み手が弾く
 ///
 /// 後埋めが書き戻すのはサイズ欄の4バイトとVP8Xのフラグの1バイトだけで、
@@ -1066,7 +1075,7 @@ const HEAD_BYTES: usize = 44;
 #[test]
 fn a_file_that_was_never_finished_keeps_a_zero_riff_size() {
     let (width, height) = (16, 16);
-    let frames = rgba_frames(width, height, 4);
+    let frames = rgba_frames(width, height, frames_past_the_backlog(1));
 
     let (writer, written) = SharedWriter::new(usize::MAX);
     let mut encoder = Encoder::new(
@@ -1112,7 +1121,7 @@ fn a_file_that_was_never_finished_keeps_a_zero_riff_size() {
 #[test]
 fn a_failed_write_poisons_the_encoder() {
     let (width, height) = (16, 16);
-    let frames = rgba_frames(width, height, 4);
+    let frames = rgba_frames(width, height, frames_past_the_backlog(3));
     let (writer, _) = SharedWriter::new(HEAD_BYTES + 900);
     let mut encoder = Encoder::new(
         writer,

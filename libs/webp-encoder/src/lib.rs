@@ -8,6 +8,7 @@ mod frame;
 mod layout;
 mod normalize;
 mod picture;
+mod pipeline;
 mod riff;
 
 pub use anim_core::FrameDelay;
