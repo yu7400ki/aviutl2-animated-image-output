@@ -4,7 +4,9 @@ mod codec;
 mod delay;
 mod encoder;
 mod error;
+mod frame;
 mod layout;
+mod normalize;
 mod picture;
 mod riff;
 

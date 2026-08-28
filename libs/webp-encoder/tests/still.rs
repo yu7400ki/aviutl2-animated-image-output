@@ -128,26 +128,36 @@ fn a_lossless_rgb_still_decodes_back_to_the_input() {
     assert!(!report.has_alpha);
 }
 
-/// 完全透過の画素のRGBは、正規化を通していない素材でも保たれる
+/// 完全透過の画素は正規化で `0x00000000` になり、半透明はそのまま戻る
 #[test]
-fn a_lossless_still_keeps_the_color_under_transparent_pixels() {
+fn a_lossless_still_collapses_the_color_under_transparent_pixels() {
     let (width, height) = (16, 16);
     let mut rgba = Vec::with_capacity((width * height * 4) as usize);
     for y in 0..height {
         for x in 0..width {
-            let transparent = x < 8 && y < 8;
-            rgba.extend_from_slice(&[
-                (x * 16) as u8,
-                (y * 16) as u8,
-                0x5A,
-                if transparent { 0 } else { 255 },
-            ]);
+            let alpha = match x / 6 {
+                0 => 0,
+                1 => 128,
+                _ => 255,
+            };
+            rgba.extend_from_slice(&[(x * 16) as u8, (y * 16) as u8, 0x5A, alpha]);
         }
     }
 
     let (bytes, _) = encode(width, height, &rgba, config(ColorType::Rgba8, true)).unwrap();
 
-    assert_eq!(decode(&bytes, width, height), rgba);
+    let expected: Vec<u8> = rgba
+        .chunks_exact(4)
+        .flat_map(|pixel| {
+            if pixel[3] == 0 {
+                [0, 0, 0, 0]
+            } else {
+                [pixel[0], pixel[1], pixel[2], pixel[3]]
+            }
+        })
+        .collect();
+    assert_ne!(expected, rgba, "正規化で変わる画素を含んでいない");
+    assert_eq!(decode(&bytes, width, height), expected);
 }
 
 #[test]

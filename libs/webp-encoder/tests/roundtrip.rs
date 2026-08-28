@@ -54,6 +54,29 @@ fn rgba_frames(width: u32, height: u32, count: usize) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// 背景に開ける透明な窓の一辺の長さ
+const WINDOW: u32 = 5;
+
+/// 不透明な背景に透明な窓を1つ開けたRGBA
+///
+/// 窓を動かさないフレームは前フレームと完全に一致し、動かしたフレームは
+/// 前後の窓を囲む範囲だけが変わる。窓の位置がフレームごとに違うので、
+/// 透過画素の下に何が残るかもフレームごとに違う。
+fn windowed_rgba(width: u32, height: u32, at: (u32, u32)) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let inside = x.wrapping_sub(at.0) < WINDOW && y.wrapping_sub(at.1) < WINDOW;
+            rgba.extend_from_slice(&if inside {
+                [0, 0, 0, 0]
+            } else {
+                [(x * 3) as u8, (y * 7) as u8, 0x40, 0xFF]
+            });
+        }
+    }
+    rgba
+}
+
 /// 種を変えた `count` 枚の不透明なRGB
 fn rgb_frames(width: u32, height: u32, count: usize) -> Vec<Vec<u8>> {
     (0..count)
@@ -143,6 +166,19 @@ fn decode_with_image_webp(bytes: &[u8], width: u32, height: u32) -> Decoded {
         durations,
         loop_count: decoder.loop_count(),
     }
+}
+
+/// ANMFの列を2つ並べ、2周ぶんのアニメーションにする
+///
+/// ANMFは1つずつが自足しているので、並べ直すだけで折り返しを1本の
+/// アニメーションとして表せる。キャンバスを持ち越すデコーダが2周目に
+/// 見るものが、そのまま後半のフレームになる。
+fn looped_twice(bytes: &[u8]) -> Vec<u8> {
+    let mut looped = bytes.to_vec();
+    looped.extend_from_slice(&bytes[HEAD_BYTES..]);
+    let size = (looped.len() - 8) as u32;
+    looped[4..8].copy_from_slice(&size.to_le_bytes());
+    looped
 }
 
 /// バイト列をデコーダへ渡すための一時ファイルへ書き出す
@@ -371,6 +407,100 @@ fn a_delay_below_a_millisecond_is_raised_and_reported() {
         decode_with_image_webp(&bytes, width, height).durations,
         [1, 1, 1, 1]
     );
+}
+
+/// 差分の無いフレームは符号化せず、前のフレームの表示時間へ併合する
+///
+/// 書いたフレームは減るが、合成の見え方も総再生時間も変わらない。
+#[test]
+fn a_frame_without_a_difference_extends_the_previous_one() {
+    let (width, height) = (32, 24);
+    let frames: Vec<Vec<u8>> = [(3, 3), (3, 3), (12, 7), (12, 7), (12, 7), (5, 11)]
+        .map(|at| windowed_rgba(width, height, at))
+        .to_vec();
+
+    let (bytes, report) = encode(width, height, config(ColorType::Rgba8, 0), &frames).unwrap();
+
+    assert_eq!(report.merged_frames, 3);
+    let written = [frames[0].clone(), frames[2].clone(), frames[5].clone()];
+
+    let decoded = decode_with_image_webp(&bytes, width, height);
+    assert_eq!(
+        decoded.frames.len(),
+        frames.len() - report.merged_frames as usize
+    );
+    assert_eq!(decoded.frames, written, "併合の後の合成が入力と違う");
+
+    // 併合したフレームの遅延は、残したフレームの表示時間へ積まれる
+    assert_eq!(decoded.durations, [20 + 27, 34 + 41 + 48, 55]);
+    assert_eq!(
+        decoded.durations.iter().map(|&d| u64::from(d)).sum::<u64>(),
+        (0..frames.len() as u64).map(|index| index * 7 + 20).sum()
+    );
+
+    if let Some(composed) = decode_with_ffmpeg(&bytes, width, height) {
+        assert_eq!(composed, written, "ffmpeg のデコードが入力と違う");
+    }
+}
+
+/// 透過画素の下のRGBだけが違うフレームは、正規化を経て併合される
+#[test]
+fn a_frame_differing_only_under_transparent_pixels_is_merged() {
+    let (width, height) = (24, 16);
+    let base = windowed_rgba(width, height, (3, 3));
+    let repainted: Vec<u8> = base
+        .chunks_exact(4)
+        .flat_map(|pixel| {
+            if pixel[3] == 0 {
+                [9, 8, 7, 0]
+            } else {
+                [pixel[0], pixel[1], pixel[2], pixel[3]]
+            }
+        })
+        .collect();
+    assert_ne!(
+        repainted, base,
+        "透過画素を持たない素材では正規化を問えない"
+    );
+    let frames = vec![
+        base.clone(),
+        repainted,
+        windowed_rgba(width, height, (9, 6)),
+    ];
+
+    let (bytes, report) = encode(width, height, config(ColorType::Rgba8, 0), &frames).unwrap();
+
+    assert_eq!(report.merged_frames, 1);
+    let decoded = decode_with_image_webp(&bytes, width, height);
+    assert_eq!(decoded.frames, [base, frames[2].clone()]);
+    assert_eq!(decoded.durations, [20 + 27, 34]);
+}
+
+/// ループの折り返しで、2周目の合成が1周目と一致する
+///
+/// 先頭フレームが全面かつblend無しなら、持ち越したキャンバスが完全に
+/// 上書きされる。blend有りにすると、2周目は先頭フレームの透過画素の下に
+/// 1周目の描画が透けて食い違う。
+#[test]
+fn the_second_loop_composes_the_same_as_the_first() {
+    let (width, height) = (32, 24);
+    let frames: Vec<Vec<u8>> = [(3, 3), (12, 7), (20, 13), (16, 4)]
+        .map(|at| windowed_rgba(width, height, at))
+        .to_vec();
+
+    let (bytes, _) = round_trip(width, height, config(ColorType::Rgba8, 0), &frames);
+    let looped = looped_twice(&bytes);
+
+    let decoded = decode_with_image_webp(&looped, width, height);
+    let (first, second) = decoded.frames.split_at(frames.len());
+    assert_eq!(first, frames, "1周目の合成が入力と違う");
+    assert_eq!(second, first, "2周目が1周目と食い違う");
+
+    if let Some(composed) = decode_with_ffmpeg(&looped, width, height) {
+        let (first, second) = composed.split_at(frames.len());
+        assert_eq!(first, frames, "ffmpeg の1周目が入力と違う");
+        assert_eq!(second, first, "ffmpeg の2周目が1周目と食い違う");
+    }
 }
 
 /// ANMFの表示時間の欄に収まる上限 (ms)
