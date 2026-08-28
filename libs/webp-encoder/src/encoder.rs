@@ -1,7 +1,7 @@
 //! 全体の駆動
 
 use crate::codec::{Codec, EncodedFrame};
-use crate::delay::{Durations, Milliseconds};
+use crate::delay::{Durations, MAX_DURATION, Milliseconds};
 use crate::error::Error;
 use crate::frame::Canvas;
 use crate::layout::{ColorType, Layout};
@@ -17,6 +17,8 @@ const FILLER_PIXEL: [u8; 4] = [0, 0, 0, 0];
 struct Pending {
     /// キャンバス上の矩形
     rect: Rect,
+    /// 透過画素を下のキャンバスへ重ねるか
+    blend: bool,
     /// 符号化した画素
     encoded: EncodedFrame,
     /// 表示時間 (ms)
@@ -44,10 +46,21 @@ struct Animation<W: Write + Seek> {
 }
 
 impl<W: Write + Seek> Animation<W> {
+    /// 保留中のフレームが、表示した後に矩形を抜く廃棄方法を載せられるか
+    ///
+    /// 表示時間を分けたフレームでは、抜いた跡が分けた先の表示に見えてしまう。
+    fn disposable(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|pending| pending.duration <= u64::from(MAX_DURATION))
+    }
+
     /// 保留中のフレームを `pending` へ入れ替え、入れ替わったフレームを書き出す
-    fn push(&mut self, pending: Pending, codec: &mut Codec) -> Result<(), Error> {
+    ///
+    /// `dispose` は入れ替わったフレームの廃棄方法。
+    fn push(&mut self, pending: Pending, dispose: bool, codec: &mut Codec) -> Result<(), Error> {
         let previous = self.pending.replace(pending);
-        self.write(previous, codec)
+        self.write(previous, dispose, codec)
     }
 
     /// 差分の無いフレームを、保留中のフレームの表示時間へ併合する
@@ -60,16 +73,21 @@ impl<W: Write + Seek> Animation<W> {
         self.merged_frames += 1;
     }
 
-    /// 保留中のフレームを書き出す
+    /// 保留中のフレームを、次のフレームが無いものとして書き出す
     fn flush(&mut self, codec: &mut Codec) -> Result<(), Error> {
         let pending = self.pending.take();
-        self.write(pending, codec)
+        self.write(pending, false, codec)
     }
 
     /// フレームをANMFへ載せる
     ///
     /// 表示時間が欄に収まらないぶんは、キャンバスを書き換えないフレームへ分ける。
-    fn write(&mut self, pending: Option<Pending>, codec: &mut Codec) -> Result<(), Error> {
+    fn write(
+        &mut self,
+        pending: Option<Pending>,
+        dispose: bool,
+        codec: &mut Codec,
+    ) -> Result<(), Error> {
         let Some(pending) = pending else {
             return Ok(());
         };
@@ -82,13 +100,14 @@ impl<W: Write + Seek> Animation<W> {
         self.riff.write_frame(&Frame {
             rect: pending.rect,
             duration,
-            blend: false,
-            dispose: false,
+            blend: pending.blend,
+            dispose,
             alpha: pending.encoded.alpha(),
             image: pending.encoded.image(),
         })?;
 
         for duration in durations {
+            debug_assert!(!dispose, "抜いた跡が分けた先の表示に見えてしまう");
             let filler = filler(&mut self.filler, codec)?;
             self.frames_have_alpha |= filler.has_alpha();
             self.riff.write_frame(&Frame {
@@ -120,7 +139,7 @@ fn filler<'a>(
 ) -> Result<&'a EncodedFrame, Error> {
     if slot.is_none() {
         let layout = Layout::new(1, 1, ColorType::Rgba8)?;
-        *slot = Some(codec.encode(&FILLER_PIXEL, &layout, layout.whole())?);
+        *slot = Some(codec.encode(&FILLER_PIXEL, &layout, layout.whole(), None)?);
     }
     Ok(slot.as_ref().expect("符号化した結果が入っている"))
 }
@@ -129,8 +148,8 @@ fn filler<'a>(
 enum Sink<W: Write + Seek> {
     /// 単葉。`WebPEncode` の出力をそのまま書く
     Still(W),
-    /// アニメーション
-    Animation(Animation<W>),
+    /// アニメーション。仕掛かりを抱えるので、単葉の行き先を太らせないよう間接に置く
+    Animation(Box<Animation<W>>),
 }
 
 /// WebPのエンコーダ
@@ -181,7 +200,7 @@ impl<W: Write + Seek> Encoder<W> {
         let sink = if num_frames == 1 {
             Sink::Still(writer)
         } else {
-            Sink::Animation(Animation {
+            Sink::Animation(Box::new(Animation {
                 riff: Riff::new(writer, layout.width, layout.height, config.num_plays)?,
                 milliseconds: Milliseconds::new(),
                 pending: None,
@@ -189,7 +208,7 @@ impl<W: Write + Seek> Encoder<W> {
                 frames_have_alpha: false,
                 merged_frames: 0,
                 filler: None,
-            })
+            }))
         };
 
         Ok(Encoder {
@@ -280,7 +299,7 @@ impl<W: Write + Seek> Encoder<W> {
                     frames_have_alpha,
                     merged_frames,
                     ..
-                } = animation;
+                } = *animation;
                 (
                     riff.finish(frames_have_alpha)?,
                     delay_clamped,
@@ -316,26 +335,32 @@ impl<W: Write + Seek> Encoder<W> {
         let animation = match &mut self.sink {
             Sink::Still(writer) => {
                 let rect = self.layout.whole();
-                let encoded = self.codec.encode(source, &self.layout, rect)?;
+                let encoded = self.codec.encode(source, &self.layout, rect, None)?;
                 return Ok(writer.write_all(encoded.still())?);
             }
             Sink::Animation(animation) => animation,
         };
 
         let duration = animation.milliseconds.next(delay);
-        let Some(rect) = self.canvas.dirty() else {
+        let Some(placement) = self.canvas.place(animation.disposable()) else {
             animation.merge(duration);
             return Ok(());
         };
 
-        let encoded = self.codec.encode(source, &self.layout, rect)?;
-        self.canvas.commit();
+        let base = (placement.blend && self.codec.substitutes_transparency())
+            .then(|| self.canvas.base(placement.dispose));
+        let encoded = self
+            .codec
+            .encode(source, &self.layout, placement.rect, base)?;
+        self.canvas.commit(placement.rect);
         animation.push(
             Pending {
-                rect,
+                rect: placement.rect,
+                blend: placement.blend,
                 encoded,
                 duration,
             },
+            placement.dispose,
             &mut self.codec,
         )
     }

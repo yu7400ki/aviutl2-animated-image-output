@@ -71,6 +71,8 @@ impl EncodedFrame {
 /// 設定を写した符号化器
 pub(crate) struct Codec {
     config: WebPConfig,
+    /// キャンバスと一致した画素を完全透過へ置き換えられるか
+    substitute: bool,
     /// 矩形を切り出す先。フレームごとに使い回す
     buffer: Vec<u8>,
 }
@@ -98,13 +100,24 @@ impl Codec {
 
         Ok(Codec {
             config: raw,
+            substitute: config.lossless && config.color_type == ColorType::Rgba8,
             buffer: Vec::new(),
         })
     }
 
+    /// blend有りのフレームで、キャンバスと一致した画素を完全透過へ置き換えられるか
+    ///
+    /// 置き換えた画素はαのランになって縮むが、元の値を保てるのは切り出した画素を
+    /// そのまま書く可逆のRGBAのときだけ。
+    pub(crate) fn substitutes_transparency(&self) -> bool {
+        self.substitute
+    }
+
     /// `data` から `rect` を切り出して符号化する
     ///
-    /// `data` は `layout` のとおりに並んでいること。
+    /// `data` は `layout` のとおりに並んでいること。`base` を渡すと、切り出した
+    /// 画素のうちそれと一致するものを完全透過へ置き換える。`base` はRGBAで、
+    /// `data` と同じ並びであること。
     ///
     /// # Errors
     /// 符号化に失敗したとき [`Error::Encode`]。結果のチャンク構成を読み取れない
@@ -114,6 +127,7 @@ impl Codec {
         data: &[u8],
         layout: &Layout,
         rect: Rect,
+        base: Option<&[u8]>,
     ) -> Result<EncodedFrame, Error> {
         self.buffer.clear();
         crop(
@@ -124,12 +138,41 @@ impl Codec {
             layout.bytes_per_pixel,
             &mut self.buffer,
         );
+        if let Some(base) = base {
+            debug_assert_eq!(
+                layout.color_type,
+                ColorType::Rgba8,
+                "置き換えた画素を書けるのはαの欄があるときだけ"
+            );
+            substitute(&mut self.buffer, base, rect, layout.stride);
+        }
 
         let has_alpha = layout.color_type == ColorType::Rgba8 && has_transparency(&self.buffer);
 
         let picture = Picture::import(&self.buffer, rect.width, rect.height, layout.color_type)?;
         let bytes = picture.encode(&self.config)?;
         EncodedFrame::new(bytes, has_alpha)
+    }
+}
+
+/// 切り出した画素のうち `base` と一致するものを完全透過へ置き換える
+///
+/// `cropped` は `base` と同じ並びの画素列から `rect` を切り出したもの、`base` は
+/// `stride` バイトの行が隙間なく並んだRGBA。置き換えた画素はblend有りの合成で
+/// `base` の値へ戻る。
+fn substitute(cropped: &mut [u8], base: &[u8], rect: Rect, stride: usize) {
+    const PIXEL: usize = 4;
+
+    let row_len = rect.width as usize * PIXEL;
+    let head = rect.y as usize * stride + rect.x as usize * PIXEL;
+    for (y, row) in cropped.chunks_exact_mut(row_len).enumerate() {
+        let at = head + y * stride;
+        let base = base[at..at + row_len].chunks_exact(PIXEL);
+        for (pixel, base) in row.chunks_exact_mut(PIXEL).zip(base) {
+            if pixel == base {
+                pixel.fill(0);
+            }
+        }
     }
 }
 
@@ -324,7 +367,7 @@ mod tests {
             num_plays: 0,
         })
         .unwrap();
-        codec.encode(&data, &layout, layout.whole()).unwrap()
+        codec.encode(&data, &layout, layout.whole(), None).unwrap()
     }
 
     /// チャンクが持つペイロードのバイト数
@@ -363,7 +406,7 @@ mod tests {
             num_plays: 0,
         })
         .unwrap();
-        let frame = codec.encode(&data, &layout, layout.whole()).unwrap();
+        let frame = codec.encode(&data, &layout, layout.whole(), None).unwrap();
 
         let alpha = frame.alpha().unwrap();
         assert_eq!(&alpha[..4], b"ALPH");
@@ -499,7 +542,7 @@ mod tests {
             num_plays: 0,
         })
         .unwrap();
-        let frame = codec.encode(&data, &layout, rect).unwrap();
+        let frame = codec.encode(&data, &layout, rect, None).unwrap();
 
         let mut expected = Vec::new();
         crop(

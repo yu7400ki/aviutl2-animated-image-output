@@ -6,7 +6,7 @@ use anim_core::FrameDelay;
 const MIN_DURATION: u32 = 1;
 
 /// ANMFの表示時間の欄に収まる上限 (ms)
-const MAX_DURATION: u32 = 0x00FF_FFFF;
+pub(crate) const MAX_DURATION: u32 = 0x00FF_FFFF;
 
 /// フレーム遅延をミリ秒へ累積で丸める
 ///

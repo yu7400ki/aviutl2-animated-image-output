@@ -2,8 +2,9 @@
 //! 一致することを確認する
 //!
 //! バイト一致は ffmpeg が担保する。`image-webp` は独立な2つ目のデコーダで、
-//! 表示時間とループ回数の読み出しも受け持つ。ffmpeg が見つからない環境では、
-//! そちらだけを飛ばして `image-webp` の結果で判定する。
+//! 表示時間とループ回数の読み出しも受け持つ。blend有りのフレームの合成だけは
+//! 近似なので、そちらは許容差で突き合わせる。ffmpeg が見つからない環境では、
+//! ffmpeg のデコードを飛ばして `image-webp` の結果で判定する。
 
 use image_webp::{LoopCount, WebPDecoder};
 use std::cell::RefCell;
@@ -69,6 +70,47 @@ fn windowed_rgba(width: u32, height: u32, at: (u32, u32)) -> Vec<u8> {
             let inside = x.wrapping_sub(at.0) < WINDOW && y.wrapping_sub(at.1) < WINDOW;
             rgba.extend_from_slice(&if inside {
                 [0, 0, 0, 0]
+            } else {
+                [(x * 3) as u8, (y * 7) as u8, 0x40, 0xFF]
+            });
+        }
+    }
+    rgba
+}
+
+/// 動く四角の一辺の長さ
+const SPRITE: u32 = 6;
+
+/// 四角を塗る色
+const SPRITE_COLOR: [u8; 4] = [0x20, 0x40, 0x60, 0xFF];
+
+/// 透過の面を不透明な四角が1つ動くRGBA
+///
+/// 四角を囲む矩形の外は前のフレームと同じ透過なので、前のフレームの矩形を
+/// 抜いた方が矩形が狭くなる。位置が重なるので、抜いた後と抜かない前の
+/// キャンバスは矩形の中で食い違う。
+fn sprite_rgba(width: u32, height: u32, at: (u32, u32)) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let inside = x.wrapping_sub(at.0) < SPRITE && y.wrapping_sub(at.1) < SPRITE;
+            rgba.extend_from_slice(&if inside { SPRITE_COLOR } else { [0, 0, 0, 0] });
+        }
+    }
+    rgba
+}
+
+/// 不透明な面を不透明な四角が1つ動くRGBA
+///
+/// 矩形の中の画素はすべて不透明なので重ねる形で載り、変わらなかった画素は
+/// 完全透過へ置き換えられる。素材そのものには透過画素が無い。
+fn patched_rgba(width: u32, height: u32, at: (u32, u32)) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let inside = x.wrapping_sub(at.0) < SPRITE && y.wrapping_sub(at.1) < SPRITE;
+            rgba.extend_from_slice(&if inside {
+                SPRITE_COLOR
             } else {
                 [(x * 3) as u8, (y * 7) as u8, 0x40, 0xFF]
             });
@@ -168,6 +210,74 @@ fn decode_with_image_webp(bytes: &[u8], width: u32, height: u32) -> Decoded {
     }
 }
 
+/// ANMFのヘッダが載せているフレームの置き方
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Placed {
+    /// キャンバス上の矩形 (x, y, 幅, 高さ)
+    rect: (u32, u32, u32, u32),
+    /// 透過画素を下のキャンバスへ重ねるか
+    blend: bool,
+    /// 表示した後に矩形を背景色で抜くか
+    dispose: bool,
+}
+
+/// ファイル先頭のRIFFヘッダ (FourCC、サイズ、`WEBP`) のバイト数
+const FILE_HEADER: usize = 12;
+
+/// 24bitのリトルエンディアンを読む
+fn u24(bytes: &[u8]) -> u32 {
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0])
+}
+
+/// 出力のANMFを順に読み、フレームごとの置き方を取り出す
+///
+/// 決定は符号化の中に隠れるので、合成の突き合わせだけでは「どちらの候補が
+/// 選ばれたか」を問えない。
+fn placements(bytes: &[u8]) -> Vec<Placed> {
+    let mut placed = Vec::new();
+    let mut cursor = FILE_HEADER;
+    while cursor + 8 <= bytes.len() {
+        let size = u32::from_le_bytes(bytes[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
+        let body = cursor + 8;
+        if &bytes[cursor..cursor + 4] == b"ANMF" {
+            let header = &bytes[body..body + 16];
+            placed.push(Placed {
+                rect: (
+                    u24(&header[0..3]) * 2,
+                    u24(&header[3..6]) * 2,
+                    u24(&header[6..9]) + 1,
+                    u24(&header[9..12]) + 1,
+                ),
+                blend: header[15] & 0x02 == 0,
+                dispose: header[15] & 0x01 == 1,
+            });
+        }
+        cursor = body + size + (size & 1);
+    }
+    placed
+}
+
+/// `image-webp` の合成が入力から離れていないことを確かめる
+///
+/// blend有りのフレームの合成が近似で、成分が1だけ低く出ることがある。
+fn assert_close(decoded: &[Vec<u8>], expected: &[Vec<u8>]) {
+    assert_eq!(
+        decoded.len(),
+        expected.len(),
+        "image-webp が返したフレーム数"
+    );
+    for (index, (decoded, expected)) in decoded.iter().zip(expected).enumerate() {
+        assert_eq!(decoded.len(), expected.len(), "フレーム{index}の長さ");
+        for (at, (decoded, expected)) in decoded.iter().zip(expected).enumerate() {
+            let deviation = i32::from(*expected) - i32::from(*decoded);
+            assert!(
+                (0..=1).contains(&deviation),
+                "フレーム{index}のバイト{at}が {expected} から {decoded} へずれた"
+            );
+        }
+    }
+}
+
 /// ANMFの列を2つ並べ、2周ぶんのアニメーションにする
 ///
 /// ANMFは1つずつが自足しているので、並べ直すだけで折り返しを1本の
@@ -264,10 +374,18 @@ fn round_trip(width: u32, height: u32, config: Config, frames: &[Vec<u8>]) -> (V
     }
 
     let decoded = decode_with_image_webp(&bytes, width, height);
+    assert_close(&decoded.frames, &expected);
+
+    let placed = placements(&bytes);
+    let first = placed.first().expect("フレームが1つ以上書かれている");
     assert_eq!(
-        decoded.frames, expected,
-        "image-webp のデコードが入力と違う"
+        first.rect,
+        (0, 0, width, height),
+        "先頭フレームが全面でない"
     );
+    assert!(!first.blend, "先頭フレームが重ねる形になっている");
+    let last = placed.last().expect("フレームが1つ以上書かれている");
+    assert!(!last.dispose, "最終フレームが矩形を抜いている");
 
     (bytes, report)
 }
@@ -308,7 +426,10 @@ const VP8X_FLAGS_OFFSET: usize = 20;
 const ANIMATION: u8 = 0x02;
 const ALPHA: u8 = 0x10;
 
-/// 素材が透過を持つときだけALPHAフラグが後埋めで立つ
+/// ALPHAフラグは書いたフレームの画素から後埋めで立つ
+///
+/// 画素が毎フレーム総入れ替えになる素材では置き換えの相手が無いので、
+/// 不透明な素材の出力にαは現れない。
 #[test]
 fn the_alpha_flag_is_filled_in_from_the_frames() {
     let (width, height) = (16, 16);
@@ -501,6 +622,113 @@ fn the_second_loop_composes_the_same_as_the_first() {
         assert_eq!(first, frames, "ffmpeg の1周目が入力と違う");
         assert_eq!(second, first, "ffmpeg の2周目が1周目と食い違う");
     }
+}
+
+/// 離れた場所へ動く四角は、前のフレームの矩形を抜いた方が狭く収まる
+///
+/// 抜いた後のキャンバスは前のフレームを描いた後と矩形の中で食い違うので、
+/// 置き換えの比較相手を取り違えると合成が入力へ戻らない。
+#[test]
+fn a_moving_sprite_is_carried_by_clearing_the_previous_rect() {
+    let (width, height) = (32, 24);
+    let frames: Vec<Vec<u8>> = [(2, 2), (6, 6), (12, 10), (20, 14)]
+        .map(|at| sprite_rgba(width, height, at))
+        .to_vec();
+
+    let (bytes, _) = round_trip(width, height, config(ColorType::Rgba8, 0), &frames);
+
+    assert_eq!(
+        placements(&bytes),
+        [
+            Placed {
+                rect: (0, 0, width, height),
+                blend: false,
+                dispose: true,
+            },
+            Placed {
+                rect: (6, 6, SPRITE, SPRITE),
+                blend: true,
+                dispose: true,
+            },
+            Placed {
+                rect: (12, 10, SPRITE, SPRITE),
+                blend: true,
+                dispose: true,
+            },
+            Placed {
+                rect: (20, 14, SPRITE, SPRITE),
+                blend: true,
+                dispose: false,
+            },
+        ]
+    );
+}
+
+/// 透過画素がキャンバスと食い違う素材は、矩形を抜かず重ねもしない
+#[test]
+fn a_transparent_window_over_an_opaque_background_keeps_the_canvas() {
+    let (width, height) = (32, 24);
+    let frames: Vec<Vec<u8>> = [(3, 3), (12, 7), (20, 13)]
+        .map(|at| windowed_rgba(width, height, at))
+        .to_vec();
+
+    let (bytes, _) = round_trip(width, height, config(ColorType::Rgba8, 0), &frames);
+
+    let placed = placements(&bytes);
+    assert!(
+        placed.iter().all(|frame| !frame.dispose),
+        "抜いた方が狭くなる場面が無いのに抜いている: {placed:?}"
+    );
+    assert!(
+        placed.iter().all(|frame| !frame.blend),
+        "透過画素がキャンバスと食い違うのに重ねている: {placed:?}"
+    );
+}
+
+/// 一致した画素の置き換えは、透過画素の無い素材にもαを持ち込む
+///
+/// 素材の透過の有無 (`Report::has_alpha`) とVP8XのALPHAフラグは別物になる。
+#[test]
+fn substituting_transparency_raises_the_alpha_flag_of_an_opaque_material() {
+    let (width, height) = (32, 24);
+    let frames: Vec<Vec<u8>> = [(2, 2), (10, 6), (18, 12)]
+        .map(|at| patched_rgba(width, height, at))
+        .to_vec();
+
+    let (bytes, report) = round_trip(width, height, config(ColorType::Rgba8, 0), &frames);
+
+    assert!(!report.has_alpha, "素材に透過画素がある");
+    assert_eq!(bytes[VP8X_FLAGS_OFFSET], ANIMATION | ALPHA);
+
+    let placed = placements(&bytes);
+    assert!(
+        placed[1..]
+            .iter()
+            .all(|frame| frame.blend && !frame.dispose),
+        "不透明な素材が重ねる形で載っていない: {placed:?}"
+    );
+}
+
+/// 前のフレームの矩形を抜いた跡そのものになるフレームは、1画素で表せる
+#[test]
+fn a_frame_equal_to_the_disposed_canvas_is_carried_by_a_single_pixel() {
+    let (width, height) = (32, 24);
+    let frames = vec![
+        sprite_rgba(width, height, (2, 2)),
+        sprite_rgba(width, height, (12, 10)),
+        vec![0; (width * height * 4) as usize],
+    ];
+
+    let (bytes, _) = round_trip(width, height, config(ColorType::Rgba8, 0), &frames);
+
+    assert_eq!(
+        placements(&bytes).last(),
+        Some(&Placed {
+            rect: (0, 0, 1, 1),
+            blend: true,
+            dispose: false,
+        })
+    );
 }
 
 /// ANMFの表示時間の欄に収まる上限 (ms)
