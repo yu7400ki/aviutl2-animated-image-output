@@ -2,7 +2,7 @@
 
 use image_webp::WebPDecoder;
 use std::io::Cursor;
-use webp_encoder::{ColorType, Config, Error};
+use webp_encoder::{ColorType, Config, Encoder, Error, FrameDelay, Report};
 
 /// 決定的な擬似乱数列
 fn noise(len: usize, seed: u32) -> Vec<u8> {
@@ -52,6 +52,7 @@ fn opaque_rgba(rgb: &[u8]) -> Vec<u8> {
 /// `image-webp` でデコードした生RGBA
 fn decode(bytes: &[u8], width: u32, height: u32) -> Vec<u8> {
     let mut decoder = WebPDecoder::new(Cursor::new(bytes)).expect("image-webp が読めない");
+    assert!(!decoder.is_animated(), "単葉がアニメーションになっている");
     assert_eq!(decoder.dimensions(), (width, height));
     let mut buffer = vec![0u8; decoder.output_buffer_size().expect("出力の大きさ")];
     decoder
@@ -81,7 +82,21 @@ fn config(color_type: ColorType, lossless: bool) -> Config {
         lossless,
         quality: if lossless { 100.0 } else { 90.0 },
         method: 4,
+        num_plays: 0,
     }
+}
+
+/// 1フレームだけを投入する
+fn encode(
+    width: u32,
+    height: u32,
+    data: &[u8],
+    config: Config,
+) -> Result<(Vec<u8>, Report), Error> {
+    let mut encoder = Encoder::new(Cursor::new(Vec::new()), width, height, 1, config)?;
+    encoder.add_frame(data, FrameDelay::new(1, 30).unwrap())?;
+    let (writer, report) = encoder.finish()?;
+    Ok((writer.into_inner(), report))
 }
 
 #[test]
@@ -89,10 +104,17 @@ fn a_lossless_rgba_still_decodes_back_to_the_input() {
     let (width, height) = (61, 37);
     let rgba = normalized_rgba(width, height, 0x5EED);
 
-    let frame =
-        webp_encoder::encode(width, height, &rgba, &config(ColorType::Rgba8, true)).unwrap();
+    let (bytes, report) = encode(width, height, &rgba, config(ColorType::Rgba8, true)).unwrap();
 
-    assert_eq!(decode(frame.still(), width, height), rgba);
+    assert_eq!(decode(&bytes, width, height), rgba);
+    assert_eq!(
+        report,
+        Report {
+            merged_frames: 0,
+            delay_clamped: false,
+            has_alpha: true,
+        }
+    );
 }
 
 #[test]
@@ -100,9 +122,10 @@ fn a_lossless_rgb_still_decodes_back_to_the_input() {
     let (width, height) = (48, 32);
     let rgb = gradient_rgb(width, height);
 
-    let frame = webp_encoder::encode(width, height, &rgb, &config(ColorType::Rgb8, true)).unwrap();
+    let (bytes, report) = encode(width, height, &rgb, config(ColorType::Rgb8, true)).unwrap();
 
-    assert_eq!(decode(frame.still(), width, height), opaque_rgba(&rgb));
+    assert_eq!(decode(&bytes, width, height), opaque_rgba(&rgb));
+    assert!(!report.has_alpha);
 }
 
 /// 完全透過の画素のRGBは、正規化を通していない素材でも保たれる
@@ -122,10 +145,9 @@ fn a_lossless_still_keeps_the_color_under_transparent_pixels() {
         }
     }
 
-    let frame =
-        webp_encoder::encode(width, height, &rgba, &config(ColorType::Rgba8, true)).unwrap();
+    let (bytes, _) = encode(width, height, &rgba, config(ColorType::Rgba8, true)).unwrap();
 
-    assert_eq!(decode(frame.still(), width, height), rgba);
+    assert_eq!(decode(&bytes, width, height), rgba);
 }
 
 #[test]
@@ -133,30 +155,35 @@ fn a_lossy_still_decodes_near_the_input() {
     let (width, height) = (64, 64);
     let rgb = gradient_rgb(width, height);
 
-    let frame = webp_encoder::encode(width, height, &rgb, &config(ColorType::Rgb8, false)).unwrap();
+    let (bytes, _) = encode(width, height, &rgb, config(ColorType::Rgb8, false)).unwrap();
 
-    let decoded = decode(frame.still(), width, height);
+    let decoded = decode(&bytes, width, height);
     assert!(mean_abs_error(&decoded, &opaque_rgba(&rgb)) < 4.0);
 }
 
+/// 1フレームの素材は `WebPEncode` の出力そのもので、アニメーションの
+/// チャンクを1つも伴わない
 #[test]
-fn the_still_carries_the_same_bitstream_as_the_frame_payload() {
+fn a_single_frame_is_written_as_a_simple_file() {
     let (width, height) = (24, 18);
     let rgba = normalized_rgba(width, height, 0xF00D);
 
-    let frame =
-        webp_encoder::encode(width, height, &rgba, &config(ColorType::Rgba8, true)).unwrap();
+    let (bytes, _) = encode(width, height, &rgba, config(ColorType::Rgba8, true)).unwrap();
 
-    assert!(frame.still().ends_with(frame.image()));
-    assert_eq!(frame.still().len(), 12 + frame.image().len());
+    assert_eq!(&bytes[..4], b"RIFF");
+    assert_eq!(&bytes[8..12], b"WEBP");
+    assert_eq!(&bytes[12..16], b"VP8L");
+    assert_eq!(
+        u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize,
+        bytes.len() - 8
+    );
 }
 
 #[test]
 fn a_canvas_outside_the_limits_is_refused() {
     for (width, height) in [(0, 8), (8, 0), (16384, 8), (8, 16384)] {
-        let data = vec![0u8; 0];
         assert!(matches!(
-            webp_encoder::encode(width, height, &data, &config(ColorType::Rgba8, true)),
+            encode(width, height, &[], config(ColorType::Rgba8, true)),
             Err(Error::InvalidDimensions { .. })
         ));
     }
@@ -166,7 +193,7 @@ fn a_canvas_outside_the_limits_is_refused() {
 fn a_frame_of_another_length_is_refused() {
     let data = vec![0u8; 8 * 8 * 4 - 1];
     assert!(matches!(
-        webp_encoder::encode(8, 8, &data, &config(ColorType::Rgba8, true)),
+        encode(8, 8, &data, config(ColorType::Rgba8, true)),
         Err(Error::FrameSizeMismatch {
             expected: 256,
             actual: 255

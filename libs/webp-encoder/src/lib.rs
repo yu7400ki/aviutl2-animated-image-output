@@ -1,35 +1,44 @@
 //! WebPエンコーダ
 
 mod codec;
+mod delay;
+mod encoder;
 mod error;
 mod layout;
 mod picture;
+mod riff;
 
-pub use codec::{Config, EncodedFrame};
+pub use anim_core::FrameDelay;
+pub use encoder::Encoder;
 pub use error::{EncodingError, Error};
 pub use layout::ColorType;
 
-use crate::codec::Codec;
-use crate::layout::Layout;
+/// エンコード設定
+#[derive(Debug, Clone, Copy)]
+pub struct Config {
+    /// 入力フレームの色種別
+    ///
+    /// [`Encoder::add_frame`] に渡すバイト列の解釈を決める。
+    pub color_type: ColorType,
+    /// 可逆で符号化するか
+    pub lossless: bool,
+    /// 品質 0.0..=100.0 (非可逆では画質、可逆では圧縮の努力)
+    pub quality: f32,
+    /// 速度と圧縮率の均衡 0..=6
+    pub method: u8,
+    /// アニメーションの再生回数 (0で無限ループ)
+    pub num_plays: u32,
+}
 
-/// `width` x `height` の1フレームを単葉の .webp として符号化する
-///
-/// `data` は [`Config::color_type`] の画素が隙間なく並んでいること。
-///
-/// # Errors
-/// 寸法が0か16383を超えるとき [`Error::InvalidDimensions`]。`data` の長さが
-/// 寸法と色種別に合わないとき [`Error::FrameSizeMismatch`]。設定が値域の外か
-/// 符号化に失敗したとき [`Error::Encode`]。符号化された画像のチャンク構成を
-/// 読み取れないとき [`Error::MalformedOutput`]。
-pub fn encode(
-    width: u32,
-    height: u32,
-    data: &[u8],
-    config: &Config,
-) -> Result<EncodedFrame, Error> {
-    let layout = Layout::new(width, height, config.color_type)?;
-    layout.check_frame(data)?;
-
-    let mut codec = Codec::new(config)?;
-    codec.encode(data, &layout, layout.whole())
+/// 符号化の結果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Report {
+    /// 前フレームと同一で、表示時間の延長に併合したフレーム数
+    pub merged_frames: u32,
+    /// 遅延を下限で切り上げたか
+    pub delay_clamped: bool,
+    /// 素材に透過画素があったか
+    ///
+    /// VP8XのALPHAフラグは書いたフレームのαで決まるため、これとは別物。
+    pub has_alpha: bool,
 }

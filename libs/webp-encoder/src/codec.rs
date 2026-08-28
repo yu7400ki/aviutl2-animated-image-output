@@ -1,7 +1,8 @@
 //! 1フレームの符号化: 切り出し → `WebPEncode` → ペイロード抽出
 
+use crate::Config;
 use crate::error::{EncodingError, Error};
-use crate::layout::{ColorType, Layout};
+use crate::layout::Layout;
 use crate::picture::Picture;
 use anim_core::{Rect, crop};
 use std::ffi::c_int;
@@ -15,23 +16,10 @@ const CHUNK_HEADER: usize = 8;
 /// ファイル先頭のRIFFヘッダ (FourCC、サイズ、`WEBP`) のバイト数
 const FILE_HEADER: usize = 12;
 
-/// 符号化の設定
-#[derive(Debug, Clone, Copy)]
-pub struct Config {
-    /// 入力フレームの色種別
-    pub color_type: ColorType,
-    /// 可逆で符号化するか
-    pub lossless: bool,
-    /// 品質 0.0..=100.0 (非可逆では画質、可逆では圧縮の努力)
-    pub quality: f32,
-    /// 速度と圧縮率の均衡 0..=6
-    pub method: u8,
-}
-
 /// 1フレームの符号化結果
 ///
 /// 単葉の .webp と、その中でフレームを表すチャンクの位置を持つ。
-pub struct EncodedFrame {
+pub(crate) struct EncodedFrame {
     bytes: Vec<u8>,
     alpha: Option<Range<usize>>,
     image: Range<usize>,
@@ -39,21 +27,21 @@ pub struct EncodedFrame {
 
 impl EncodedFrame {
     /// 単葉の .webp 全体
-    pub fn still(&self) -> &[u8] {
+    pub(crate) fn still(&self) -> &[u8] {
         &self.bytes
     }
 
     /// αを別に持つ形式のときの `ALPH` チャンク
     ///
     /// 返すのはFourCCから詰めまでを含むチャンク全体。
-    pub fn alpha(&self) -> Option<&[u8]> {
+    pub(crate) fn alpha(&self) -> Option<&[u8]> {
         self.alpha.clone().map(|range| &self.bytes[range])
     }
 
     /// `VP8 ` または `VP8L` チャンク
     ///
     /// 返すのはFourCCから詰めまでを含むチャンク全体。
-    pub fn image(&self) -> &[u8] {
+    pub(crate) fn image(&self) -> &[u8] {
         &self.bytes[self.image.clone()]
     }
 }
@@ -170,6 +158,7 @@ fn locate_payload(bytes: &[u8]) -> Option<(Option<Range<usize>>, Range<usize>)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::ColorType;
 
     /// 決定的な擬似乱数列
     fn noise(len: usize, seed: u32) -> Vec<u8> {
@@ -305,6 +294,7 @@ mod tests {
             lossless,
             quality: 75.0,
             method: 4,
+            num_plays: 0,
         })
         .unwrap();
         codec.encode(&data, &layout, layout.whole()).unwrap()
@@ -343,6 +333,7 @@ mod tests {
             lossless: false,
             quality: 75.0,
             method: 4,
+            num_plays: 0,
         })
         .unwrap();
         let frame = codec.encode(&data, &layout, layout.whole()).unwrap();
@@ -375,6 +366,7 @@ mod tests {
             lossless: true,
             quality: 60.0,
             method: 3,
+            num_plays: 0,
         };
 
         let lossless = Codec::new(&config).unwrap().config;
@@ -400,6 +392,7 @@ mod tests {
             lossless: false,
             quality: 75.0,
             method: 4,
+            num_plays: 0,
         };
         for config in [
             Config {
@@ -476,6 +469,7 @@ mod tests {
             lossless: true,
             quality: 75.0,
             method: 4,
+            num_plays: 0,
         })
         .unwrap();
         let frame = codec.encode(&data, &layout, rect).unwrap();
