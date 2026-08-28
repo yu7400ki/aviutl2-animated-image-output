@@ -35,6 +35,9 @@ const fn plte_placeholder() -> [u8; PLTE_LEN] {
     plte
 }
 
+/// 添字がPLTEに載せた色の外を指したときの文言
+const OUT_OF_PLTE: &str = "PLTEに載せていない添字を書こうとしている";
+
 /// PLTEとtRNSを引く添字の表
 ///
 /// 添字は色を見つけた順に振る。全フレームを見終わる前に添字を焼くため、
@@ -82,7 +85,12 @@ impl Palette {
     ///
     /// 引数の条件は [`Colors::index_of_pixel`] と同じ。
     pub(crate) fn index_of(&self, pixel: &[u8], bpp: usize) -> Option<u8> {
-        self.colors.index_of_pixel(pixel, bpp)
+        let index = self.colors.index_of_pixel(pixel, bpp);
+        debug_assert!(
+            !matches!(index, Some(index) if u16::from(index) >= self.colors()),
+            "{OUT_OF_PLTE}"
+        );
+        index
     }
 
     /// 画素列を添字へ写して `out` へ追記する
@@ -90,7 +98,15 @@ impl Palette {
     /// 引数の条件は [`Colors::append_indices`] と同じ。載せられる色数を超えたら
     /// `out` を呼び出し前の長さへ戻して偽を返す。
     pub(crate) fn append_indices(&mut self, pixels: &[u8], bpp: usize, out: &mut Vec<u8>) -> bool {
-        self.colors.append_indices(pixels, bpp, out)
+        let start = out.len();
+        let mapped = self.colors.append_indices(pixels, bpp, out);
+        debug_assert!(
+            out[start..]
+                .iter()
+                .all(|&index| u16::from(index) < self.colors()),
+            "{OUT_OF_PLTE}"
+        );
+        mapped
     }
 
     /// PLTEのデータ部
