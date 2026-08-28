@@ -47,8 +47,6 @@ struct Animation<W: Write + Seek> {
 
 impl<W: Write + Seek> Animation<W> {
     /// 保留中のフレームが、表示した後に矩形を抜く廃棄方法を載せられるか
-    ///
-    /// 表示時間を分けたフレームでは、抜いた跡が分けた先の表示に見えてしまう。
     fn disposable(&self) -> bool {
         self.pending
             .as_ref()
