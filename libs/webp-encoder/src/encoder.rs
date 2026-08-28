@@ -475,8 +475,8 @@ mod tests {
     ///
     /// 先頭は全面の雑音で符号化に時間がかかり、以降は四角が動くだけなので
     /// 矩形が小さく速い。先頭の符号化が続く間に後続が投入されるため、結果が
-    /// 届く順は投入の順から外れる。4フレームに1枚は前と同一にして、表示時間の
-    /// 併合も混ぜる。不透明な面なので透過置換の経路も通る。
+    /// 届く順は投入の順から外れる。表示時間の併合も混ぜる。不透明な面なので
+    /// 透過置換の経路も通る。
     fn skewed_frames(width: u32, height: u32, count: usize) -> Vec<Vec<u8>> {
         let mut base = noise((width * height * 4) as usize, 0x5EED);
         for pixel in base.chunks_exact_mut(4) {
@@ -487,7 +487,9 @@ mod tests {
             .map(|index| {
                 let mut frame = base.clone();
                 if index > 0 {
-                    draw(&mut frame, width, at(index - index % 4, width, height));
+                    // 5フレームに1枚は前と同じ位置に置き、表示時間の併合を混ぜる
+                    let position = if index % 5 == 0 { index - 1 } else { index };
+                    draw(&mut frame, width, at(position, width, height));
                 }
                 frame
             })
