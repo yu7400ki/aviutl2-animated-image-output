@@ -1,0 +1,3 @@
+[submodule "libs/webp-sys/vendor"]
+	path = libs/webp-sys/vendor
+	url = https://github.com/webmproject/libwebp.git
