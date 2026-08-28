@@ -2,9 +2,9 @@
 
 use crate::Config;
 use crate::error::{EncodingError, Error};
-use crate::layout::Layout;
+use crate::layout::{ColorType, Layout};
 use crate::picture::Picture;
-use anim_core::{Rect, crop};
+use anim_core::{Rect, crop, has_transparency};
 use std::ffi::c_int;
 use std::mem::MaybeUninit;
 use std::ops::Range;
@@ -23,9 +23,31 @@ pub(crate) struct EncodedFrame {
     bytes: Vec<u8>,
     alpha: Option<Range<usize>>,
     image: Range<usize>,
+    has_alpha: bool,
 }
 
 impl EncodedFrame {
+    /// 符号化した .webp の中からチャンクの位置を取る
+    ///
+    /// `has_alpha` は符号化した画素に透過があったかどうか。
+    ///
+    /// # Errors
+    /// チャンク構成を読み取れないとき [`Error::MalformedOutput`]。
+    fn new(bytes: Vec<u8>, has_alpha: bool) -> Result<Self, Error> {
+        let (alpha, image) = locate_payload(&bytes).ok_or(Error::MalformedOutput)?;
+        Ok(EncodedFrame {
+            bytes,
+            alpha,
+            image,
+            has_alpha,
+        })
+    }
+
+    /// 符号化した画素に透過があったか
+    pub(crate) fn has_alpha(&self) -> bool {
+        self.has_alpha
+    }
+
     /// 単葉の .webp 全体
     pub(crate) fn still(&self) -> &[u8] {
         &self.bytes
@@ -103,15 +125,11 @@ impl Codec {
             &mut self.buffer,
         );
 
+        let has_alpha = layout.color_type == ColorType::Rgba8 && has_transparency(&self.buffer);
+
         let picture = Picture::import(&self.buffer, rect.width, rect.height, layout.color_type)?;
         let bytes = picture.encode(&self.config)?;
-        let (alpha, image) = locate_payload(&bytes).ok_or(Error::MalformedOutput)?;
-
-        Ok(EncodedFrame {
-            bytes,
-            alpha,
-            image,
-        })
+        EncodedFrame::new(bytes, has_alpha)
     }
 }
 
@@ -158,7 +176,6 @@ fn locate_payload(bytes: &[u8]) -> Option<(Option<Range<usize>>, Range<usize>)> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::ColorType;
 
     /// 決定的な擬似乱数列
     fn noise(len: usize, seed: u32) -> Vec<u8> {
@@ -267,6 +284,16 @@ mod tests {
         let size = (bytes.len() as u32).to_le_bytes();
         bytes[FILE_HEADER + 4..FILE_HEADER + CHUNK_HEADER].copy_from_slice(&size);
         assert_eq!(locate_payload(&bytes), None);
+    }
+
+    /// 読み取れないチャンク構成は符号化の失敗として返る
+    #[test]
+    fn a_file_whose_chunks_cannot_be_read_is_refused_by_the_frame() {
+        let bytes = file(&[&chunk(b"VP8X", &[0; 10]), &chunk(b"ALPH", &[0x11])]);
+        assert!(matches!(
+            EncodedFrame::new(bytes, false),
+            Err(Error::MalformedOutput)
+        ));
     }
 
     #[test]

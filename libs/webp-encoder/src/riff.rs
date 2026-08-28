@@ -54,8 +54,7 @@ pub(crate) struct Frame<'a> {
 ///
 /// [`Riff::new`] がRIFFヘッダ・VP8X・ANIMを書き、[`Riff::write_frame`] が
 /// ANMFを投入順に流し、[`Riff::finish`] がRIFFのサイズとALPHAフラグを
-/// 書き戻す。サイズ欄は書き戻すまで0で、閉じていないファイルは厳密な
-/// 読み手が弾く。
+/// 書き戻す。サイズ欄は書き戻すまで0のまま残る。
 pub(crate) struct Riff<W: Write + Seek> {
     writer: W,
     /// 書き出したバイト数
@@ -64,6 +63,8 @@ pub(crate) struct Riff<W: Write + Seek> {
 
 impl<W: Write + Seek> Riff<W> {
     /// `width` x `height` のキャンバスを `num_plays` 回再生するコンテナを開く
+    ///
+    /// `writer` はストリームの先頭を指していること。後埋めは絶対位置へ seek する。
     ///
     /// # Errors
     /// 書き出しに失敗したとき [`Error::Io`]。
@@ -107,6 +108,7 @@ impl<W: Write + Seek> Riff<W> {
         debug_assert_eq!(frame.rect.y % 2, 0, "矩形のyは偶数のみ格納できる");
 
         let payload = frame.alpha.map_or(0, <[u8]>::len) + frame.image.len();
+        debug_assert_eq!(payload % 2, 0, "ペイロードは詰めたチャンクを並べたもの");
         let size = ANMF_HEADER + payload as u64;
         self.reserve(CHUNK_HEADER + size)?;
 
@@ -138,12 +140,12 @@ impl<W: Write + Seek> Riff<W> {
         let resume = self.writer.stream_position()?;
         let size = (self.written - CHUNK_HEADER) as u32;
 
-        self.writer.seek(SeekFrom::Start(RIFF_SIZE_OFFSET))?;
-        self.writer.write_all(&size.to_le_bytes())?;
         if alpha {
             self.writer.seek(SeekFrom::Start(VP8X_FLAGS_OFFSET))?;
             self.writer.write_all(&[FLAG_ANIMATION | FLAG_ALPHA])?;
         }
+        self.writer.seek(SeekFrom::Start(RIFF_SIZE_OFFSET))?;
+        self.writer.write_all(&size.to_le_bytes())?;
 
         self.writer.seek(SeekFrom::Start(resume))?;
         self.writer.flush()?;
@@ -238,7 +240,6 @@ mod tests {
         assert_eq!(u16::from_le_bytes([bytes[42], bytes[43]]), 7);
     }
 
-    /// サイズ欄が0のままなら、閉じ損ねたファイルを厳密な読み手が弾く
     #[test]
     fn the_riff_size_stays_zero_until_the_container_is_closed() {
         let mut riff = opened(4, 4, 0);
@@ -298,6 +299,55 @@ mod tests {
         let riff = opened(4, 4, 0);
         let mut writer = riff.finish(true).unwrap();
         assert_eq!(writer.stream_position().unwrap(), HEADER as u64);
+    }
+
+    /// 書いた位置を順に控えるカーソル
+    struct Trace {
+        cursor: Cursor<Vec<u8>>,
+        writes: Vec<u64>,
+    }
+
+    impl Write for Trace {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes.push(self.cursor.position());
+            self.cursor.write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.cursor.flush()
+        }
+    }
+
+    impl Seek for Trace {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.cursor.seek(pos)
+        }
+    }
+
+    /// RIFFのサイズ欄を最後に書く
+    ///
+    /// 途中で落ちたファイルのサイズ欄は0のままになり、ALPHAフラグだけが
+    /// 欠けた一見完成しているファイルは残らない。
+    #[test]
+    fn the_riff_size_is_the_last_thing_written() {
+        let writer = Trace {
+            cursor: Cursor::new(Vec::new()),
+            writes: Vec::new(),
+        };
+        let mut riff = Riff::new(writer, 4, 4, 0).unwrap();
+        riff.write_frame(&Frame {
+            rect: whole(4, 4),
+            duration: 40,
+            blend: false,
+            dispose: false,
+            alpha: None,
+            image: &chunk(b"VP8L", &[0x2F; 6]),
+        })
+        .unwrap();
+
+        let writes = riff.finish(true).unwrap().writes;
+        assert_eq!(writes.last(), Some(&RIFF_SIZE_OFFSET));
+        assert!(writes.contains(&VP8X_FLAGS_OFFSET));
     }
 
     #[test]

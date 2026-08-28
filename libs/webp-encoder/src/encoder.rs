@@ -16,6 +16,8 @@ struct Animation<W: Write + Seek> {
     milliseconds: Milliseconds,
     /// 遅延を下限で切り上げたか
     delay_clamped: bool,
+    /// 書いたフレームのいずれかがαを持ったか
+    frames_have_alpha: bool,
 }
 
 impl<W: Write + Seek> Animation<W> {
@@ -27,6 +29,7 @@ impl<W: Write + Seek> Animation<W> {
     ) -> Result<(), Error> {
         let (duration, clamped) = self.milliseconds.next(delay);
         self.delay_clamped |= clamped;
+        self.frames_have_alpha |= encoded.has_alpha();
 
         self.riff.write_frame(&Frame {
             rect,
@@ -64,8 +67,8 @@ pub struct Encoder<W: Write + Seek> {
     frames_accepted: u32,
     /// 書き出しに失敗し、チャンクの列が中断しているか
     poisoned: bool,
-    /// 素材に透過画素があったか
-    has_alpha: bool,
+    /// 投入したフレームのいずれかに透過画素があったか
+    material_has_alpha: bool,
 }
 
 impl<W: Write + Seek> Encoder<W> {
@@ -97,6 +100,7 @@ impl<W: Write + Seek> Encoder<W> {
                 riff: Riff::new(writer, layout.width, layout.height, config.num_plays)?,
                 milliseconds: Milliseconds::new(),
                 delay_clamped: false,
+                frames_have_alpha: false,
             })
         };
 
@@ -107,7 +111,7 @@ impl<W: Write + Seek> Encoder<W> {
             num_frames,
             frames_accepted: 0,
             poisoned: false,
-            has_alpha: false,
+            material_has_alpha: false,
         })
     }
 
@@ -126,13 +130,13 @@ impl<W: Write + Seek> Encoder<W> {
         if self.poisoned {
             return Err(Error::Poisoned);
         }
-        self.layout.check_frame(data)?;
         if self.frames_accepted == self.num_frames {
             return Err(Error::FrameCountMismatch {
                 expected: self.num_frames,
                 actual: self.frames_accepted + 1,
             });
         }
+        self.layout.check_frame(data)?;
 
         // 途中で失敗するとチャンクの列が中断した状態で残るため、以降の投入を拒否する
         self.write_frame(data, delay)
@@ -167,7 +171,7 @@ impl<W: Write + Seek> Encoder<W> {
                 (writer, false)
             }
             Sink::Animation(animation) => (
-                animation.riff.finish(self.has_alpha)?,
+                animation.riff.finish(animation.frames_have_alpha)?,
                 animation.delay_clamped,
             ),
         };
@@ -175,7 +179,7 @@ impl<W: Write + Seek> Encoder<W> {
         let report = Report {
             merged_frames: 0,
             delay_clamped,
-            has_alpha: self.has_alpha,
+            has_alpha: self.material_has_alpha,
         };
         Ok((writer, report))
     }
@@ -186,7 +190,7 @@ impl<W: Write + Seek> Encoder<W> {
         let encoded = self.codec.encode(data, &self.layout, rect)?;
 
         if self.layout.color_type == ColorType::Rgba8 {
-            self.has_alpha |= has_transparency(data);
+            self.material_has_alpha |= has_transparency(data);
         }
 
         match &mut self.sink {

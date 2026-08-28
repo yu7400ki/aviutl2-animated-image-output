@@ -29,10 +29,17 @@ fn noise(len: usize, seed: u32) -> Vec<u8> {
 }
 
 /// 完全透過の画素を `0x00000000` へ潰したRGBA
+///
+/// 透過の位置は種でずれる。フレームごとに違う位置が透けることが、透過画素の
+/// 下に前のフレームが残る合成を突き合わせの対象にする。
 fn normalized_rgba(width: u32, height: u32, seed: u32) -> Vec<u8> {
     let mut rgba = noise((width * height * 4) as usize, seed);
     for (index, pixel) in rgba.chunks_exact_mut(4).enumerate() {
-        pixel[3] = if index % 5 == 0 { 0 } else { 255 };
+        pixel[3] = if (index + seed as usize).is_multiple_of(5) {
+            0
+        } else {
+            255
+        };
         if pixel[3] == 0 {
             pixel.fill(0);
         }
@@ -215,15 +222,16 @@ fn round_trip(width: u32, height: u32, config: Config, frames: &[Vec<u8>]) -> (V
 
     let (bytes, report) = encode(width, height, config, frames).unwrap();
 
+    if let Some(decoded) = decode_with_ffmpeg(&bytes, width, height) {
+        assert_eq!(decoded.len(), expected.len(), "ffmpeg が返したフレーム数");
+        assert_eq!(decoded, expected, "ffmpeg のデコードが入力と違う");
+    }
+
     let decoded = decode_with_image_webp(&bytes, width, height);
     assert_eq!(
         decoded.frames, expected,
         "image-webp のデコードが入力と違う"
     );
-    if let Some(decoded) = decode_with_ffmpeg(&bytes, width, height) {
-        assert_eq!(decoded.len(), expected.len(), "ffmpeg が返したフレーム数");
-        assert_eq!(decoded, expected, "ffmpeg のデコードが入力と違う");
-    }
 
     (bytes, report)
 }

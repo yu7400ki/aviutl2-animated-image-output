@@ -37,8 +37,6 @@ pub struct Report {
     pub merged_frames: u32,
     /// 遅延を下限で切り上げたか
     pub delay_clamped: bool,
-    /// 素材に透過画素があったか
-    ///
-    /// VP8XのALPHAフラグは書いたフレームのαで決まるため、これとは別物。
+    /// 投入したフレームのいずれかに透過画素があったか
     pub has_alpha: bool,
 }
