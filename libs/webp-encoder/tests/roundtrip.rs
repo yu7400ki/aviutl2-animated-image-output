@@ -624,6 +624,36 @@ fn the_second_loop_composes_the_same_as_the_first() {
     }
 }
 
+/// 矩形を抜くフレームが並んでいても、2周目の合成が1周目と一致する
+///
+/// 折り返しの手前は矩形を抜かず、折り返しの先頭は全面をblend無しで上書きする。
+/// 抜いた跡が持ち越されないことが、この2つで閉じる。
+#[test]
+fn a_loop_that_clears_rects_composes_the_same_on_the_second_pass() {
+    let (width, height) = (32, 24);
+    let frames: Vec<Vec<u8>> = [(2, 2), (6, 6), (12, 10), (20, 14)]
+        .map(|at| sprite_rgba(width, height, at))
+        .to_vec();
+
+    let (bytes, _) = round_trip(width, height, config(ColorType::Rgba8, 0), &frames);
+    assert!(
+        placements(&bytes).iter().any(|frame| frame.dispose),
+        "矩形を抜くフレームが1つも無い"
+    );
+    let looped = looped_twice(&bytes);
+
+    let decoded = decode_with_image_webp(&looped, width, height);
+    let (first, second) = decoded.frames.split_at(frames.len());
+    assert_close(first, &frames);
+    assert_eq!(second, first, "2周目が1周目と食い違う");
+
+    if let Some(composed) = decode_with_ffmpeg(&looped, width, height) {
+        let (first, second) = composed.split_at(frames.len());
+        assert_eq!(first, frames, "ffmpeg の1周目が入力と違う");
+        assert_eq!(second, first, "ffmpeg の2周目が1周目と食い違う");
+    }
+}
+
 /// 離れた場所へ動く四角は、前のフレームの矩形を抜いた方が狭く収まる
 ///
 /// 抜いた後のキャンバスは前のフレームを描いた後と矩形の中で食い違うので、
@@ -774,6 +804,63 @@ fn a_duration_beyond_the_field_width_is_carried_by_extra_frames() {
             composed,
             [frames[0].clone(), frames[0].clone(), frames[1].clone()]
         );
+    }
+}
+
+/// 表示時間を分けたフレームは、矩形を抜く廃棄方法を載せない
+///
+/// 抜いた跡が分けた先のフレームの表示に見えてしまうため、抜いた方が狭く収まる
+/// 素材でも候補から外れる。
+#[test]
+fn a_frame_split_across_durations_never_clears_its_rect() {
+    let (width, height) = (32, 24);
+    let frames = [(2, 2), (12, 10)].map(|at| sprite_rgba(width, height, at));
+    let delays = [
+        FrameDelay::new(20_000, 1).unwrap(),
+        FrameDelay::new(1, 25).unwrap(),
+    ];
+
+    let mut encoder = Encoder::new(
+        Cursor::new(Vec::new()),
+        width,
+        height,
+        frames.len() as u32,
+        config(ColorType::Rgba8, 0),
+    )
+    .unwrap();
+    for (frame, delay) in frames.iter().zip(delays) {
+        encoder.add_frame(frame, delay).unwrap();
+    }
+    let bytes = encoder.finish().unwrap().0.into_inner();
+
+    assert_eq!(
+        placements(&bytes),
+        [
+            Placed {
+                rect: (0, 0, width, height),
+                blend: false,
+                dispose: false,
+            },
+            Placed {
+                rect: (0, 0, 1, 1),
+                blend: true,
+                dispose: false,
+            },
+            Placed {
+                rect: (2, 2, 16, 14),
+                blend: false,
+                dispose: false,
+            },
+        ]
+    );
+
+    let expected = [frames[0].clone(), frames[0].clone(), frames[1].clone()];
+    assert_close(
+        &decode_with_image_webp(&bytes, width, height).frames,
+        &expected,
+    );
+    if let Some(composed) = decode_with_ffmpeg(&bytes, width, height) {
+        assert_eq!(composed, expected, "ffmpeg のデコードが入力と違う");
     }
 }
 
