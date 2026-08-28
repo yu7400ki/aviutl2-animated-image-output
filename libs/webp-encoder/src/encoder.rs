@@ -1,7 +1,7 @@
 //! 全体の駆動
 
 use crate::codec::{Codec, EncodedFrame};
-use crate::delay::Milliseconds;
+use crate::delay::{Durations, Milliseconds};
 use crate::error::Error;
 use crate::layout::{ColorType, Layout};
 use crate::riff::{Frame, Riff};
@@ -9,37 +9,105 @@ use crate::{Config, Report};
 use anim_core::{FrameDelay, Rect, has_transparency};
 use std::io::{Seek, Write};
 
+/// キャンバスを書き換えないフレームが載せる画素 (RGBA)
+const FILLER_PIXEL: [u8; 4] = [0, 0, 0, 0];
+
+/// 書き出しを待っているフレーム
+struct Pending {
+    /// キャンバス上の矩形
+    rect: Rect,
+    /// 符号化した画素
+    encoded: EncodedFrame,
+    /// 表示時間 (ms)
+    duration: u64,
+}
+
 /// ANMFを流すアニメーション
+///
+/// フレームは1つ保留し、次のフレームの投入で書き出す。
 struct Animation<W: Write + Seek> {
     riff: Riff<W>,
     /// ミリ秒への累積の丸め
     milliseconds: Milliseconds,
-    /// 遅延を下限で切り上げたか
+    /// 次のフレームを待っているフレーム
+    pending: Option<Pending>,
+    /// 表示時間を下限で切り上げたか
     delay_clamped: bool,
     /// 書いたフレームのいずれかがαを持ったか
     frames_have_alpha: bool,
+    /// 透明1画素のフレーム。欄に収まらない表示時間を載せる
+    filler: Option<EncodedFrame>,
 }
 
 impl<W: Write + Seek> Animation<W> {
-    fn write_frame(
-        &mut self,
-        rect: Rect,
-        encoded: &EncodedFrame,
-        delay: FrameDelay,
-    ) -> Result<(), Error> {
-        let (duration, clamped) = self.milliseconds.next(delay);
-        self.delay_clamped |= clamped;
-        self.frames_have_alpha |= encoded.has_alpha();
+    /// 保留中のフレームを `pending` へ入れ替え、入れ替わったフレームを書き出す
+    fn push(&mut self, pending: Pending, codec: &mut Codec) -> Result<(), Error> {
+        let previous = self.pending.replace(pending);
+        self.write(previous, codec)
+    }
 
+    /// 保留中のフレームを書き出す
+    fn flush(&mut self, codec: &mut Codec) -> Result<(), Error> {
+        let pending = self.pending.take();
+        self.write(pending, codec)
+    }
+
+    /// フレームをANMFへ載せる
+    ///
+    /// 表示時間が欄に収まらないぶんは、キャンバスを書き換えないフレームへ分ける。
+    fn write(&mut self, pending: Option<Pending>, codec: &mut Codec) -> Result<(), Error> {
+        let Some(pending) = pending else {
+            return Ok(());
+        };
+
+        let mut durations = Durations::new(pending.duration);
+        self.delay_clamped |= durations.raised;
+        self.frames_have_alpha |= pending.encoded.has_alpha();
+
+        let duration = durations.next().expect("表示時間は1つ以上に分かれる");
         self.riff.write_frame(&Frame {
-            rect,
+            rect: pending.rect,
             duration,
             blend: false,
             dispose: false,
-            alpha: encoded.alpha(),
-            image: encoded.image(),
-        })
+            alpha: pending.encoded.alpha(),
+            image: pending.encoded.image(),
+        })?;
+
+        for duration in durations {
+            let filler = filler(&mut self.filler, codec)?;
+            self.frames_have_alpha |= filler.has_alpha();
+            self.riff.write_frame(&Frame {
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
+                duration,
+                blend: true,
+                dispose: false,
+                alpha: filler.alpha(),
+                image: filler.image(),
+            })?;
+        }
+        Ok(())
     }
+}
+
+/// 透明1画素のフレームを、まだ無ければ符号化して返す
+///
+/// # Errors
+/// 符号化に失敗したとき [`Error::Encode`]。
+fn filler<'a>(
+    slot: &'a mut Option<EncodedFrame>,
+    codec: &mut Codec,
+) -> Result<&'a EncodedFrame, Error> {
+    if slot.is_none() {
+        let layout = Layout::new(1, 1, ColorType::Rgba8)?;
+        *slot = Some(codec.encode(&FILLER_PIXEL, &layout, layout.whole())?);
+    }
+    Ok(slot.as_ref().expect("符号化した結果が入っている"))
 }
 
 /// 符号化したフレームの行き先
@@ -99,8 +167,10 @@ impl<W: Write + Seek> Encoder<W> {
             Sink::Animation(Animation {
                 riff: Riff::new(writer, layout.width, layout.height, config.num_plays)?,
                 milliseconds: Milliseconds::new(),
+                pending: None,
                 delay_clamped: false,
                 frames_have_alpha: false,
+                filler: None,
             })
         };
 
@@ -118,7 +188,8 @@ impl<W: Write + Seek> Encoder<W> {
     /// フレームを1つ投入する
     ///
     /// `data` は [`Config::color_type`] の画素が左上から右下へ隙間なく
-    /// 並んでいること。
+    /// 並んでいること。アニメーションではフレームを1つ保留するため、
+    /// 書き出しは次の投入まで遅れる。
     ///
     /// # Errors
     /// バイト数が寸法と色種別から決まる長さと違うとき
@@ -148,12 +219,14 @@ impl<W: Write + Seek> Encoder<W> {
 
     /// 書き出しを終え、`writer` と結果を返す
     ///
-    /// アニメーションならRIFFのサイズとVP8XのALPHAフラグをここで書き戻す。
+    /// アニメーションなら保留中のフレームを書き出し、RIFFのサイズと
+    /// VP8XのALPHAフラグを書き戻す。
     ///
     /// # Errors
     /// 投入されたフレーム数が宣言したフレーム数に満たないとき
     /// [`Error::FrameCountMismatch`]。以前の投入が書き出しに失敗しているとき
-    /// [`Error::Poisoned`]。書き出しに失敗したとき [`Error::Io`]。
+    /// [`Error::Poisoned`]。保留中のフレームの符号化に失敗したとき
+    /// [`Error::Encode`]。書き出しに失敗したとき [`Error::Io`]。
     pub fn finish(self) -> Result<(W, Report), Error> {
         if self.poisoned {
             return Err(Error::Poisoned);
@@ -165,37 +238,60 @@ impl<W: Write + Seek> Encoder<W> {
             });
         }
 
-        let (writer, delay_clamped) = match self.sink {
+        let Encoder {
+            sink,
+            mut codec,
+            material_has_alpha,
+            ..
+        } = self;
+
+        let (writer, delay_clamped) = match sink {
             Sink::Still(mut writer) => {
                 writer.flush()?;
                 (writer, false)
             }
-            Sink::Animation(animation) => (
-                animation.riff.finish(animation.frames_have_alpha)?,
-                animation.delay_clamped,
-            ),
+            Sink::Animation(mut animation) => {
+                animation.flush(&mut codec)?;
+                let Animation {
+                    riff,
+                    delay_clamped,
+                    frames_have_alpha,
+                    ..
+                } = animation;
+                (riff.finish(frames_have_alpha)?, delay_clamped)
+            }
         };
 
         let report = Report {
             merged_frames: 0,
             delay_clamped,
-            has_alpha: self.material_has_alpha,
+            has_alpha: material_has_alpha,
         };
         Ok((writer, report))
     }
 
     /// フレームを符号化して行き先へ渡す
     fn write_frame(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
-        let rect = self.layout.whole();
-        let encoded = self.codec.encode(data, &self.layout, rect)?;
-
         if self.layout.color_type == ColorType::Rgba8 {
             self.material_has_alpha |= has_transparency(data);
         }
 
+        let rect = self.layout.whole();
+        let encoded = self.codec.encode(data, &self.layout, rect)?;
+
         match &mut self.sink {
             Sink::Still(writer) => Ok(writer.write_all(encoded.still())?),
-            Sink::Animation(animation) => animation.write_frame(rect, &encoded, delay),
+            Sink::Animation(animation) => {
+                let duration = animation.milliseconds.next(delay);
+                animation.push(
+                    Pending {
+                        rect,
+                        encoded,
+                        duration,
+                    },
+                    &mut self.codec,
+                )
+            }
         }
     }
 }

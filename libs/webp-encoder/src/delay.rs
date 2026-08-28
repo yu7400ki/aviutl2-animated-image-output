@@ -2,13 +2,13 @@
 
 use anim_core::FrameDelay;
 
-/// 遅延時間の下限 (ms)
+/// 表示時間の下限 (ms)
 ///
 /// 0の解釈はデコーダ間で揃わないため、それを避ける下限を置く。
-const MIN_DELAY: u32 = 1;
+const MIN_DURATION: u32 = 1;
 
-/// ANMFの表示時間が取りうる上限 (ms)
-const MAX_DELAY: u32 = 0x00FF_FFFF;
+/// ANMFの表示時間の欄に収まる上限 (ms)
+const MAX_DURATION: u32 = 0x00FF_FFFF;
 
 /// フレーム遅延をミリ秒へ累積で丸める
 ///
@@ -16,6 +16,9 @@ const MAX_DELAY: u32 = 0x00FF_FFFF;
 /// `round(T_{N+1} * 1000) - round(T_N * 1000)` を割り当てる。丸めは
 /// `floor(x + 1/2)` で、整数の平行移動で不変なので、総和そのものを持たずに
 /// 「総和を丸めたときの残差」だけで同じ列が出せる。
+///
+/// 連続するフレームの割り当てを足すと中間の境界が消え、両端の丸めだけが残る。
+/// フレームを併合しても、丸めの区間は書き出すフレームの境界で取られる。
 ///
 /// 残差は既約分数で持つ。絶対値は常に 1/2 未満なので、フレーム数がいくら
 /// 増えても分子・分母は分母の最小公倍数より大きくならない。
@@ -34,11 +37,8 @@ impl Milliseconds {
         }
     }
 
-    /// 次のフレームの遅延をミリ秒へ変換し、下限で切り上げたかどうかを添える
-    ///
-    /// 下限での切り上げも上限での飽和も残差へは戻さない。
-    /// 上限での飽和は素材のレートで再生できないことを表さないため数えない。
-    pub(crate) fn next(&mut self, delay: FrameDelay) -> (u32, bool) {
+    /// 次のフレームの遅延をミリ秒へ変換する
+    pub(crate) fn next(&mut self, delay: FrameDelay) -> u64 {
         let denominator = u64::from(delay.denominator());
         let common = self.align(denominator);
         let scaled = i128::from(self.numerator) * i128::from(common / self.denominator)
@@ -48,11 +48,8 @@ impl Milliseconds {
         let rounded = (scaled * 2 + common).div_euclid(common * 2);
         self.keep(scaled - rounded * common, common);
 
-        let floor = i128::from(MIN_DELAY);
-        (
-            rounded.clamp(floor, i128::from(MAX_DELAY)) as u32,
-            rounded < floor,
-        )
+        // 残差は 1/2 未満なので、非負の遅延を丸めた値が負になることはない
+        rounded as u64
     }
 
     /// 残差と `denominator` に共通の分母を取る
@@ -82,6 +79,42 @@ impl Milliseconds {
     }
 }
 
+/// 表示時間をANMFの欄に収まる列へ分ける
+///
+/// 先頭を書き出すフレームが載せ、続きはキャンバスを書き換えないフレームへ回す。
+/// 列は必ず1つ以上になる。
+pub(crate) struct Durations {
+    /// まだ載せていない表示時間 (ms)
+    remaining: u64,
+    /// 下限まで切り上げたか
+    pub(crate) raised: bool,
+}
+
+impl Durations {
+    /// `total` ミリ秒を分ける
+    ///
+    /// 下限に満たない時間は下限まで切り上げる。切り上げたぶんは累積へ戻さない。
+    pub(crate) fn new(total: u64) -> Self {
+        Durations {
+            remaining: total.max(u64::from(MIN_DURATION)),
+            raised: total < u64::from(MIN_DURATION),
+        }
+    }
+}
+
+impl Iterator for Durations {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<u32> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let duration = self.remaining.min(u64::from(MAX_DURATION));
+        self.remaining -= duration;
+        Some(duration as u32)
+    }
+}
+
 fn gcd(a: impl Into<u128>, b: impl Into<u128>) -> u128 {
     let (mut a, mut b) = (a.into(), b.into());
     while b != 0 {
@@ -95,15 +128,15 @@ mod tests {
     use super::*;
 
     /// 1フレームだけを変換する
-    fn once(numerator: u32, denominator: u32) -> (u32, bool) {
+    fn once(numerator: u32, denominator: u32) -> u64 {
         Milliseconds::new().next(FrameDelay::new(numerator, denominator).unwrap())
     }
 
     /// 同じ遅延を `count` フレーム分変換する
-    fn repeated(numerator: u32, denominator: u32, count: usize) -> Vec<u32> {
+    fn repeated(numerator: u32, denominator: u32, count: usize) -> Vec<u64> {
         let delay = FrameDelay::new(numerator, denominator).unwrap();
         let mut milliseconds = Milliseconds::new();
-        (0..count).map(|_| milliseconds.next(delay).0).collect()
+        (0..count).map(|_| milliseconds.next(delay)).collect()
     }
 
     #[test]
@@ -118,26 +151,20 @@ mod tests {
         ] {
             assert_eq!(
                 once(numerator, denominator),
-                (expected, false),
+                expected,
                 "{numerator}/{denominator}"
             );
         }
     }
 
-    /// 0へ丸まる遅延だけが下限まで切り上げられる
+    /// ミリ秒に満たない遅延は0のまま返り、下限は分ける側が置く
     #[test]
-    fn a_delay_below_the_lower_bound_is_raised_and_reported() {
+    fn a_delay_below_a_millisecond_rounds_to_zero() {
         for (numerator, denominator) in [(0, 30), (1, 10000), (1, 3000)] {
-            assert_eq!(
-                once(numerator, denominator),
-                (MIN_DELAY, true),
-                "{numerator}/{denominator}"
-            );
+            assert_eq!(once(numerator, denominator), 0, "{numerator}/{denominator}");
         }
-
-        // 下限そのものへ丸まる遅延は切り上げていない
-        assert_eq!(once(1, 1000), (MIN_DELAY, false));
-        assert_eq!(once(1, 2000), (MIN_DELAY, false));
+        assert_eq!(once(1, 1000), 1);
+        assert_eq!(once(1, 2000), 1);
     }
 
     /// 30fps は3フレームで100msになる
@@ -157,8 +184,18 @@ mod tests {
             repeated(1001, 30000, 9),
             [33, 34, 33, 33, 34, 33, 34, 33, 33]
         );
-        assert_eq!(repeated(1001, 30000, 10).iter().sum::<u32>(), 334);
-        assert_eq!(repeated(1, 30, 10).iter().sum::<u32>(), 333);
+        assert_eq!(repeated(1001, 30000, 10).iter().sum::<u64>(), 334);
+        assert_eq!(repeated(1, 30, 10).iter().sum::<u64>(), 333);
+    }
+
+    /// 連続するフレームの割り当ての和は、区間をまとめて丸めたものと一致する
+    #[test]
+    fn a_run_of_frames_rounds_at_its_ends() {
+        let delay = FrameDelay::new(1, 30).unwrap();
+        let mut milliseconds = Milliseconds::new();
+        let run: u64 = (0..7).map(|_| milliseconds.next(delay)).sum();
+        assert_eq!(run, once(7, 30));
+        assert_eq!(run, 233);
     }
 
     /// 累積の誤差はフレーム数に依らず1/2msを超えない
@@ -179,12 +216,7 @@ mod tests {
             let mut milliseconds = Milliseconds::new();
             let mut total: i128 = 0;
             for frames in 1..=2000i128 {
-                let (millisecond, clamped) = milliseconds.next(delay);
-                assert!(
-                    !clamped,
-                    "{numerator}/{denominator} が下限で切り上がっている"
-                );
-                total += i128::from(millisecond);
+                total += i128::from(milliseconds.next(delay));
                 // |total - 1000 * frames * numerator / denominator| <= 1/2
                 let ideal = 1000 * frames * i128::from(numerator);
                 let denominator = i128::from(denominator);
@@ -194,32 +226,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// 切り上げたぶんは累積へ戻さない
-    #[test]
-    fn the_raise_to_the_lower_bound_is_not_fed_back() {
-        let mut milliseconds = Milliseconds::new();
-        let delays = [(1, 10000), (1, 10), (1, 10)].map(|(numerator, denominator)| {
-            milliseconds
-                .next(FrameDelay::new(numerator, denominator).unwrap())
-                .0
-        });
-        assert_eq!(delays, [MIN_DELAY, 100, 100]);
-    }
-
-    /// 上限を超える遅延は飽和させるが、切り上げとしては数えず、累積へも戻さない
-    #[test]
-    fn a_long_delay_saturates_at_the_field_width() {
-        let mut milliseconds = Milliseconds::new();
-        assert_eq!(
-            milliseconds.next(FrameDelay::new(100_000, 1).unwrap()),
-            (MAX_DELAY, false)
-        );
-        assert_eq!(
-            milliseconds.next(FrameDelay::new(1, 10).unwrap()),
-            (100, false)
-        );
     }
 
     /// 分母の最小公倍数が u64 に収まる限り、残差はそのまま持ち越す
@@ -244,5 +250,54 @@ mod tests {
         assert_eq!(milliseconds.align(7), 7);
         // 1/2 をわずかに下回る残差は 3/7 が最も近い
         assert_eq!((milliseconds.numerator, milliseconds.denominator), (3, 7));
+    }
+
+    /// 欄に収まる表示時間は1つのまま
+    #[test]
+    fn a_duration_within_the_field_width_stays_on_one_frame() {
+        for total in [1, 40, u64::from(MAX_DURATION)] {
+            let durations = Durations::new(total);
+            assert!(!durations.raised, "{total}");
+            assert_eq!(durations.collect::<Vec<_>>(), [total as u32], "{total}");
+        }
+    }
+
+    /// 欄に収まらない表示時間は、収まる列へ分けて総和を保つ
+    #[test]
+    fn a_duration_beyond_the_field_width_is_split_without_losing_time() {
+        for total in [
+            u64::from(MAX_DURATION) + 1,
+            u64::from(MAX_DURATION) * 2,
+            u64::from(MAX_DURATION) * 3 + 5,
+        ] {
+            let split: Vec<u32> = Durations::new(total).collect();
+            assert!(split.len() > 1, "{total}");
+            assert!(split.iter().all(|&d| d <= MAX_DURATION), "{total}");
+            assert_eq!(split.iter().map(|&d| u64::from(d)).sum::<u64>(), total);
+        }
+        assert_eq!(
+            Durations::new(u64::from(MAX_DURATION) * 2 + 5).collect::<Vec<_>>(),
+            [MAX_DURATION, MAX_DURATION, 5]
+        );
+    }
+
+    /// 0へ丸まった表示時間だけが下限まで切り上げられる
+    #[test]
+    fn a_duration_below_the_lower_bound_is_raised_and_reported() {
+        let durations = Durations::new(0);
+        assert!(durations.raised);
+        assert_eq!(durations.collect::<Vec<_>>(), [MIN_DURATION]);
+
+        assert!(!Durations::new(u64::from(MIN_DURATION)).raised);
+    }
+
+    /// 下限までの切り上げは累積の外で起き、残差へ戻らない
+    #[test]
+    fn the_raise_to_the_lower_bound_is_not_fed_back() {
+        let mut milliseconds = Milliseconds::new();
+        let increments = [(1, 10000), (1, 10), (1, 10)].map(|(numerator, denominator)| {
+            milliseconds.next(FrameDelay::new(numerator, denominator).unwrap())
+        });
+        assert_eq!(increments, [0, 100, 100]);
     }
 }

@@ -373,6 +373,52 @@ fn a_delay_below_a_millisecond_is_raised_and_reported() {
     );
 }
 
+/// ANMFの表示時間の欄に収まる上限 (ms)
+const MAX_DURATION: u32 = 0x00FF_FFFF;
+
+/// 欄に収まらない表示時間は、キャンバスを書き換えないフレームへ分けて載せる
+///
+/// 分けたフレームは透明1画素のblend有りなので、合成結果は分ける前と変わらない。
+#[test]
+fn a_duration_beyond_the_field_width_is_carried_by_extra_frames() {
+    let (width, height) = (16, 16);
+    let frames = rgba_frames(width, height, 2);
+    let delays = [
+        FrameDelay::new(20_000, 1).unwrap(),
+        FrameDelay::new(1, 25).unwrap(),
+    ];
+
+    let mut encoder = Encoder::new(
+        Cursor::new(Vec::new()),
+        width,
+        height,
+        frames.len() as u32,
+        config(ColorType::Rgba8, 0),
+    )
+    .unwrap();
+    for (frame, delay) in frames.iter().zip(delays) {
+        encoder.add_frame(frame, delay).unwrap();
+    }
+    let bytes = encoder.finish().unwrap().0.into_inner();
+
+    let decoded = decode_with_image_webp(&bytes, width, height);
+    assert_eq!(
+        decoded.durations,
+        [MAX_DURATION, 20_000_000 - MAX_DURATION, 40]
+    );
+    assert_eq!(
+        decoded.durations.iter().map(|&d| u64::from(d)).sum::<u64>(),
+        20_000_040
+    );
+
+    if let Some(composed) = decode_with_ffmpeg(&bytes, width, height) {
+        assert_eq!(
+            composed,
+            [frames[0].clone(), frames[0].clone(), frames[1].clone()]
+        );
+    }
+}
+
 /// 再生回数はそのまま書き、u16を超えるぶんは飽和させる
 #[test]
 fn the_number_of_plays_survives_the_round_trip() {
@@ -517,7 +563,8 @@ const HEAD_BYTES: usize = 44;
 /// 閉じていないファイルはRIFFのサイズが0のまま残り、厳密な読み手が弾く
 ///
 /// 後埋めが書き戻すのはサイズ欄の4バイトとVP8Xのフラグの1バイトだけで、
-/// 残りはANMFを流したときのまま変わらない。
+/// 流したANMFはそのまま変わらない。保留中のフレームは書かれないため、
+/// 閉じたファイルより短く終わる。
 #[test]
 fn a_file_that_was_never_finished_keeps_a_zero_riff_size() {
     let (width, height) = (16, 16);
@@ -539,7 +586,8 @@ fn a_file_that_was_never_finished_keeps_a_zero_riff_size() {
     let unfinished = written.borrow().clone();
 
     let (finished, _) = encode(width, height, config(ColorType::Rgba8, 0), &frames).unwrap();
-    assert_eq!(unfinished.len(), finished.len());
+    assert!(unfinished.len() > HEAD_BYTES);
+    assert!(unfinished.len() < finished.len());
     assert_eq!(u32::from_le_bytes(unfinished[4..8].try_into().unwrap()), 0);
     assert_eq!(
         u32::from_le_bytes(finished[4..8].try_into().unwrap()) as usize,
@@ -553,7 +601,7 @@ fn a_file_that_was_never_finished_keeps_a_zero_riff_size() {
     );
     assert_eq!(
         unfinished[VP8X_FLAGS_OFFSET + 1..],
-        finished[VP8X_FLAGS_OFFSET + 1..]
+        finished[VP8X_FLAGS_OFFSET + 1..unfinished.len()]
     );
 
     assert!(
