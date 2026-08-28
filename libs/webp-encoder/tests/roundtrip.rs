@@ -420,7 +420,6 @@ fn every_frame_of_a_lossless_animation_composes_back_to_the_input() {
         Report {
             merged_frames: 0,
             delay_clamped: false,
-            has_alpha: true,
         }
     );
 }
@@ -430,9 +429,8 @@ fn an_opaque_rgb_animation_composes_back_to_the_input() {
     let (width, height) = (48, 32);
     let frames = rgb_frames(width, height, 4);
 
-    let (bytes, report) = round_trip(width, height, config(ColorType::Rgb8, 0), &frames);
+    let (bytes, _) = round_trip(width, height, config(ColorType::Rgb8, 0), &frames);
 
-    assert!(!report.has_alpha);
     assert_eq!(bytes[VP8X_FLAGS_OFFSET], ANIMATION);
 }
 
@@ -450,8 +448,7 @@ fn the_alpha_flag_is_filled_in_from_the_frames() {
     let (width, height) = (16, 16);
 
     let transparent = rgba_frames(width, height, 3);
-    let (bytes, report) = encode(width, height, config(ColorType::Rgba8, 0), &transparent).unwrap();
-    assert!(report.has_alpha);
+    let (bytes, _) = encode(width, height, config(ColorType::Rgba8, 0), &transparent).unwrap();
     assert_eq!(bytes[VP8X_FLAGS_OFFSET], ANIMATION | ALPHA);
 
     let opaque: Vec<Vec<u8>> = transparent
@@ -463,8 +460,7 @@ fn the_alpha_flag_is_filled_in_from_the_frames() {
                 .collect()
         })
         .collect();
-    let (bytes, report) = encode(width, height, config(ColorType::Rgba8, 0), &opaque).unwrap();
-    assert!(!report.has_alpha);
+    let (bytes, _) = encode(width, height, config(ColorType::Rgba8, 0), &opaque).unwrap();
     assert_eq!(bytes[VP8X_FLAGS_OFFSET], ANIMATION);
 }
 
@@ -732,17 +728,22 @@ fn a_transparent_window_over_an_opaque_background_keeps_the_canvas() {
 
 /// 一致した画素の置き換えは、透過画素の無い素材にもαを持ち込む
 ///
-/// 素材の透過の有無 (`Report::has_alpha`) とVP8XのALPHAフラグは別物になる。
+/// 素材が持つ透過とVP8XのALPHAフラグは別物になる。
 #[test]
 fn substituting_transparency_raises_the_alpha_flag_of_an_opaque_material() {
     let (width, height) = (32, 24);
     let frames: Vec<Vec<u8>> = [(2, 2), (10, 6), (18, 12)]
         .map(|at| patched_rgba(width, height, at))
         .to_vec();
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame.chunks_exact(4).all(|pixel| pixel[3] == 255)),
+        "素材に透過画素がある"
+    );
 
-    let (bytes, report) = round_trip(width, height, config(ColorType::Rgba8, 0), &frames);
+    let (bytes, _) = round_trip(width, height, config(ColorType::Rgba8, 0), &frames);
 
-    assert!(!report.has_alpha, "素材に透過画素がある");
     assert_eq!(bytes[VP8X_FLAGS_OFFSET], ANIMATION | ALPHA);
 
     let placed = placements(&bytes);

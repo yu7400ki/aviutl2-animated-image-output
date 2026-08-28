@@ -112,7 +112,6 @@ fn a_lossless_rgba_still_decodes_back_to_the_input() {
         Report {
             merged_frames: 0,
             delay_clamped: false,
-            has_alpha: true,
         }
     );
 }
@@ -122,10 +121,9 @@ fn a_lossless_rgb_still_decodes_back_to_the_input() {
     let (width, height) = (48, 32);
     let rgb = gradient_rgb(width, height);
 
-    let (bytes, report) = encode(width, height, &rgb, config(ColorType::Rgb8, true)).unwrap();
+    let (bytes, _) = encode(width, height, &rgb, config(ColorType::Rgb8, true)).unwrap();
 
     assert_eq!(decode(&bytes, width, height), opaque_rgba(&rgb));
-    assert!(!report.has_alpha);
 }
 
 /// 完全透過の画素は正規化で `0x00000000` になり、半透明はそのまま戻る

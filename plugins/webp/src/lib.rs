@@ -270,7 +270,6 @@ mod tests {
         Report {
             merged_frames: 0,
             delay_clamped: false,
-            has_alpha: false,
         }
     }
 
@@ -359,17 +358,6 @@ mod tests {
         assert!(report_messages(&clean_report(), NUM_FRAMES).is_empty());
     }
 
-    /// 素材に透過があること自体は変化ではないので報せない
-    #[test]
-    fn the_transparency_of_the_material_is_not_reported() {
-        let report = Report {
-            has_alpha: true,
-            ..clean_report()
-        };
-
-        assert!(report_messages(&report, NUM_FRAMES).is_empty());
-    }
-
     /// 併合したフレーム数は、全体のフレーム数を添えた1行になる
     #[test]
     fn merged_frames_are_reported_with_the_whole_count() {
@@ -393,7 +381,6 @@ mod tests {
         let report = Report {
             merged_frames: 3,
             delay_clamped: true,
-            ..clean_report()
         };
 
         let messages = report_messages(&report, NUM_FRAMES);

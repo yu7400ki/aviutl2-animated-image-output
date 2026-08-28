@@ -8,7 +8,7 @@ use crate::layout::{ColorType, Layout};
 use crate::pipeline::Pipeline;
 use crate::riff::{Frame, Riff};
 use crate::{Config, Report};
-use anim_core::{FrameDelay, Rect, has_transparency};
+use anim_core::{FrameDelay, Rect};
 use std::collections::VecDeque;
 use std::io::{Seek, Write};
 use std::num::NonZeroUsize;
@@ -198,8 +198,6 @@ pub struct Encoder<W: Write + Seek> {
     frames_accepted: u32,
     /// 書き出しに失敗し、チャンクの列が中断しているか
     poisoned: bool,
-    /// 投入したフレームのいずれかに透過画素があったか
-    material_has_alpha: bool,
 }
 
 impl<W: Write + Seek> Encoder<W> {
@@ -274,7 +272,6 @@ impl<W: Write + Seek> Encoder<W> {
             num_frames,
             frames_accepted: 0,
             poisoned: false,
-            material_has_alpha: false,
         })
     }
 
@@ -335,10 +332,7 @@ impl<W: Write + Seek> Encoder<W> {
         }
 
         let Encoder {
-            sink,
-            mut pipeline,
-            material_has_alpha,
-            ..
+            sink, mut pipeline, ..
         } = self;
 
         let (writer, delay_clamped, merged_frames) = match sink {
@@ -366,7 +360,6 @@ impl<W: Write + Seek> Encoder<W> {
         let report = Report {
             merged_frames,
             delay_clamped,
-            has_alpha: material_has_alpha,
         };
         Ok((writer, report))
     }
@@ -375,9 +368,6 @@ impl<W: Write + Seek> Encoder<W> {
     ///
     /// 符号化に渡す画素は、RGBAなら正規化した写し、RGBなら入力そのもの。
     fn write_frame(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
-        if self.layout.color_type == ColorType::Rgba8 {
-            self.material_has_alpha |= has_transparency(data);
-        }
         // 写した画素を読むのは、差分を取るときと、RGBAを符号化へ渡すとき
         if self.layout.color_type == ColorType::Rgba8 || !matches!(self.sink, Sink::Still(_)) {
             self.canvas.stage(data, self.layout.color_type);
@@ -432,6 +422,7 @@ impl<W: Write + Seek> Encoder<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anim_core::has_transparency;
     use std::io::Cursor;
 
     /// 動く四角の一辺の長さ
@@ -578,24 +569,20 @@ mod tests {
     fn the_compared_material_exercises_the_decisions() {
         let (width, height) = (160, 120);
 
-        let (_, skewed) = encode(
-            width,
-            height,
-            &skewed_frames(width, height, 24),
-            1,
-            config(true),
+        let skewed_material = skewed_frames(width, height, 24);
+        assert!(
+            !skewed_material.iter().any(|frame| has_transparency(frame)),
+            "不透明な素材のはずが透過を持っている"
         );
+        let (_, skewed) = encode(width, height, &skewed_material, 1, config(true));
         assert!(skewed.merged_frames > 0, "併合が現れていない");
-        assert!(!skewed.has_alpha, "不透明な素材のはずが透過を持っている");
 
-        let (_, sprite) = encode(
-            width,
-            height,
-            &sprite_frames(width, height, 24),
-            1,
-            config(true),
+        let sprite_material = sprite_frames(width, height, 24);
+        assert!(
+            sprite_material.iter().any(|frame| has_transparency(frame)),
+            "透過の面が透過を持っていない"
         );
+        let (_, sprite) = encode(width, height, &sprite_material, 1, config(true));
         assert_eq!(sprite.merged_frames, 0, "動く四角が併合されている");
-        assert!(sprite.has_alpha, "透過の面が透過を持っていない");
     }
 }

@@ -40,6 +40,4 @@ pub struct Report {
     pub merged_frames: u32,
     /// 遅延を下限で切り上げたか
     pub delay_clamped: bool,
-    /// 投入したフレームのいずれかに透過画素があったか
-    pub has_alpha: bool,
 }
