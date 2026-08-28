@@ -423,3 +423,148 @@ impl<W: Write + Seek> Encoder<W> {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// 動く四角の一辺の長さ
+    const SQUARE: u32 = 8;
+
+    /// 四角を塗る色
+    const SQUARE_COLOR: [u8; 4] = [0x20, 0x40, 0x60, 0xFF];
+
+    /// 決定的な擬似乱数列
+    fn noise(len: usize, seed: u32) -> Vec<u8> {
+        let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                (state >> 16) as u8
+            })
+            .collect()
+    }
+
+    /// 位置が重なりながら動く四角の左上
+    fn at(index: usize, width: u32, height: u32) -> (u32, u32) {
+        (
+            (index as u32 * 3) % (width - SQUARE),
+            (index as u32 * 2) % (height - SQUARE),
+        )
+    }
+
+    /// `frame` の `at` に四角を塗る
+    fn draw(frame: &mut [u8], width: u32, at: (u32, u32)) {
+        for y in at.1..at.1 + SQUARE {
+            let head = (y * width + at.0) as usize * 4;
+            for pixel in frame[head..head + SQUARE as usize * 4].chunks_exact_mut(4) {
+                pixel.copy_from_slice(&SQUARE_COLOR);
+            }
+        }
+    }
+
+    /// 先頭が重く、以降が軽いRGBAのフレーム列
+    ///
+    /// 先頭は全面の雑音で符号化に時間がかかり、以降は四角が動くだけなので
+    /// 矩形が小さく速い。先頭の符号化が続く間に後続が投入されるため、結果が
+    /// 届く順は投入の順から外れる。4フレームに1枚は前と同一にして、表示時間の
+    /// 併合も混ぜる。不透明な面なので透過置換の経路も通る。
+    fn skewed_frames(width: u32, height: u32, count: usize) -> Vec<Vec<u8>> {
+        let mut base = noise((width * height * 4) as usize, 0x5EED);
+        for pixel in base.chunks_exact_mut(4) {
+            pixel[3] = 0xFF;
+        }
+
+        (0..count)
+            .map(|index| {
+                let mut frame = base.clone();
+                if index > 0 {
+                    draw(&mut frame, width, at(index - index % 4, width, height));
+                }
+                frame
+            })
+            .collect()
+    }
+
+    /// 透過の面を不透明な四角が1つ動くRGBAのフレーム列
+    ///
+    /// 前のフレームの矩形を抜いた方が矩形が狭くなるので、廃棄方法の両候補が
+    /// 現れる。
+    fn sprite_frames(width: u32, height: u32, count: usize) -> Vec<Vec<u8>> {
+        (0..count)
+            .map(|index| {
+                let mut frame = vec![0u8; (width * height * 4) as usize];
+                draw(&mut frame, width, at(index, width, height));
+                frame
+            })
+            .collect()
+    }
+
+    fn config() -> Config {
+        Config {
+            color_type: ColorType::Rgba8,
+            lossless: true,
+            quality: 75.0,
+            method: 4,
+            num_plays: 0,
+        }
+    }
+
+    /// `workers` 個のワーカーでフレーム列を符号化する
+    fn encode(width: u32, height: u32, frames: &[Vec<u8>], workers: usize) -> (Vec<u8>, Report) {
+        let mut encoder = Encoder::with_workers(
+            Cursor::new(Vec::new()),
+            width,
+            height,
+            frames.len() as u32,
+            config(),
+            NonZeroUsize::new(workers).unwrap(),
+        )
+        .unwrap();
+        for (index, frame) in frames.iter().enumerate() {
+            let delay = FrameDelay::new(index as u32 * 7 + 20, 1000).unwrap();
+            encoder.add_frame(frame, delay).unwrap();
+        }
+        let (writer, report) = encoder.finish().unwrap();
+        (writer.into_inner(), report)
+    }
+
+    /// 並列に符号化しても、逐次に符号化した出力とバイト一致する
+    ///
+    /// 決定は入力の純関数で、書き出しは投入順に揃うので、ワーカー数は出力に
+    /// 現れない。結果が届く順に書けば、重い先頭を持つ素材でここが割れる。
+    #[test]
+    fn the_output_does_not_depend_on_the_number_of_workers() {
+        let (width, height) = (160, 120);
+        for frames in [
+            skewed_frames(width, height, 24),
+            sprite_frames(width, height, 24),
+        ] {
+            let (expected, report) = encode(width, height, &frames, 1);
+            for workers in [2, 3, 4, 8] {
+                let (bytes, parallel) = encode(width, height, &frames, workers);
+                assert_eq!(bytes, expected, "ワーカー{workers}個の出力");
+                assert_eq!(parallel, report, "ワーカー{workers}個の結果");
+            }
+        }
+    }
+
+    /// 素材が決定の経路を踏んでいることを、逐次の結果で確かめる
+    ///
+    /// 併合も透過も現れない素材では、ワーカー数の比較が薄いところしか通らない。
+    #[test]
+    fn the_compared_material_exercises_the_decisions() {
+        let (width, height) = (160, 120);
+
+        let (_, skewed) = encode(width, height, &skewed_frames(width, height, 24), 1);
+        assert!(skewed.merged_frames > 0, "併合が現れていない");
+        assert!(!skewed.has_alpha, "不透明な素材のはずが透過を持っている");
+
+        let (_, sprite) = encode(width, height, &sprite_frames(width, height, 24), 1);
+        assert_eq!(sprite.merged_frames, 0, "動く四角が併合されている");
+        assert!(sprite.has_alpha, "透過の面が透過を持っていない");
+    }
+}
