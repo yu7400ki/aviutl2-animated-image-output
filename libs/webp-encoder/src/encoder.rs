@@ -508,10 +508,10 @@ mod tests {
             .collect()
     }
 
-    fn config() -> Config {
+    fn config(lossless: bool) -> Config {
         Config {
             color_type: ColorType::Rgba8,
-            lossless: true,
+            lossless,
             quality: 75.0,
             method: 4,
             num_plays: 0,
@@ -519,13 +519,19 @@ mod tests {
     }
 
     /// `workers` 個のワーカーでフレーム列を符号化する
-    fn encode(width: u32, height: u32, frames: &[Vec<u8>], workers: usize) -> (Vec<u8>, Report) {
+    fn encode(
+        width: u32,
+        height: u32,
+        frames: &[Vec<u8>],
+        workers: usize,
+        config: Config,
+    ) -> (Vec<u8>, Report) {
         let mut encoder = Encoder::with_workers(
             Cursor::new(Vec::new()),
             width,
             height,
             frames.len() as u32,
-            config(),
+            config,
             NonZeroUsize::new(workers).unwrap(),
         )
         .unwrap();
@@ -541,18 +547,24 @@ mod tests {
     ///
     /// 決定は入力の純関数で、書き出しは投入順に揃うので、ワーカー数は出力に
     /// 現れない。結果が届く順に書けば、重い先頭を持つ素材でここが割れる。
+    ///
+    /// 非可逆も回す。libwebp が最初の符号化で据える関数表はこちらの方が広く、
+    /// プラグインの既定でもある。
     #[test]
     fn the_output_does_not_depend_on_the_number_of_workers() {
         let (width, height) = (160, 120);
-        for frames in [
-            skewed_frames(width, height, 24),
-            sprite_frames(width, height, 24),
-        ] {
-            let (expected, report) = encode(width, height, &frames, 1);
-            for workers in [2, 3, 4, 8] {
-                let (bytes, parallel) = encode(width, height, &frames, workers);
-                assert_eq!(bytes, expected, "ワーカー{workers}個の出力");
-                assert_eq!(parallel, report, "ワーカー{workers}個の結果");
+        for lossless in [true, false] {
+            let config = config(lossless);
+            for frames in [
+                skewed_frames(width, height, 24),
+                sprite_frames(width, height, 24),
+            ] {
+                let (expected, report) = encode(width, height, &frames, 1, config);
+                for workers in [2, 3, 4, 8] {
+                    let (bytes, parallel) = encode(width, height, &frames, workers, config);
+                    assert_eq!(bytes, expected, "可逆{lossless} ワーカー{workers}個の出力");
+                    assert_eq!(parallel, report, "可逆{lossless} ワーカー{workers}個の結果");
+                }
             }
         }
     }
@@ -564,11 +576,23 @@ mod tests {
     fn the_compared_material_exercises_the_decisions() {
         let (width, height) = (160, 120);
 
-        let (_, skewed) = encode(width, height, &skewed_frames(width, height, 24), 1);
+        let (_, skewed) = encode(
+            width,
+            height,
+            &skewed_frames(width, height, 24),
+            1,
+            config(true),
+        );
         assert!(skewed.merged_frames > 0, "併合が現れていない");
         assert!(!skewed.has_alpha, "不透明な素材のはずが透過を持っている");
 
-        let (_, sprite) = encode(width, height, &sprite_frames(width, height, 24), 1);
+        let (_, sprite) = encode(
+            width,
+            height,
+            &sprite_frames(width, height, 24),
+            1,
+            config(true),
+        );
         assert_eq!(sprite.merged_frames, 0, "動く四角が併合されている");
         assert!(sprite.has_alpha, "透過の面が透過を持っていない");
     }
