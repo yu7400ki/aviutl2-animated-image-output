@@ -2,9 +2,9 @@
 //! 一致することを確認する
 //!
 //! バイト一致は ffmpeg が担保する。`image-webp` は独立な2つ目のデコーダで、
-//! 表示時間とループ回数の読み出しも受け持つ。blend有りのフレームの合成だけは
-//! 近似なので、そちらは許容差で突き合わせる。ffmpeg が見つからない環境では、
-//! ffmpeg のデコードを飛ばして `image-webp` の結果で判定する。
+//! 表示時間とループ回数の読み出しも受け持つ。重ねる合成だけは 0.2.4 が仕様から
+//! 外れているため、`assert_close` がその逸脱の形へ絞って逃がす。ffmpeg が
+//! 見つからない環境では、そちらのデコードを飛ばして `image-webp` の結果で判定する。
 
 use image_webp::{LoopCount, WebPDecoder};
 use std::cell::RefCell;
@@ -259,8 +259,21 @@ fn placements(bytes: &[u8]) -> Vec<Placed> {
 
 /// `image-webp` の合成が入力から離れていないことを確かめる
 ///
-/// blend有りのフレームの合成が近似で、成分が1だけ低く出ることがある。
-fn assert_close(decoded: &[Vec<u8>], expected: &[Vec<u8>]) {
+/// `image-webp` 0.2.4 は重ねる合成が仕様から外れており、完全不透明な画素の
+/// RGBを1だけ下げて返す。逃がすのはその1方向だけで、次の3つは厳密一致を要求する。
+///
+/// - αのバイト。逸脱はRGBの3成分にしか現れない
+/// - 重ねるフレームが1つも現れていない間のフレーム。上書きの合成は仕様どおり
+/// - 0へ下がる余地の無い値。`expected` を下回る側だけを許す
+fn assert_close(decoded: &[Vec<u8>], expected: &[Vec<u8>], bytes: &[u8]) {
+    /// RGBAのαが並ぶ位置
+    const ALPHA: usize = 3;
+
+    let blended = placements(bytes)
+        .iter()
+        .position(|frame| frame.blend)
+        .unwrap_or(usize::MAX);
+
     assert_eq!(
         decoded.len(),
         expected.len(),
@@ -269,9 +282,10 @@ fn assert_close(decoded: &[Vec<u8>], expected: &[Vec<u8>]) {
     for (index, (decoded, expected)) in decoded.iter().zip(expected).enumerate() {
         assert_eq!(decoded.len(), expected.len(), "フレーム{index}の長さ");
         for (at, (decoded, expected)) in decoded.iter().zip(expected).enumerate() {
+            let slack = i32::from(index >= blended && at % 4 != ALPHA);
             let deviation = i32::from(*expected) - i32::from(*decoded);
             assert!(
-                (0..=1).contains(&deviation),
+                (0..=slack).contains(&deviation),
                 "フレーム{index}のバイト{at}が {expected} から {decoded} へずれた"
             );
         }
@@ -374,7 +388,7 @@ fn round_trip(width: u32, height: u32, config: Config, frames: &[Vec<u8>]) -> (V
     }
 
     let decoded = decode_with_image_webp(&bytes, width, height);
-    assert_close(&decoded.frames, &expected);
+    assert_close(&decoded.frames, &expected, &bytes);
 
     let placed = placements(&bytes);
     let first = placed.first().expect("フレームが1つ以上書かれている");
@@ -550,7 +564,7 @@ fn a_frame_without_a_difference_extends_the_previous_one() {
         decoded.frames.len(),
         frames.len() - report.merged_frames as usize
     );
-    assert_close(&decoded.frames, &written);
+    assert_close(&decoded.frames, &written, &bytes);
 
     // 併合したフレームの遅延は、残したフレームの表示時間へ積まれる
     assert_eq!(decoded.durations, [20 + 27, 34 + 41 + 48, 55]);
@@ -593,7 +607,7 @@ fn a_frame_differing_only_under_transparent_pixels_is_merged() {
 
     assert_eq!(report.merged_frames, 1);
     let decoded = decode_with_image_webp(&bytes, width, height);
-    assert_close(&decoded.frames, &[base, frames[2].clone()]);
+    assert_close(&decoded.frames, &[base, frames[2].clone()], &bytes);
     assert_eq!(decoded.durations, [20 + 27, 34]);
 }
 
@@ -614,7 +628,7 @@ fn the_second_loop_composes_the_same_as_the_first() {
 
     let decoded = decode_with_image_webp(&looped, width, height);
     let (first, second) = decoded.frames.split_at(frames.len());
-    assert_close(first, &frames);
+    assert_close(first, &frames, &looped);
     assert_eq!(second, first, "2周目が1周目と食い違う");
 
     if let Some(composed) = decode_with_ffmpeg(&looped, width, height) {
@@ -644,7 +658,7 @@ fn a_loop_that_clears_rects_composes_the_same_on_the_second_pass() {
 
     let decoded = decode_with_image_webp(&looped, width, height);
     let (first, second) = decoded.frames.split_at(frames.len());
-    assert_close(first, &frames);
+    assert_close(first, &frames, &looped);
     assert_eq!(second, first, "2周目が1周目と食い違う");
 
     if let Some(composed) = decode_with_ffmpeg(&looped, width, height) {
@@ -858,9 +872,48 @@ fn a_frame_split_across_durations_never_clears_its_rect() {
     assert_close(
         &decode_with_image_webp(&bytes, width, height).frames,
         &expected,
+        &bytes,
     );
     if let Some(composed) = decode_with_ffmpeg(&bytes, width, height) {
         assert_eq!(composed, expected, "ffmpeg のデコードが入力と違う");
+    }
+}
+
+/// 欄にちょうど収まる表示時間のフレームは、まだ矩形を抜ける
+///
+/// 分けずに済む上限がそのまま境目になる。
+#[test]
+fn a_frame_filling_the_duration_field_can_still_clear_its_rect() {
+    let (width, height) = (32, 24);
+    let frames = [(2, 2), (12, 10)].map(|at| sprite_rgba(width, height, at));
+    let delays = [
+        FrameDelay::new(MAX_DURATION, 1000).unwrap(),
+        FrameDelay::new(1, 25).unwrap(),
+    ];
+
+    let mut encoder = Encoder::new(
+        Cursor::new(Vec::new()),
+        width,
+        height,
+        frames.len() as u32,
+        config(ColorType::Rgba8, 0),
+    )
+    .unwrap();
+    for (frame, delay) in frames.iter().zip(delays) {
+        encoder.add_frame(frame, delay).unwrap();
+    }
+    let bytes = encoder.finish().unwrap().0.into_inner();
+
+    let placed = placements(&bytes);
+    assert_eq!(placed.len(), 2, "表示時間が分かれている: {placed:?}");
+    assert!(placed[0].dispose, "上限ちょうどで抜けなくなっている");
+    assert_eq!(placed[1].rect, (12, 10, SPRITE, SPRITE));
+    assert_eq!(
+        decode_with_image_webp(&bytes, width, height).durations,
+        [MAX_DURATION, 40]
+    );
+    if let Some(composed) = decode_with_ffmpeg(&bytes, width, height) {
+        assert_eq!(composed, frames, "ffmpeg のデコードが入力と違う");
     }
 }
 
