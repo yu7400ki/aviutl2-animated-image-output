@@ -284,6 +284,13 @@ mod tests {
 
         let colors = counted(&rgba(&[FIRST, SECOND]), 4);
         assert_eq!(colors.count(), 2, "2色目を数えていない");
+        assert_eq!(colors.table.keys[TABLE_MASK], pack::<4>(&FIRST));
+        assert_eq!(
+            colors.table.keys[0],
+            pack::<4>(&SECOND),
+            "2色目が先頭へ回り込んでいない"
+        );
+        assert_ne!(colors.table.values[0], 0, "回り込んだ位置が空のまま");
         assert_eq!(colors.index_of(pack::<4>(&FIRST)), Some(0));
         assert_eq!(colors.index_of(pack::<4>(&SECOND)), Some(1));
     }
