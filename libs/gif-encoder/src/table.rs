@@ -141,11 +141,12 @@ impl Palette {
 
     /// 渡した色だけを載せた、そのフレーム専用の閉じたテーブル
     ///
-    /// 非透過色は [`QUANTIZED_COLORS`] までに抑えるので、透過添字が必ず取れる。
-    /// このテーブルは画像記述子のローカルカラーテーブルとして書き出される。
-    pub(crate) fn from_colors(colors: &[u32]) -> Self {
+    /// 添字は `colors` の並びのまま振る。非透過色は [`QUANTIZED_COLORS`] までに
+    /// 抑えるので、透過添字が必ず取れる。このテーブルは画像記述子の
+    /// ローカルカラーテーブルとして書き出される。
+    pub(crate) fn from_colors(colors: impl IntoIterator<Item = u32>) -> Self {
         let mut palette = Palette::new();
-        for &color in colors {
+        for color in colors {
             if palette.entries.len() == QUANTIZED_COLORS {
                 break;
             }
@@ -198,7 +199,7 @@ impl Palette {
             return false;
         }
 
-        for &color in fresh.into_indexed(|_| ()).colors() {
+        for color in fresh.colors() {
             self.push(color);
         }
         true
@@ -563,7 +564,7 @@ mod tests {
     /// フレームごとの色表は、渡した色を見つけた順に載せる
     #[test]
     fn a_local_table_keeps_the_order_of_the_colors_it_was_given() {
-        let palette = Palette::from_colors(&[0xFF00_00FF, 0xFF00_0000]);
+        let palette = Palette::from_colors([0xFF00_00FF, 0xFF00_0000]);
 
         assert_eq!(palette.colors(), 2);
         assert_eq!(palette.color_at(0), 0xFF00_00FF);
@@ -574,7 +575,7 @@ mod tests {
     #[test]
     fn a_local_table_leaves_room_for_the_transparent_index() {
         let colors: Vec<u32> = (0..MAX_COLORS).map(|i| 0xFF00_0000 | i as u32).collect();
-        let palette = Palette::from_colors(&colors);
+        let palette = Palette::from_colors(colors);
 
         assert_eq!(palette.colors(), QUANTIZED_COLORS as u16);
         assert_eq!(palette.transparent(), Some(QUANTIZED_COLORS as u8));

@@ -407,7 +407,7 @@ fn escape_table(
     });
 
     if !overflowed {
-        return Palette::from_colors(distinct.into_indexed(|_| ()).colors());
+        return Palette::from_colors(distinct.colors());
     }
 
     let mut histogram = Histogram::new();
@@ -415,7 +415,7 @@ fn escape_table(
         histogram.observe_color(color, 1);
         true
     });
-    Palette::from_colors(&histogram.quantize(QUANTIZED_COLORS))
+    Palette::from_colors(histogram.quantize(QUANTIZED_COLORS))
 }
 
 /// 書き出し位置のフレーム1つを処理する状態
