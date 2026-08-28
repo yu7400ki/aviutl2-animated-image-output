@@ -108,14 +108,22 @@ fn spawn(codec: Codec, workers: NonZeroUsize) -> Result<Pool, Error> {
 /// libwebp の関数表を1回だけ据える
 ///
 /// 関数表の初期化は最初の符号化のときに走り、Windows 版の見張りは同期を持たない。
-/// ワーカーが同時に初回を踏まないよう、起こす前に1フレーム通しておく。
+/// ワーカーが同時に初回を踏まないよう、起こす前に通しておく。通す色種別は入力の
+/// ものに加えてRGBAで、表示時間を分けるフレームが色種別に依らずRGBAであることに
+/// 合わせる。
 ///
 /// # Errors
 /// 符号化に失敗したとき [`Error::Encode`]。
 fn warm_up(codec: &Codec, color_type: ColorType) -> Result<(), Error> {
-    let layout = Layout::new(1, 1, color_type)?;
-    let pixel = &WARM_UP_PIXEL[..color_type.bytes_per_pixel()];
-    codec.encode(&Job::crop(pixel, &layout, layout.whole(), None, Vec::new()))?;
+    let paths: &[ColorType] = match color_type {
+        ColorType::Rgba8 => &[ColorType::Rgba8],
+        ColorType::Rgb8 => &[ColorType::Rgb8, ColorType::Rgba8],
+    };
+    for color_type in paths.iter().copied() {
+        let layout = Layout::new(1, 1, color_type)?;
+        let pixel = &WARM_UP_PIXEL[..color_type.bytes_per_pixel()];
+        codec.encode(&Job::crop(pixel, &layout, layout.whole(), None, Vec::new()))?;
+    }
     Ok(())
 }
 
@@ -168,7 +176,9 @@ impl Pipeline {
     /// 符号化を待たせておけるフレーム数
     ///
     /// 仕掛かりはジョブ1つにつき切り出し済みのバッファ1つと符号化の結果1つを
-    /// 抱えるので、この数が抱える画素の上限を決める。
+    /// 抱えるので、この数が抱える画素の上限を決める。2以上であることは、
+    /// 上限を超えて排出するフレームが、まだ決定の途中にある最後のフレームと
+    /// 別のものになる条件になる。
     pub(crate) fn capacity(&self) -> usize {
         self.capacity
     }

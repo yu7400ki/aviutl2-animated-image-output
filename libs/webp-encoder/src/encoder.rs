@@ -74,6 +74,10 @@ impl<W: Write + Seek> Animation<W> {
         }
         self.pending.push_back(pending);
 
+        debug_assert!(
+            pipeline.capacity() >= 2,
+            "排出する先頭は、廃棄方法の決まっていない末尾と別のフレームであること"
+        );
         while self.pending.len() > pipeline.capacity() {
             self.write(pipeline)?;
         }
@@ -239,14 +243,6 @@ impl<W: Write + Seek> Encoder<W> {
         let layout = Layout::new(width, height, config.color_type)?;
         let codec = Codec::new(&config)?;
 
-        // 単葉は仕掛かりを持たないので、群れを起こす相手がいない
-        let workers = if num_frames == 1 {
-            NonZeroUsize::MIN
-        } else {
-            workers
-        };
-        let pipeline = Pipeline::new(codec, config.color_type, workers)?;
-
         let sink = if num_frames == 1 {
             Sink::Still(writer)
         } else {
@@ -260,6 +256,15 @@ impl<W: Write + Seek> Encoder<W> {
                 filler: None,
             }))
         };
+
+        // 単葉は仕掛かりを持たないので、群れを起こす相手がいない
+        let workers = if num_frames == 1 {
+            NonZeroUsize::MIN
+        } else {
+            workers
+        };
+        // 書き出し先がヘッダを受け取ってから起こす
+        let pipeline = Pipeline::new(codec, config.color_type, workers)?;
 
         Ok(Encoder {
             sink,
