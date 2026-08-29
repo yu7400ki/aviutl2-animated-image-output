@@ -340,7 +340,10 @@ mod tests {
         assert!(!colors.append_indices(&distinct_rgb(MAX_COLORS + 1), 3, &mut indices));
 
         assert_eq!(indices, [0xAA]);
-        assert!(!colors.observe_color(0), "溢れた後に数えている");
+        assert!(
+            !colors.observe_color(pack::<3>(&[0, 0, 0])),
+            "溢れた後に数えている"
+        );
     }
 
     /// 画素から添字を引ける。数えていない色は `None`
