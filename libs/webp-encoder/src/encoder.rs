@@ -222,12 +222,13 @@ impl<W: Write + Seek> Encoder<W> {
 
     /// ワーカー数を指してエンコーダを作る
     ///
+    /// 渡した数をそのまま起こす。[`Encoder::new`] が置く取り分の上限は掛からない。
     /// ワーカーが1つなら群れを起こさず、投入した場で符号化する。決定も
     /// 書き出しの順序もワーカー数に依らないので、出力はどちらでも同じになる。
     ///
     /// # Errors
     /// [`Encoder::new`] と同じ。加えてスレッドを起こせないとき [`Error::Io`]。
-    pub(crate) fn with_workers(
+    pub fn with_workers(
         writer: W,
         width: u32,
         height: u32,
@@ -273,6 +274,13 @@ impl<W: Write + Seek> Encoder<W> {
             frames_accepted: 0,
             poisoned: false,
         })
+    }
+
+    /// 符号化を回すワーカー数
+    ///
+    /// 単葉の書き出しでは群れを起こさないので1になる。
+    pub fn workers(&self) -> NonZeroUsize {
+        self.pipeline.workers()
     }
 
     /// フレームを1つ投入する

@@ -163,8 +163,8 @@ pub(crate) struct Pipeline {
     ready: HashMap<usize, Outcome>,
     /// 使い回す切り出し先
     buffers: Vec<Vec<u8>>,
-    /// 仕掛かりの上限
-    capacity: usize,
+    /// 符号化を回すワーカー数
+    workers: NonZeroUsize,
 }
 
 impl Pipeline {
@@ -191,8 +191,13 @@ impl Pipeline {
             submitted: 0,
             ready: HashMap::new(),
             buffers: Vec::new(),
-            capacity: workers.get() * 2,
+            workers,
         })
+    }
+
+    /// 符号化を回すワーカー数
+    pub(crate) fn workers(&self) -> NonZeroUsize {
+        self.workers
     }
 
     /// 符号化を待たせておけるフレーム数
@@ -200,9 +205,10 @@ impl Pipeline {
     /// 仕掛かりはジョブ1つにつき切り出し済みのバッファ1つと符号化の結果1つを
     /// 抱えるので、この数が抱える画素の上限を決める。2以上であることは、
     /// 上限を超えて排出するフレームが、まだ決定の途中にある最後のフレームと
-    /// 別のものになる条件になる。
+    /// 別のものになる条件になる。ワーカー数に比例するので、ワーカー数を絞れば
+    /// 仕掛かりも一緒に減る。
     pub(crate) fn capacity(&self) -> usize {
-        self.capacity
+        self.workers.get() * 2
     }
 
     /// 設定を写した符号化器
