@@ -1273,7 +1273,7 @@ fn a_palette_is_disposed_to_previous() {
             (TRIGGER.0, TRIGGER.1, 1, 1)
         ]
     );
-    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
+    assert_reduced_roundtrip(&bytes, &input);
 }
 
 /// 捨てたフレームにしか無い内容は、復元されたキャンバスとの差分として残る
@@ -1469,11 +1469,11 @@ fn without_alpha(frame: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-/// 出力を合成し、RGBA8の入力と一致することを確かめる
+/// パレット参照で出た出力を合成し、RGBA8の入力と一致することを確かめる
 ///
 /// アルファの落ちた出力は、入力からアルファを落としたものと比べる。
-fn assert_reduced_roundtrip(bytes: &[u8], input: &[Vec<u8>], expected: png::ColorType) {
-    assert_eq!(output_color_type(bytes), expected);
+fn assert_reduced_roundtrip(bytes: &[u8], input: &[Vec<u8>]) {
+    assert_eq!(output_color_type(bytes), png::ColorType::Indexed);
 
     let color_type = composite_color_type(bytes);
     let (_, decoded) = decode(bytes);
@@ -1515,7 +1515,7 @@ fn palette_frames_keep_their_rects_and_order() {
     );
 
     // 4色しか無いためパレットで出る
-    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
+    assert_reduced_roundtrip(&bytes, &input);
 
     let (_, decoded) = decode(&bytes);
     let expected: Vec<(u32, u32, u32, u32)> = std::iter::once((0, 0, REDUCE_WIDTH, REDUCE_HEIGHT))
@@ -1534,7 +1534,7 @@ fn a_single_frame_input_is_settled_on_that_frame() {
         reduce_config(ColorType::Rgba8),
         &within,
     );
-    assert_reduced_roundtrip(&bytes, &within, png::ColorType::Indexed);
+    assert_reduced_roundtrip(&bytes, &within);
 
     let beyond = distinct_frames(ColorType::Rgba8, 1);
     assert!(matches!(
@@ -1578,7 +1578,7 @@ fn an_input_within_the_color_limit_is_written_as_indexed_color() {
         let input = vec![palette_frame(colors, 0), palette_frame(colors, 0)];
         let bytes = encode_reduced(ColorType::Rgba8, &input);
 
-        assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
+        assert_reduced_roundtrip(&bytes, &input);
     }
 }
 
@@ -1601,7 +1601,7 @@ fn the_palette_chunks_are_padded_to_a_fixed_number_of_entries() {
     assert_eq!(trns.len(), MAX_PALETTE_COLORS);
     assert!(trns[COLORS..].iter().all(|&alpha| alpha == u8::MAX));
 
-    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
+    assert_reduced_roundtrip(&bytes, &input);
 }
 
 /// 見つけた順が値の昇順とも降順とも食い違う色を敷いたRGBA8のフレーム
@@ -1626,7 +1626,7 @@ fn the_palette_follows_the_order_the_colors_were_found() {
     let plte = plte(&bytes);
     let reds: Vec<u8> = plte[..12].iter().step_by(3).copied().collect();
     assert_eq!(reds, [0x30, 0x10, 0x40, 0x20]);
-    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
+    assert_reduced_roundtrip(&bytes, &input);
 }
 
 /// 上限ちょうどの色は載り、1つ超えると先頭フレームを指して失敗する
@@ -1675,7 +1675,7 @@ fn a_color_beyond_the_palette_fails_on_the_frame_that_brings_it() {
 
     let single = vec![palette_frame(PER_FRAME, 0)];
     let bytes = encode_reduced(ColorType::Rgba8, &single);
-    assert_reduced_roundtrip(&bytes, &single, png::ColorType::Indexed);
+    assert_reduced_roundtrip(&bytes, &single);
 
     let union = vec![
         palette_frame(PER_FRAME, 0),
@@ -1858,7 +1858,7 @@ fn a_palette_keeps_the_alpha_of_every_color() {
     let input = vec![mixed_alpha_frame()];
     let bytes = encode_reduced(ColorType::Rgba8, &input);
 
-    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
+    assert_reduced_roundtrip(&bytes, &input);
     assert_eq!(trns(&bytes)[..3], [0x00, 0x40, 0x80]);
 }
 
@@ -1870,7 +1870,7 @@ fn a_palette_from_an_alpha_input_always_carries_a_trns() {
     let input = vec![palette_frame(4, 0)];
     let bytes = encode_reduced(ColorType::Rgba8, &input);
 
-    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
+    assert_reduced_roundtrip(&bytes, &input);
     assert!(trns(&bytes).iter().all(|&alpha| alpha == u8::MAX));
 }
 
@@ -1946,7 +1946,7 @@ fn a_palette_survives_partial_rects() {
     let input = transient_palette_frames();
     let bytes = encode_reduced(ColorType::Rgba8, &input);
 
-    assert_reduced_roundtrip(&bytes, &input, png::ColorType::Indexed);
+    assert_reduced_roundtrip(&bytes, &input);
     assert_eq!(
         rects(&decode(&bytes).1)[1],
         (2, 1, 3, 2),
