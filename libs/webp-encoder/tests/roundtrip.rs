@@ -1174,9 +1174,35 @@ fn a_heavy_canvas_wakes_fewer_workers() {
 
     let small = workers(64, 64);
     let large = workers(1920, 1080);
-    assert_eq!(small, available, "小さいキャンバスで絞っている");
+    assert!(small <= available, "並列度を超えて起こしている: {small}");
     assert!(large <= small, "大きいキャンバスで増えている: {large}");
+    // 1920x1080の可逆は8つに届かないので、そこを超える機械でだけ差が出る
     if available >= 8 {
         assert!(large < available, "上限が掛かっていない: {large}");
+        assert!(large < small, "大きさで数が変わっていない: {large}");
     }
+}
+
+/// 最も重い動作点の可逆でも、合成結果が入力へバイト一致で戻る
+///
+/// メソッドは符号化の努力量で、可逆の契約は変えない。他の往復がメソッド4で
+/// 通るので、6の経路をここで踏む。
+#[test]
+fn a_lossless_animation_at_the_heaviest_method_composes_back_to_the_input() {
+    let (width, height) = (61, 37);
+    let frames = rgba_frames(width, height, 5);
+
+    let config = Config {
+        method: 6,
+        ..config(ColorType::Rgba8, 0)
+    };
+    let (_, report) = round_trip(width, height, config, &frames);
+
+    assert_eq!(
+        report,
+        Report {
+            merged_frames: 0,
+            delay_clamped: false,
+        }
+    );
 }

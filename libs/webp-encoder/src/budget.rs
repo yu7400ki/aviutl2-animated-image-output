@@ -10,8 +10,9 @@ const BUDGET: u64 = 1 << 30;
 /// キャンバスが抱える、ワーカー数に依らない取り分 (画素あたりバイト)
 ///
 /// 前のフレームを描いた画素・その矩形を抜いた画素・正規化して写した入力の
-/// 3面がRGBAで並び、伸ばす途中の写しがそこへ重なる。
-const CANVAS_PER_PIXEL: u64 = 28;
+/// 3面がRGBAで並び、伸ばす途中の写しがそこへ重なる。3面ぶんの倍を超える
+/// 実測があるので、そこから切り上げた値を採る。
+const CANVAS_PER_PIXEL: u64 = 32;
 
 /// 非可逆の符号化がワーカー1つあたりに使う、面積に依らない作業領域 (バイト)
 const LOSSY_BASE: u64 = 2 << 20;
@@ -28,6 +29,7 @@ const LOSSLESS_PER_PIXEL: u64 = 36;
 /// ワーカー1つが抱える量の見積り (バイト)
 ///
 /// 仕掛かりの上限がワーカー数の2倍なので、切り出し先も2つぶん数える。
+/// 符号化の結果は大きさが投入前に読めないので、作業領域の係数がまとめて覆う。
 /// 作業領域は画素の並びと、品質・メソッドの上げ方で太る。係数は最も重い
 /// 動作点で採り、素材ごとの振れを覆う余裕を載せてある。
 fn share(layout: &Layout, config: &Config) -> u64 {
@@ -93,12 +95,39 @@ mod tests {
     }
 
     /// 大きいキャンバスでは予算がワーカー数を決める
+    ///
+    /// 1920x1080の可逆は、実測のピークが 747 MiB / 7ワーカーで収まる点。
+    /// 見積りの係数を緩めるとこの数が動く。
     #[test]
     fn a_large_canvas_is_bounded_by_the_budget() {
-        let workers = workers_for(1920, 1080, true);
-        assert!(workers < AVAILABLE.get(), "上限が掛かっていない: {workers}");
-        assert!(workers > 1, "1つまで絞っている: {workers}");
+        assert_eq!(workers_for(1920, 1080, true), 7);
         assert!(fits(1920, 1080, true));
+    }
+
+    /// 非可逆でも、寸法が大きくなれば予算がワーカー数を決める
+    ///
+    /// 見積りの3つの項 — キャンバス・仕掛かり・作業領域 — がどれも効く点を
+    /// 固定する。小さい方は面積に依らない作業領域だけが残る点。
+    #[test]
+    fn the_lossy_estimate_bounds_the_workers() {
+        assert_eq!(workers_for(3840, 2160, false), 3);
+
+        let config = config(false);
+        let layout = Layout::new(16, 16, config.color_type).unwrap();
+        let plenty = NonZeroUsize::new(1024).unwrap();
+        assert_eq!(workers(&layout, &config, plenty).get(), 510);
+    }
+
+    /// 可逆の下駄は、小さいキャンバスでも起こす数を縛る
+    ///
+    /// 面積に依らない作業領域が予算を割るので、いくら並列度があっても
+    /// 64x64 で 21 を超えては起こさない。
+    #[test]
+    fn the_lossless_workspace_bounds_even_a_small_canvas() {
+        let config = config(true);
+        let layout = Layout::new(64, 64, config.color_type).unwrap();
+        let plenty = NonZeroUsize::new(1024).unwrap();
+        assert_eq!(workers(&layout, &config, plenty).get(), 21);
     }
 
     /// 予算に収まらない大きさでも1つは起こす
