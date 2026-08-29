@@ -1,4 +1,4 @@
-//! 領域のフィルタと圧縮、およびバッファの使い回し
+//! 領域のフィルタと圧縮、戦略の選択、およびバッファの使い回し
 
 use crate::filter;
 use crate::zlib::Compressor;
