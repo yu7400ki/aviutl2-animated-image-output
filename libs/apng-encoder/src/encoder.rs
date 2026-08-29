@@ -693,21 +693,31 @@ mod tests {
     /// キャンバスがこの全部を覆う値域になっている。
     const MOTTLED_COLORS: usize = 200;
 
-    /// 値がなだらかに動く土台へ微小なゆらぎを載せたフレーム
+    /// [`mottled_frame`] が完全に透明な画素を置く間隔
+    const MOTTLED_CLEAR: usize = 11;
+
+    /// 値がなだらかに動く土台へ微小なゆらぎを載せたRGBA8のフレーム
     ///
     /// 3チャネルとも値ごとに動き、隣接画素の差は揃わない。色を見つける順は
     /// 値の昇順から少しずつずれ、パレット参照の添字も同じだけ乱れる。
+    /// [`MOTTLED_CLEAR`] 画素ごとに完全に透明な画素が入る。
     fn mottled_frame(seed: u32) -> Vec<u8> {
         let grain = noise((WIDTH * HEIGHT) as usize, seed);
         let mut frame = Vec::new();
         for y in 0..HEIGHT as usize {
             for x in 0..WIDTH as usize {
-                let jitter = grain[y * WIDTH as usize + x] as usize & 7;
+                let pixel = y * WIDTH as usize + x;
+                if pixel % MOTTLED_CLEAR == 0 {
+                    frame.extend_from_slice(&[0, 0, 0, 0]);
+                    continue;
+                }
+                let jitter = grain[pixel] as usize & 7;
                 let value = (x + y * 5 + seed as usize * 2 + jitter) % MOTTLED_COLORS;
                 frame.extend_from_slice(&[
                     value as u8,
                     (value * 3 + 0x40) as u8,
                     (value * 5 + 0x80) as u8,
+                    0xFF,
                 ]);
             }
         }
@@ -877,9 +887,7 @@ mod tests {
             assert!(frame.iter().all(|&f| f == 0), "フレーム {index}: {frame:?}");
         }
 
-        let input: Vec<Vec<u8>> = (0..FRAMES)
-            .map(|seed| with_alpha(&mottled_frame(seed)))
-            .collect();
+        let input: Vec<Vec<u8>> = (0..FRAMES).map(mottled_frame).collect();
         let bytes = encode(&input, config);
         assert_eq!(output_bytes_per_pixel(&bytes), 1);
         for (index, frame) in filter_types(&bytes, 1).iter().enumerate() {

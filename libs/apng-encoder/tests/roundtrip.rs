@@ -2025,23 +2025,33 @@ fn detailed_frame(color_type: ColorType, seed: u32) -> Vec<u8> {
 /// キャンバスがこの全部を覆う値域になっている。
 const MOTTLED_COLORS: usize = 128;
 
+/// [`mottled_frame`] が完全に透明な画素を置く間隔
+const MOTTLED_CLEAR: usize = 13;
+
 /// 値がなだらかに動く土台へ微小なゆらぎを載せたフレーム
 ///
 /// 3チャネルとも値ごとに動き、隣接画素の差は揃わない。色を見つける順は
 /// 値の昇順から少しずつずれ、パレット参照の添字も同じだけ乱れる。
+/// [`MOTTLED_CLEAR`] 画素ごとに完全に透明な画素が入る。
 fn mottled_frame(color_type: ColorType, seed: u32) -> Vec<u8> {
+    let bpp = color_type.bytes_per_pixel();
     let grain = frame_data((FILTER_WIDTH * FILTER_HEIGHT) as usize, seed + 1);
     let mut frame = Vec::new();
     for y in 0..FILTER_HEIGHT as usize {
         for x in 0..FILTER_WIDTH as usize {
-            let jitter = grain[y * FILTER_WIDTH as usize + x] as usize & 7;
+            let pixel = y * FILTER_WIDTH as usize + x;
+            if pixel % MOTTLED_CLEAR == 0 {
+                frame.extend(std::iter::repeat_n(0, bpp));
+                continue;
+            }
+            let jitter = grain[pixel] as usize & 7;
             let value = (x + y * 5 + seed as usize * 2 + jitter) % MOTTLED_COLORS;
             frame.extend_from_slice(&[
                 value as u8,
                 (value * 3 + 0x40) as u8,
                 (value * 5 + 0x80) as u8,
             ]);
-            if color_type == ColorType::Rgba8 {
+            if bpp == 4 {
                 frame.push(0xFF);
             }
         }
