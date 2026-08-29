@@ -1666,9 +1666,9 @@ fn one_color_over_the_limit_fails_on_the_first_frame() {
     }
 }
 
-/// 先頭フレームで賭けた後に色数が溢れたら、そのフレームを指して失敗する
+/// 色数が溢れたら、それを持ち込んだフレームを指して失敗する
 ///
-/// 添字は既に焼かれているため、後から入力の色種別へ戻ることはできない。
+/// 1フレームずつなら収まる色数でも、和集合がパレットを超えれば溢れる。
 #[test]
 fn a_color_beyond_the_palette_fails_on_the_frame_that_brings_it() {
     const PER_FRAME: usize = 200;
@@ -1742,7 +1742,7 @@ fn magenta_entries() -> Vec<u8> {
         .collect()
 }
 
-/// 賭けに負けた書き出しは、書き戻す前のマゼンタのパレットを残す
+/// 色数が溢れた書き出しは、書き戻す前のマゼンタのパレットを残す
 ///
 /// 場所を確保したPLTEは [`Encoder::finish`] まで書き戻されない。詰め物が黒だと
 /// 寛容なデコーダが先頭フレームを真っ黒な絵として描いてしまう。
@@ -1864,8 +1864,7 @@ fn a_palette_keeps_the_alpha_of_every_color() {
 
 /// アルファを持つ入力のパレットは、透過が現れなくてもtRNSを持つ
 ///
-/// tRNSを書くかどうかは先頭フレームで決まり、そこでは後のフレームのアルファが
-/// まだ分からない。
+/// tRNSを書くかどうかは入力の色種別で決まり、画素のアルファは見ない。
 #[test]
 fn a_palette_from_an_alpha_input_always_carries_a_trns() {
     let input = vec![palette_frame(4, 0)];

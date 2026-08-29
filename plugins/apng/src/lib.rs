@@ -163,7 +163,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    /// 賭けに出る先頭フレームと、パレットから溢れるフレームの大きさ
+    /// パレットに収まるフレームと、溢れるフレームを敷く大きさ
     const FRAME_WIDTH: u32 = 32;
     const FRAME_HEIGHT: u32 = 16;
     const FRAME_PIXELS: usize = FRAME_WIDTH as usize * FRAME_HEIGHT as usize;
@@ -250,7 +250,7 @@ mod tests {
 
     /// 色数がパレットから溢れた書き出しは、書きかけのファイルを残さない
     ///
-    /// 先頭フレームは256色に収まるので賭けに出るが、次のフレームで溢れる。
+    /// 1フレーム目は2色で収まり、2フレーム目がパレットから溢れる。
     #[test]
     fn a_write_that_runs_out_of_palette_leaves_no_file() {
         let path = temp_path();
