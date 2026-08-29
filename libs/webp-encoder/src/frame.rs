@@ -204,6 +204,18 @@ mod tests {
             .collect()
     }
 
+    /// `at` から `size` 角を `color` で塗り替えたRGBA
+    fn repainted(base: &[u8], width: u32, at: (u32, u32), size: u32, color: [u8; 4]) -> Vec<u8> {
+        let mut data = base.to_vec();
+        for y in at.1..at.1 + size {
+            for x in at.0..at.0 + size {
+                let index = (y * width + x) as usize * PIXEL;
+                data[index..index + PIXEL].copy_from_slice(&color);
+            }
+        }
+        data
+    }
+
     /// フレームを1つ据えたキャンバス
     fn canvas_with(layout: &Layout, data: &[u8]) -> Canvas {
         let mut canvas = Canvas::new(layout);
@@ -458,5 +470,85 @@ mod tests {
 
         let placement = canvas.place(true).expect("画素が1つ変わっている");
         assert!(placement.blend);
+    }
+    /// 抜いた側と抜かない側が同じ広さなら、抜かない方を採る
+    ///
+    /// 同点は出力の大きさを変えず、どちらの候補も合成としては正しいので、
+    /// 突き合わせでは倒し方を問えない。
+    #[test]
+    fn a_tie_between_the_two_rects_keeps_the_canvas() {
+        let layout = Layout::new(16, 16, ColorType::Rgba8).unwrap();
+        let first = ramp(layout.width, layout.height);
+        let mut canvas = canvas_with(&layout, &first);
+
+        let second = repainted(&first, layout.width, (4, 4), 4, [0x11, 0x22, 0x33, OPAQUE]);
+        canvas.stage(&second, ColorType::Rgba8);
+        let rect = canvas.place(false).expect("四角を塗り替えている").rect;
+        assert_eq!(
+            rect,
+            Rect {
+                x: 4,
+                y: 4,
+                width: 4,
+                height: 4
+            }
+        );
+        canvas.commit(rect);
+
+        // 抜いた跡 (4,4,4,4) を含む (4,4,6,6) を透過にすると、抜いた側と
+        // 抜かない側の差分がどちらも (4,4,6,6) になる
+        let third = repainted(&second, layout.width, (4, 4), 6, [0, 0, 0, 0]);
+        canvas.stage(&third, ColorType::Rgba8);
+        assert_eq!(
+            canvas.place(true),
+            Some(Placement {
+                rect: Rect {
+                    x: 4,
+                    y: 4,
+                    width: 6,
+                    height: 6
+                },
+                blend: false,
+                dispose: false,
+            })
+        );
+    }
+
+    /// 重ねられるかは、そのフレームが実際に重なる面で判定する
+    ///
+    /// 矩形を抜く廃棄方法を採ったフレームが重なるのは抜いた後の面で、抜く前の
+    /// 面ではない。どちらで判定しても合成そのものは正しいままなので、
+    /// 突き合わせでは取り違えを問えない。
+    #[test]
+    fn blending_is_judged_against_the_face_the_frame_lands_on() {
+        let layout = Layout::new(16, 16, ColorType::Rgba8).unwrap();
+        let first = ramp(layout.width, layout.height);
+        let mut canvas = canvas_with(&layout, &first);
+
+        let second = repainted(&first, layout.width, (2, 2), 12, [0x11, 0x22, 0x33, OPAQUE]);
+        canvas.stage(&second, ColorType::Rgba8);
+        let rect = canvas.place(false).expect("四角を塗り替えている").rect;
+        canvas.commit(rect);
+
+        // 抜いた跡と同じ範囲を透過にし、その中の1画素だけを塗る。抜いた後の面
+        // とは1画素しか違わないが、抜く前の面とは範囲全体が違う
+        let mut third = repainted(&second, layout.width, (2, 2), 12, [0, 0, 0, 0]);
+        let at = (7 * layout.width as usize + 7) * PIXEL;
+        third[at..at + PIXEL].copy_from_slice(&[0x44, 0x55, 0x66, OPAQUE]);
+        canvas.stage(&third, ColorType::Rgba8);
+
+        assert_eq!(
+            canvas.place(true),
+            Some(Placement {
+                rect: Rect {
+                    x: 6,
+                    y: 6,
+                    width: 2,
+                    height: 2
+                },
+                blend: true,
+                dispose: true,
+            })
+        );
     }
 }

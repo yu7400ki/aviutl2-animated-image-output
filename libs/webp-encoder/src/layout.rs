@@ -128,6 +128,9 @@ mod tests {
         );
     }
 
+    /// 長さは過不足のどちらでも弾く
+    ///
+    /// 長すぎる入力を通すと、はみ出したぶんが黙って捨てられる。
     #[test]
     fn a_frame_of_another_length_is_rejected() {
         let layout = Layout::new(4, 3, ColorType::Rgba8).unwrap();
@@ -137,6 +140,13 @@ mod tests {
             Err(Error::FrameSizeMismatch {
                 expected: 48,
                 actual: 36
+            })
+        ));
+        assert!(matches!(
+            layout.check_frame(&[0; 4 * 3 * 4 + 1]),
+            Err(Error::FrameSizeMismatch {
+                expected: 48,
+                actual: 49
             })
         ));
     }
