@@ -2141,6 +2141,21 @@ fn a_palette_is_reported_with_its_color_count() {
     }
 }
 
+/// 後のフレームが持ち込んだ色も、報告される色数に入る
+#[test]
+fn colors_brought_by_a_later_frame_join_the_reported_count() {
+    let input = vec![palette_frame(100, 0), palette_frame(100, 100)];
+    assert_eq!(
+        palette_colors_of(
+            REDUCE_WIDTH,
+            REDUCE_HEIGHT,
+            reduce_config(ColorType::Rgba8),
+            &input
+        ),
+        Some(200)
+    );
+}
+
 /// 落とす設定でなければ色数も無い
 #[test]
 fn nothing_is_reported_without_the_setting() {
