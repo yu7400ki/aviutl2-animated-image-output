@@ -1206,3 +1206,172 @@ fn a_lossless_animation_at_the_heaviest_method_composes_back_to_the_input() {
         }
     );
 }
+
+/// 不透明な四角が動き、途中で消える不透明でないRGBA
+///
+/// 消える四角の跡は前のフレームの矩形の外にも残るので、抜く範囲が据えた矩形
+/// からずれると、抜いた跡と食い違ったフレームが出る。動く四角だけの素材では
+/// 矩形と跡が重なってしまい、そのずれが表に出ない。
+fn vanishing_rgba(width: u32, height: u32, index: usize) -> Vec<u8> {
+    let ticker = (index as u32 * 2) % (width - 4);
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let block = index % 4 != 3 && x.wrapping_sub(2) < 16 && y.wrapping_sub(2) < 16;
+            let moving = x.wrapping_sub(ticker) < 4 && y + 4 >= height;
+            rgba.extend_from_slice(&if block {
+                [0xC0, 0x20, 0x20, 0xFF]
+            } else if moving {
+                [0x10, 0xE0, 0x10, 0xFF]
+            } else {
+                [0, 0, 0, 0]
+            });
+        }
+    }
+    rgba
+}
+
+/// 廃棄の跡が矩形の外へ残る素材でも、合成が入力へバイト一致で戻る
+///
+/// 抜く範囲は据えた矩形と同じでなければならない。広げると、廃棄を採った
+/// 次のフレームが「抜いた跡」と食い違ったまま出る。
+#[test]
+fn a_vanishing_block_composes_back_across_the_disposal() {
+    let (width, height) = (32, 24);
+    let frames: Vec<Vec<u8>> = (0..12)
+        .map(|index| vanishing_rgba(width, height, index))
+        .collect();
+
+    let (bytes, _) = round_trip(width, height, config(ColorType::Rgba8, 0), &frames);
+
+    assert!(
+        placements(&bytes).iter().any(|frame| frame.dispose),
+        "矩形を抜く廃棄方法が一度も選ばれていない"
+    );
+}
+
+/// 画素ごとの差の平均
+fn mean_abs_error(actual: &[u8], expected: &[u8]) -> f64 {
+    assert_eq!(actual.len(), expected.len());
+    let total: u64 = actual
+        .iter()
+        .zip(expected)
+        .map(|(a, b)| u64::from(a.abs_diff(*b)))
+        .sum();
+    total as f64 / actual.len() as f64
+}
+
+/// 非可逆の合成を入力と突き合わせる
+///
+/// 可逆と違ってバイト一致は取れないので、`assert_close` の絞りは使えない。
+/// 代わりに次の2つで縛る。
+///
+/// - **αは厳密**。非可逆でもαの面は可逆で格納される (`alpha_compression` の
+///   既定) ので、ここに量子化誤差は乗らない
+/// - RGBは**フレームごと**の平均絶対誤差で縛る。列全体で平均すると、1枚だけが
+///   崩れた出力が他の枚数に埋もれる
+///
+/// `limit` は HEAD の実測から採る。呼び出し側がその実測値を持つ。
+fn assert_lossy_close(decoded: &[Vec<u8>], expected: &[Vec<u8>], limit: f64) {
+    /// RGBAのαが並ぶ位置
+    const ALPHA_AT: usize = 3;
+
+    assert_eq!(decoded.len(), expected.len(), "返ったフレーム数");
+    for (index, (decoded, expected)) in decoded.iter().zip(expected).enumerate() {
+        assert_eq!(decoded.len(), expected.len(), "フレーム{index}の長さ");
+
+        let alpha: Vec<u8> = decoded.iter().skip(ALPHA_AT).step_by(4).copied().collect();
+        let want: Vec<u8> = expected.iter().skip(ALPHA_AT).step_by(4).copied().collect();
+        assert_eq!(alpha, want, "フレーム{index}のα");
+
+        let error = mean_abs_error(decoded, expected);
+        assert!(error < limit, "フレーム{index}の平均絶対誤差 {error}");
+    }
+}
+
+/// 非可逆の設定
+///
+/// `plugins/webp` の既定は非可逆で、そちらが出荷時に通る経路になる。
+fn lossy_config(color_type: ColorType) -> Config {
+    Config {
+        color_type,
+        lossless: false,
+        quality: 90.0,
+        method: 4,
+        num_plays: 0,
+    }
+}
+
+/// 非可逆でも、フレームごとの合成が入力の近くへ戻る
+///
+/// 素材は不透明なので 5.3 の透過置換が blend 有りのフレームで意味を持つ形だが、
+/// 置き換えた完全透過は非可逆の符号化を素通りしないため、非可逆では行わない。
+/// 素材にαが無い以上、VP8XのALPHAも立ってはいけない。
+///
+/// 誤差の上限 3.0 は HEAD の実測から採った。フレームごとの平均絶対誤差の最大は
+/// `image-webp` で 1.39、ffmpeg で 2.09。**非可逆では ffmpeg もバイト一致では
+/// 戻らない** — VP8 の復号は同じでも、YUVからRGBへの変換がデコーダごとに違う。
+/// 可逆で ffmpeg が担保するバイト一致は、この経路には無い。
+#[test]
+fn a_lossy_animation_composes_near_the_input() {
+    let (width, height) = (48, 32);
+    let frames: Vec<Vec<u8>> = (0..6)
+        .map(|index| patched_rgba(width, height, (index * 4, index * 3)))
+        .collect();
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame.chunks_exact(4).all(|p| p[3] == 255)),
+        "素材が透過を含んでいる"
+    );
+
+    let (bytes, _) = encode(width, height, lossy_config(ColorType::Rgba8), &frames).unwrap();
+
+    assert_eq!(
+        bytes[VP8X_FLAGS_OFFSET], ANIMATION,
+        "透過の無い素材でALPHAが立っている"
+    );
+    assert!(
+        placements(&bytes).iter().skip(1).any(|frame| frame.blend),
+        "重ねる形のフレームが1枚も無い"
+    );
+
+    assert_lossy_close(
+        &decode_with_image_webp(&bytes, width, height).frames,
+        &frames,
+        3.0,
+    );
+    if let Some(composed) = decode_with_ffmpeg(&bytes, width, height) {
+        assert_lossy_close(&composed, &frames, 3.0);
+    }
+}
+
+/// 表示時間を分けたフレームのαも、VP8XのALPHAへ数える
+///
+/// 分けた先は透明1画素のフレームなので、素材そのものに透過が無くても
+/// ファイルはαを持つ。数え落とすとALPHAが立たず、仕様に反する。
+#[test]
+fn the_frames_that_split_a_duration_raise_the_alpha_flag() {
+    let (width, height) = (16, 16);
+    let frames = rgb_frames(width, height, 2);
+    let delays = [
+        FrameDelay::new(20_000, 1).unwrap(),
+        FrameDelay::new(1, 25).unwrap(),
+    ];
+
+    let mut encoder = Encoder::new(
+        Cursor::new(Vec::new()),
+        width,
+        height,
+        frames.len() as u32,
+        config(ColorType::Rgb8, 0),
+    )
+    .unwrap();
+    for (frame, delay) in frames.iter().zip(delays) {
+        encoder.add_frame(frame, delay).unwrap();
+    }
+    let bytes = encoder.finish().unwrap().0.into_inner();
+
+    assert_eq!(placements(&bytes).len(), 3, "表示時間が分かれていない");
+    assert_eq!(bytes[VP8X_FLAGS_OFFSET], ANIMATION | ALPHA);
+}
