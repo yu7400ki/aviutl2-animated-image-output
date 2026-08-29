@@ -53,9 +53,13 @@ pub(crate) struct Palette {
 }
 
 impl Palette {
-    /// 先頭フレームで数えた色から始める
-    pub(crate) fn new(colors: Colors, plte: u64, trns: Option<u64>) -> Self {
-        Palette { colors, plte, trns }
+    /// 何も載せていない表を、書き戻す位置に結び付けて作る
+    pub(crate) fn new(plte: u64, trns: Option<u64>) -> Self {
+        Palette {
+            colors: Colors::new(),
+            plte,
+            trns,
+        }
     }
 
     /// 添字を振った色数
@@ -148,11 +152,11 @@ mod tests {
             .collect()
     }
 
-    /// 先頭フレームを数えた表を、位置を持たせずに作る
+    /// 画素列の色を載せた表を、位置を持たせずに作る
     fn palette_of(pixels: &[u8], bpp: usize) -> Palette {
-        let mut colors = Colors::new();
-        colors.observe(pixels, bpp);
-        Palette::new(colors, 0, Some(0))
+        let mut palette = Palette::new(0, Some(0));
+        assert!(palette.append_indices(pixels, bpp, &mut Vec::new()));
+        palette
     }
 
     /// 添字は色を見つけた順に振られる

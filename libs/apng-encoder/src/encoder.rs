@@ -9,7 +9,7 @@ use crate::error::Error;
 use crate::layout::{ColorType, Layout, Output};
 use crate::over;
 use crate::palette::{PLTE_PLACEHOLDER, Palette, TRNS_PLACEHOLDER};
-use anim_core::{Colors, FrameDelay, Rect, crop};
+use anim_core::{FrameDelay, Rect, crop};
 use std::io::{Seek, Write};
 use std::ops::RangeInclusive;
 
@@ -30,12 +30,8 @@ pub struct Config {
     pub num_plays: u32,
     /// 出力の色種別をパレット参照へ落とすか
     ///
-    /// PNGの色種別はファイル全体で1つなので、先頭フレームの色数だけで決める。
-    /// 先頭フレームの矩形はキャンバス全体なので、そこで色数がパレットに収まらなければ
-    /// 全フレームの和集合も収まらない。収まらなければ入力の色種別のまま書き出す。
-    ///
-    /// 収まったらパレット参照で書き出しを始める。後のフレームで色数が溢れたときは
-    /// [`Error::ColorLimitExceeded`] で失敗する。
+    /// 有効なら、見つけた順に添字を振ったパレット参照で書き出す。全フレームの色の
+    /// 和集合がパレットに収まらなければ [`Error::ColorLimitExceeded`] で失敗する。
     pub reduce_color: bool,
 }
 
@@ -109,8 +105,6 @@ impl BlendPacing {
 }
 
 /// [`Config::reduce_color`] が出力の色種別に及ぼした結果
-///
-/// 先頭フレームの色数で決まり、それより後のフレームの内容では変わらない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorReduction {
     /// パレット参照へ落とした
@@ -375,11 +369,11 @@ impl<W: Write + Seek> Encoder<W> {
 
     /// 投入されたフレームを書き出す
     ///
-    /// 先頭フレームだけは、書き出す前に出力の画素表現を決めてヘッダを書く。
+    /// 先頭フレームを書き出す前に、パレット参照のヘッダを並べる。
     fn accept(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
         let (slot, mut parts) = self.split();
         if slot.is_none() {
-            *slot = Some(parts.open(data)?);
+            *slot = Some(parts.open()?);
         }
         let writing = slot.as_mut().expect("先頭フレームで書き出しの状態が決まる");
         parts.write_frame(writing, data, delay)
@@ -449,20 +443,10 @@ impl<W: Write + Seek> Parts<'_, W> {
         Ok(())
     }
 
-    /// 先頭フレームから出力の画素表現を決め、ヘッダを書き出す
+    /// パレット参照で書き出すためのヘッダを並べる
     ///
-    /// 先頭フレームの矩形はキャンバス全体なので、ここで色数がパレットに収まらなければ
-    /// 全フレームの和集合も収まらない。収まったらパレット参照で書き出し、PLTEとtRNSは
-    /// 場所だけ確保して [`Encoder::finish`] で書き戻す。
-    fn open(&mut self, data: &[u8]) -> Result<Writing, Error> {
-        let mut colors = Colors::new();
-        colors.observe(data, self.layout.bytes_per_pixel);
-        if colors.exceeded() {
-            let output = Output::from(self.layout.input);
-            self.write_header(output)?;
-            return Ok(Writing::new(Encoding::Direct(output)));
-        }
-
+    /// PLTEとtRNSは色数が決まる前に場所だけ確保し、[`Encoder::finish`] で書き戻す。
+    fn open(&mut self) -> Result<Writing, Error> {
         self.write_header(Output::Indexed8)?;
         let plte = self.chunks.position()?;
         self.chunks.write(*b"PLTE", &PLTE_PLACEHOLDER)?;
@@ -476,9 +460,7 @@ impl<W: Write + Seek> Parts<'_, W> {
             }
         };
 
-        Ok(Writing::new(Encoding::Indexed(Palette::new(
-            colors, plte, trns,
-        ))))
+        Ok(Writing::new(Encoding::Indexed(Palette::new(plte, trns))))
     }
 
     /// 場所を確保しておいた位置へPLTEとtRNSを書き戻す
@@ -739,6 +721,26 @@ mod tests {
         frame
     }
 
+    /// [`gradient_frame`] が敷く色数
+    ///
+    /// キャンバスがこの全部を覆う値域になっている。
+    const GRADIENT_COLORS: usize = 200;
+
+    /// 添字がなだらかな勾配になるフレーム
+    ///
+    /// 色を見つける順が値の昇順と一致するため、パレット参照の添字も勾配になる。
+    /// 隣接画素の添字の差が一定で、行ごとの適応フィルタが効く。
+    fn gradient_frame(seed: u32) -> Vec<u8> {
+        let mut frame = Vec::new();
+        for y in 0..HEIGHT as usize {
+            for x in 0..WIDTH as usize {
+                let color = (x + y * 5 + seed as usize * 2) % GRADIENT_COLORS;
+                frame.extend_from_slice(&[color as u8, 0x40, 0x80]);
+            }
+        }
+        frame
+    }
+
     /// RGB8のフレームに不透明なアルファを足す
     fn with_alpha(frame: &[u8]) -> Vec<u8> {
         frame
@@ -958,17 +960,17 @@ mod tests {
             .map(|seed| with_alpha(&flat_frame(seed)))
             .collect();
         let bytes = encode(&input, config);
-        let bpp = output_bytes_per_pixel(&bytes);
-        for (index, frame) in filter_types(&bytes, bpp).iter().enumerate() {
+        assert_eq!(output_bytes_per_pixel(&bytes), 1);
+        for (index, frame) in filter_types(&bytes, 1).iter().enumerate() {
             assert!(frame.iter().all(|&f| f == 0), "フレーム {index}: {frame:?}");
         }
 
         let input: Vec<Vec<u8>> = (0..PROBE_FRAMES + 4)
-            .map(|seed| with_alpha(&detailed_frame(seed)))
+            .map(|seed| with_alpha(&gradient_frame(seed)))
             .collect();
         let bytes = encode(&input, config);
-        let bpp = output_bytes_per_pixel(&bytes);
-        for (index, frame) in filter_types(&bytes, bpp).iter().enumerate() {
+        assert_eq!(output_bytes_per_pixel(&bytes), 1);
+        for (index, frame) in filter_types(&bytes, 1).iter().enumerate() {
             assert!(frame.iter().any(|&f| f != 0), "フレーム {index}: {frame:?}");
         }
     }
