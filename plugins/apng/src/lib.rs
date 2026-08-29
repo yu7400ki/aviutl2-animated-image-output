@@ -2,7 +2,7 @@ mod config;
 mod dialog;
 
 use apng_encoder::{
-    ColorReduction, ColorType, Config as EncoderConfig, Encoder, Error as EncoderError, FrameDelay,
+    ColorType, Config as EncoderConfig, Encoder, Error as EncoderError, FrameDelay,
 };
 use aviutl2::{
     FileFilter, IniConfig, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
@@ -32,16 +32,9 @@ fn encoder_config(config: &Config) -> EncoderConfig {
     }
 }
 
-/// 色数の削減が出力の色種別に及ぼした結果の説明
-fn color_reduction_message(reduction: ColorReduction) -> String {
-    match reduction {
-        ColorReduction::Palette { colors } => {
-            format!("色数の削減: パレットに置き換えました ({}色)", colors)
-        }
-        ColorReduction::Kept => {
-            "色数の削減: 先頭フレームの色数が多いため、カラーフォーマットのまま出力しました".into()
-        }
-    }
+/// 色数の削減が出力に及ぼした結果の説明
+fn color_reduction_message(colors: u16) -> String {
+    format!("色数の削減: パレットに置き換えました ({}色)", colors)
 }
 
 /// エンコーダのエラーの説明
@@ -91,8 +84,8 @@ fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
         })
         .map_err(|e| e.to_string())?;
 
-        // 色種別は先頭フレームで決まるが、書き出しの成否は終端まで分からない
-        let reduction = encoder.color_reduction();
+        // 終端はエンコーダを消費するため、報告する色数は先に読む
+        let colors = encoder.palette_colors();
 
         encoder
             .finish()
@@ -100,8 +93,8 @@ fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
             .into_inner()
             .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
 
-        if let Some(reduction) = reduction {
-            logger::info(&color_reduction_message(reduction));
+        if let Some(colors) = colors {
+            logger::info(&color_reduction_message(colors));
         }
         Ok(())
     })
@@ -379,34 +372,18 @@ mod tests {
         );
     }
 
-    /// 結果ごとに決まった説明が出て、パレットの色数は文面に載る
+    /// パレットに置き換えたことと、載せた色数が文面に出る
     #[test]
-    fn every_color_reduction_has_its_own_message() {
-        let cases = [
-            (
-                ColorReduction::Palette { colors: 198 },
-                "パレットに置き換え",
-            ),
-            (ColorReduction::Kept, "色数が多いため"),
-        ];
-
-        let messages: Vec<String> = cases
-            .iter()
-            .map(|&(reduction, expected)| {
-                let message = color_reduction_message(reduction);
-                assert!(
-                    message.contains(expected),
-                    "{reduction:?} の説明に {expected} が無い: {message}"
-                );
-                message
-            })
-            .collect();
-
-        assert!(messages[0].contains("198"));
-        for (index, message) in messages.iter().enumerate() {
+    fn the_color_reduction_message_carries_the_color_count() {
+        for colors in [1u16, 198, 256] {
+            let message = color_reduction_message(colors);
             assert!(
-                !messages[index + 1..].contains(message),
-                "重複した説明: {message}"
+                message.contains("パレットに置き換え"),
+                "{colors} 色: {message}"
+            );
+            assert!(
+                message.contains(&colors.to_string()),
+                "{colors} 色: {message}"
             );
         }
     }

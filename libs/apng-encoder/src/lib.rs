@@ -14,7 +14,7 @@ mod zlib;
 
 pub use anim_core::FrameDelay;
 pub use delay::delay_parts;
-pub use encoder::{COMPRESSION_LEVELS, ColorReduction, Config, Encoder};
+pub use encoder::{COMPRESSION_LEVELS, Config, Encoder};
 pub use error::Error;
 pub use layout::ColorType;
 

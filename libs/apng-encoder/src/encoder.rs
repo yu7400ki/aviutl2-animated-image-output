@@ -104,18 +104,6 @@ impl BlendPacing {
     }
 }
 
-/// [`Config::reduce_color`] が出力の色種別に及ぼした結果
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColorReduction {
-    /// パレット参照へ落とした
-    Palette {
-        /// パレットに載せた色数
-        colors: u16,
-    },
-    /// 先頭フレームの色数が多く、入力の色種別のままにした
-    Kept,
-}
-
 /// dispose_opを決めた結果
 ///
 /// 捨てるかどうかで投入されたフレームの矩形が変わり、圧縮した候補もそれに従う。
@@ -278,22 +266,19 @@ impl<W: Write + Seek> Encoder<W> {
         Ok(encoder)
     }
 
-    /// 出力の色種別を落とした結果
+    /// パレットに載せた色数
     ///
-    /// [`Config::reduce_color`] が有効で、先頭フレームを投入した後に `Some` を返す。
-    /// パレットに載る色数は最後のフレームまで伸びるため、全フレームを投入した後の値が
-    /// 出力に載る色数になる。
-    pub fn color_reduction(&self) -> Option<ColorReduction> {
+    /// パレット参照で書き出していなければ `None`。載る色数は投入されたフレームの
+    /// ぶんまで伸びるため、全フレームを投入した後の値が出力に載る色数になる。
+    pub fn palette_colors(&self) -> Option<u16> {
         if !self.reduce_color {
             return None;
         }
 
-        Some(match &self.writing.as_ref()?.encoding {
-            Encoding::Direct(_) => ColorReduction::Kept,
-            Encoding::Indexed(palette) => ColorReduction::Palette {
-                colors: palette.colors(),
-            },
-        })
+        match &self.writing.as_ref()?.encoding {
+            Encoding::Direct(_) => None,
+            Encoding::Indexed(palette) => Some(palette.colors()),
+        }
     }
 
     /// 書き出しの状態と、それに依らない部品に分けて借りる

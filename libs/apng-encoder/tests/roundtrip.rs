@@ -1,6 +1,6 @@
 //! 出力したAPNGを`png`クレートでデコードし、入力フレームと一致することを確認する
 
-use apng_encoder::{ColorReduction, ColorType, Config, Encoder, Error, FrameDelay};
+use apng_encoder::{ColorType, Config, Encoder, Error, FrameDelay};
 use std::io::{self, Cursor, Seek, SeekFrom, Write};
 
 /// 決定的な擬似乱数でフレームの内容を作る
@@ -2104,13 +2104,8 @@ fn both_filter_strategies_are_reversible_while_reducing_color() {
     }
 }
 
-/// 符号化して、色種別を落とした結果を取り出す
-fn reduction_of(
-    width: u32,
-    height: u32,
-    config: Config,
-    input: &[Vec<u8>],
-) -> Option<ColorReduction> {
+/// 符号化して、パレットに載せた色数を取り出す
+fn palette_colors_of(width: u32, height: u32, config: Config, input: &[Vec<u8>]) -> Option<u16> {
     let delay = FrameDelay::new(1001, 30000).unwrap();
     let mut encoder = Encoder::new(
         Cursor::new(Vec::new()),
@@ -2123,10 +2118,10 @@ fn reduction_of(
     for data in input {
         encoder.add_frame(data, delay).unwrap();
     }
-    // 色種別は先頭フレームで決まるため、終端の前に読める
-    let reduction = encoder.color_reduction();
+    // 終端はエンコーダを消費するため、色数は先に読む
+    let colors = encoder.palette_colors();
     encoder.finish().unwrap();
-    reduction
+    colors
 }
 
 /// パレットで出したときは載せた色数まで分かる
@@ -2135,26 +2130,24 @@ fn a_palette_is_reported_with_its_color_count() {
     for colors in [1, 200, MAX_PALETTE_COLORS] {
         let input = vec![palette_frame(colors, 0), palette_frame(colors, 0)];
         assert_eq!(
-            reduction_of(
+            palette_colors_of(
                 REDUCE_WIDTH,
                 REDUCE_HEIGHT,
                 reduce_config(ColorType::Rgba8),
                 &input
             ),
-            Some(ColorReduction::Palette {
-                colors: colors as u16
-            }),
+            Some(colors as u16),
             "{colors} 色"
         );
     }
 }
 
-/// 落とす設定でなければ結果も無い
+/// 落とす設定でなければ色数も無い
 #[test]
 fn nothing_is_reported_without_the_setting() {
     let input = distinct_frames(ColorType::Rgba8, 4);
     assert_eq!(
-        reduction_of(
+        palette_colors_of(
             REDUCE_WIDTH,
             REDUCE_HEIGHT,
             config(ColorType::Rgba8),
