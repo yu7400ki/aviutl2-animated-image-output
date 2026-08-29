@@ -453,7 +453,7 @@ impl<W: Write + Seek> Parts<'_, W> {
         let (dispose, rect) = (disposal.op, disposal.rect);
         let (blend, candidate) =
             self.choose_blend(&writing.encoding, data, disposal, &mut writing.blend_pacing);
-        let body = candidate.into_body(self.codec);
+        let body = candidate.into_body();
 
         self.flush_pending(&mut writing.pending, dispose)?;
         writing.pending = Some(Pending {
@@ -640,7 +640,6 @@ impl<W: Write + Seek> Parts<'_, W> {
 mod tests {
     use super::*;
     use crate::chunk;
-    use crate::codec::PROBE_FRAMES;
     use crate::testing::noise;
     use flate2::read::ZlibDecoder;
     use std::io::{Cursor, Read};
@@ -689,21 +688,27 @@ mod tests {
         frame
     }
 
-    /// [`gradient_frame`] が敷く色数
+    /// [`mottled_frame`] が敷く色数
     ///
     /// キャンバスがこの全部を覆う値域になっている。
-    const GRADIENT_COLORS: usize = 200;
+    const MOTTLED_COLORS: usize = 200;
 
-    /// 添字がなだらかな勾配になるフレーム
+    /// 値がなだらかに動く土台へ微小なゆらぎを載せたフレーム
     ///
-    /// 色を見つける順が値の昇順と一致するため、パレット参照の添字も勾配になる。
-    /// 隣接画素の添字の差が一定で、行ごとの適応フィルタが効く。
-    fn gradient_frame(seed: u32) -> Vec<u8> {
+    /// 3チャネルとも値ごとに動き、隣接画素の差は揃わない。色を見つける順は
+    /// 値の昇順から少しずつずれ、パレット参照の添字も同じだけ乱れる。
+    fn mottled_frame(seed: u32) -> Vec<u8> {
+        let grain = noise((WIDTH * HEIGHT) as usize, seed);
         let mut frame = Vec::new();
         for y in 0..HEIGHT as usize {
             for x in 0..WIDTH as usize {
-                let color = (x + y * 5 + seed as usize * 2) % GRADIENT_COLORS;
-                frame.extend_from_slice(&[color as u8, 0x40, 0x80]);
+                let jitter = grain[y * WIDTH as usize + x] as usize & 7;
+                let value = (x + y * 5 + seed as usize * 2 + jitter) % MOTTLED_COLORS;
+                frame.extend_from_slice(&[
+                    value as u8,
+                    (value * 3 + 0x40) as u8,
+                    (value * 5 + 0x80) as u8,
+                ]);
             }
         }
         frame
@@ -798,25 +803,6 @@ mod tests {
         }
     }
 
-    /// フレームごとの、圧縮した本体のバイト数
-    fn body_lengths(bytes: &[u8]) -> Vec<usize> {
-        let mut lengths = Vec::new();
-        let mut offset = chunk::SIGNATURE.len();
-
-        while offset + 12 <= bytes.len() {
-            let len = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
-            match &bytes[offset + 4..offset + 8] {
-                b"IDAT" => lengths.push(len),
-                // fdATは先頭4バイトが連番
-                b"fdAT" => lengths.push(len - 4),
-                _ => {}
-            }
-            offset += 12 + len;
-        }
-
-        lengths
-    }
-
     /// フレームごとのフィルタ種別バイト
     fn filter_types(bytes: &[u8], bpp: usize) -> Vec<Vec<u8>> {
         written_frames(bytes)
@@ -825,10 +811,13 @@ mod tests {
             .collect()
     }
 
-    /// フィルタを掛けない方が小さい素材は、プローブ中のフレームも含めてNoneだけになる
+    /// 戦略の確認に使うフレーム数
+    const FRAMES: u32 = 8;
+
+    /// フィルタを掛けない方が小さい素材は、どのフレームもNoneだけになる
     #[test]
-    fn a_flat_source_settles_on_the_unfiltered_strategy() {
-        let input: Vec<Vec<u8>> = (0..PROBE_FRAMES + 4).map(flat_frame).collect();
+    fn a_flat_source_takes_the_unfiltered_strategy_on_every_frame() {
+        let input: Vec<Vec<u8>> = (0..FRAMES).map(flat_frame).collect();
         let bytes = encode(&input, rgb_config());
 
         let types = filter_types(&bytes, 3);
@@ -838,10 +827,10 @@ mod tests {
         }
     }
 
-    /// 適応フィルタが効く素材は、プローブ中のフレームからNone以外を選ぶ
+    /// 適応フィルタが効く素材は、どのフレームもNone以外を選ぶ
     #[test]
-    fn a_detailed_source_settles_on_the_adaptive_strategy() {
-        let input: Vec<Vec<u8>> = (0..PROBE_FRAMES + 4).map(detailed_frame).collect();
+    fn a_detailed_source_takes_the_adaptive_strategy_on_every_frame() {
+        let input: Vec<Vec<u8>> = (0..FRAMES).map(detailed_frame).collect();
         let bytes = encode(&input, rgb_config());
 
         let types = filter_types(&bytes, 3);
@@ -851,80 +840,35 @@ mod tests {
         }
     }
 
-    /// 固めた戦略は、プローブ後に素材が変わっても変わらない
+    /// 素材の途中で有利な戦略が入れ替わると、選ばれる戦略もそこで入れ替わる
     #[test]
-    fn the_strategy_stays_fixed_after_the_probe() {
-        let mut input: Vec<Vec<u8>> = (0..PROBE_FRAMES).map(detailed_frame).collect();
-        input.extend((0..4).map(flat_frame));
+    fn the_strategy_follows_the_source_frame_by_frame() {
+        const HALF: u32 = FRAMES / 2;
+
+        let mut input: Vec<Vec<u8>> = (0..HALF).map(flat_frame).collect();
+        input.extend((0..HALF).map(detailed_frame));
         let bytes = encode(&input, rgb_config());
 
-        for (index, frame) in filter_types(&bytes, 3)
-            .iter()
-            .enumerate()
-            .skip(PROBE_FRAMES as usize)
-        {
+        let types = filter_types(&bytes, 3);
+        assert_eq!(types.len(), input.len());
+        for (index, frame) in types.iter().take(HALF as usize).enumerate() {
+            assert!(frame.iter().all(|&f| f == 0), "フレーム {index}: {frame:?}");
+        }
+        for (index, frame) in types.iter().enumerate().skip(HALF as usize) {
             assert!(frame.iter().any(|&f| f != 0), "フレーム {index}: {frame:?}");
         }
-
-        let mut input: Vec<Vec<u8>> = (0..PROBE_FRAMES).map(flat_frame).collect();
-        input.extend((0..4).map(detailed_frame));
-        let bytes = encode(&input, rgb_config());
-
-        for (index, frame) in filter_types(&bytes, 3)
-            .iter()
-            .enumerate()
-            .skip(PROBE_FRAMES as usize)
-        {
-            assert!(frame.iter().all(|&f| f == 0), "フレーム {index}: {frame:?}");
-        }
     }
 
-    /// dispose_opの候補を2つ圧縮しても、プローブは1フレームにつき1回しか進まない
-    ///
-    /// 3フレーム目は先頭フレームと同じ内容なので捨てる候補が立ち、両方が圧縮される。
-    /// 二重に数えるとプローブが1フレーム早く尽き、4フレーム目が固めた戦略で書かれる。
+    /// 色種別をパレット参照へ落としても、フレームごとに戦略が選ばれる
     #[test]
-    fn dispose_candidates_do_not_consume_extra_probes() {
-        let input = vec![
-            detailed_frame(0),
-            detailed_frame(1),
-            detailed_frame(0),
-            flat_frame(0),
-            flat_frame(1),
-        ];
-        let bytes = encode(&input, rgb_config());
-
-        let types = filter_types(&bytes, 3);
-        assert_eq!(types.len(), input.len());
-        // プローブの最後の1回に入るため、フィルタを掛けない方が小さいこのフレームはNoneだけになる
-        assert!(types[3].iter().all(|&f| f == 0), "{:?}", types[3]);
-        // 固めた戦略は適応フィルタなので、同じ素材でもNone以外を選ぶ
-        assert!(types[4].iter().any(|&f| f != 0), "{:?}", types[4]);
-    }
-
-    /// プローブが終わらないまま入力が尽きても、フレームはすべて書き出される
-    #[test]
-    fn an_input_shorter_than_the_probe_is_written_in_full() {
-        let input: Vec<Vec<u8>> = (0..PROBE_FRAMES - 1).map(flat_frame).collect();
-        let bytes = encode(&input, rgb_config());
-
-        let types = filter_types(&bytes, 3);
-        assert_eq!(types.len(), input.len());
-        for (index, frame) in types.iter().enumerate() {
-            assert!(frame.iter().all(|&f| f == 0), "フレーム {index}: {frame:?}");
-        }
-    }
-
-    /// 色種別をパレット参照へ落としても、プローブが戦略を決める
-    #[test]
-    fn reducing_the_color_type_still_settles_the_strategy() {
+    fn reducing_the_color_type_still_takes_a_strategy_per_frame() {
         let config = Config {
             color_type: ColorType::Rgba8,
             reduce_color: true,
             ..Config::default()
         };
 
-        let input: Vec<Vec<u8>> = (0..PROBE_FRAMES + 4)
+        let input: Vec<Vec<u8>> = (0..FRAMES)
             .map(|seed| with_alpha(&flat_frame(seed)))
             .collect();
         let bytes = encode(&input, config);
@@ -933,8 +877,8 @@ mod tests {
             assert!(frame.iter().all(|&f| f == 0), "フレーム {index}: {frame:?}");
         }
 
-        let input: Vec<Vec<u8>> = (0..PROBE_FRAMES + 4)
-            .map(|seed| with_alpha(&gradient_frame(seed)))
+        let input: Vec<Vec<u8>> = (0..FRAMES)
+            .map(|seed| with_alpha(&mottled_frame(seed)))
             .collect();
         let bytes = encode(&input, config);
         assert_eq!(output_bytes_per_pixel(&bytes), 1);
@@ -948,91 +892,6 @@ mod tests {
         Config {
             color_type: ColorType::Rgba8,
             ..Config::default()
-        }
-    }
-
-    /// 1行おきに `other` の内容へ差し替えたフレーム
-    ///
-    /// 矩形はキャンバス全体に広がり、その中の半分の画素が変化しない。
-    fn interleaved(base: &[u8], other: &[u8], bpp: usize) -> Vec<u8> {
-        let stride = WIDTH as usize * bpp;
-        let mut frame = base.to_vec();
-        for y in (1..HEIGHT as usize).step_by(2) {
-            let row = y * stride..(y + 1) * stride;
-            frame[row.clone()].copy_from_slice(&other[row]);
-        }
-        frame
-    }
-
-    /// blend_opの候補を2つ圧縮しても、プローブは1フレームにつき1回しか進まない
-    ///
-    /// 2フレーム目は矩形の半分が変化しないため、潰した候補が立って両方が圧縮される。
-    /// 二重に数えるとプローブが1フレーム早く尽き、4フレーム目が固めた戦略で書かれる。
-    #[test]
-    fn blend_candidates_do_not_consume_extra_probes() {
-        let base = with_alpha(&detailed_frame(0));
-        let input = vec![
-            interleaved(&base, &with_alpha(&detailed_frame(1)), 4),
-            base,
-            with_alpha(&detailed_frame(2)),
-            with_alpha(&flat_frame(0)),
-            with_alpha(&flat_frame(1)),
-        ];
-        let bytes = encode(&input, rgba_config());
-
-        let types = filter_types(&bytes, 4);
-        assert_eq!(types.len(), input.len());
-        // プローブの最後の1回に入るため、フィルタを掛けない方が小さいこのフレームはNoneだけになる
-        assert!(types[3].iter().all(|&f| f == 0), "{:?}", types[3]);
-        // 固めた戦略は適応フィルタなので、同じ素材でもNone以外を選ぶ
-        assert!(types[4].iter().any(|&f| f != 0), "{:?}", types[4]);
-    }
-
-    /// プローブに記録するのは、書き出す候補を圧縮したときのバイト数
-    ///
-    /// 2フレーム目は矩形の中身が一様になり、潰した候補は周期的な穴が空くぶん大きい。
-    /// 採らなかった候補を記録すると、以降の戦略が書き出していない大きさで決まる。
-    #[test]
-    fn the_probe_records_the_candidate_that_is_written() {
-        const PIXELS: usize = (WIDTH * HEIGHT) as usize;
-        /// まだらに置き換える画素の間隔
-        const STEP: usize = 7;
-
-        let uniform = |value: u8| with_alpha(&vec![value; PIXELS * 3]);
-        let mut speckled = uniform(0x30);
-        for pixel in (0..PIXELS).step_by(STEP) {
-            speckled[pixel * 4..pixel * 4 + 4].copy_from_slice(&[0xC0, 0xB0, 0xA0, 0xFF]);
-        }
-        let input = vec![speckled, uniform(0x30), uniform(0x50), uniform(0x70)];
-        assert_eq!(input.len(), PROBE_FRAMES as usize);
-
-        let mut encoder = Encoder::new(
-            Cursor::new(Vec::new()),
-            WIDTH,
-            HEIGHT,
-            input.len() as u32,
-            rgba_config(),
-        )
-        .unwrap();
-        let mut recorded = Vec::new();
-        let mut totals = (0u64, 0u64);
-        for frame in &input {
-            encoder
-                .add_frame(frame, FrameDelay::new(1, 30).unwrap())
-                .unwrap();
-            let probed = encoder.codec.probe_totals();
-            recorded.push((
-                (probed.0 - totals.0) as usize,
-                (probed.1 - totals.1) as usize,
-            ));
-            totals = probed;
-        }
-        let bytes = encoder.finish().unwrap().into_inner();
-
-        let bodies = body_lengths(&bytes);
-        assert_eq!(bodies.len(), input.len());
-        for (index, ((adaptive, unfiltered), body)) in recorded.iter().zip(&bodies).enumerate() {
-            assert_eq!(adaptive.min(unfiltered), body, "フレーム {index}");
         }
     }
 

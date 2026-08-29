@@ -2020,21 +2020,27 @@ fn detailed_frame(color_type: ColorType, seed: u32) -> Vec<u8> {
     frame
 }
 
-/// [`gradient_frame`] が敷く色数
+/// [`mottled_frame`] が敷く色数
 ///
 /// キャンバスがこの全部を覆う値域になっている。
-const GRADIENT_COLORS: usize = 128;
+const MOTTLED_COLORS: usize = 128;
 
-/// 添字がなだらかな勾配になるフレーム
+/// 値がなだらかに動く土台へ微小なゆらぎを載せたフレーム
 ///
-/// 色を見つける順が値の昇順と一致するため、パレット参照の添字も勾配になる。
-/// 隣接画素の添字の差が一定で、行ごとの適応フィルタが効く。
-fn gradient_frame(color_type: ColorType, seed: u32) -> Vec<u8> {
+/// 3チャネルとも値ごとに動き、隣接画素の差は揃わない。色を見つける順は
+/// 値の昇順から少しずつずれ、パレット参照の添字も同じだけ乱れる。
+fn mottled_frame(color_type: ColorType, seed: u32) -> Vec<u8> {
+    let grain = frame_data((FILTER_WIDTH * FILTER_HEIGHT) as usize, seed + 1);
     let mut frame = Vec::new();
     for y in 0..FILTER_HEIGHT as usize {
         for x in 0..FILTER_WIDTH as usize {
-            let color = (x + y * 5 + seed as usize * 2) % GRADIENT_COLORS;
-            frame.extend_from_slice(&[color as u8, 0x40, 0x80]);
+            let jitter = grain[y * FILTER_WIDTH as usize + x] as usize & 7;
+            let value = (x + y * 5 + seed as usize * 2 + jitter) % MOTTLED_COLORS;
+            frame.extend_from_slice(&[
+                value as u8,
+                (value * 3 + 0x40) as u8,
+                (value * 5 + 0x80) as u8,
+            ]);
             if color_type == ColorType::Rgba8 {
                 frame.push(0xFF);
             }
@@ -2056,7 +2062,7 @@ fn assert_composites_to(bytes: &[u8], width: u32, color_type: ColorType, expecte
     }
 }
 
-/// プローブの前後をまたぐ長さで、どちらの戦略に決まっても可逆であること
+/// どちらの戦略が選ばれても可逆であること
 #[test]
 fn both_filter_strategies_are_reversible() {
     let sources = [flat_frame as fn(ColorType, u32) -> Vec<u8>, detailed_frame];
@@ -2076,7 +2082,7 @@ fn both_filter_strategies_are_reversible() {
 /// 色種別を落とす経路でも、どちらの戦略に決まっても可逆であること
 #[test]
 fn both_filter_strategies_are_reversible_while_reducing_color() {
-    let sources = [flat_frame as fn(ColorType, u32) -> Vec<u8>, gradient_frame];
+    let sources = [flat_frame as fn(ColorType, u32) -> Vec<u8>, mottled_frame];
     let config = Config {
         reduce_color: true,
         ..config(ColorType::Rgba8)
