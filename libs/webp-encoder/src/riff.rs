@@ -236,7 +236,7 @@ mod tests {
         assert_eq!(u24_at(&bytes, 27), 199);
         assert_eq!(&bytes[30..34], b"ANIM");
         assert_eq!(u32_at(&bytes, 34), ANIM_PAYLOAD);
-        assert_eq!(&bytes[38..42], BACKGROUND_COLOR);
+        assert_eq!(&bytes[38..42], [0, 0, 0, 0]);
         assert_eq!(u16::from_le_bytes([bytes[42], bytes[43]]), 7);
     }
 
