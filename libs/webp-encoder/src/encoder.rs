@@ -1,5 +1,6 @@
 //! 全体の駆動
 
+use crate::budget;
 use crate::codec::{Codec, EncodedFrame, Job};
 use crate::delay::{Durations, MAX_DURATION, Milliseconds};
 use crate::error::Error;
@@ -205,6 +206,9 @@ impl<W: Write + Seek> Encoder<W> {
     ///
     /// フレーム数が2以上のとき、RIFFヘッダ・VP8X・ANIMをここで書く。
     ///
+    /// 符号化を回すワーカー数は、機械の並列度と、抱える量に置いた予算の
+    /// 小さい方になる。実際に起こした数は [`Encoder::workers`] が返す。
+    ///
     /// # Errors
     /// 寸法が0か16383を超えるとき [`Error::InvalidDimensions`]。フレーム数が0の
     /// とき [`Error::InvalidFrameCount`]。設定が値域の外のとき [`Error::Encode`]。
@@ -216,7 +220,9 @@ impl<W: Write + Seek> Encoder<W> {
         num_frames: u32,
         config: Config,
     ) -> Result<Self, Error> {
-        let workers = available_parallelism().unwrap_or(NonZeroUsize::MIN);
+        let available = available_parallelism().unwrap_or(NonZeroUsize::MIN);
+        let layout = Layout::new(width, height, config.color_type)?;
+        let workers = budget::workers(&layout, &config, available);
         Self::with_workers(writer, width, height, num_frames, config, workers)
     }
 
