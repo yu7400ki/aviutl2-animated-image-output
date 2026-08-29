@@ -1155,3 +1155,28 @@ fn a_writer_that_cannot_take_the_header_is_rejected() {
         Err(Error::Io(_))
     ));
 }
+
+/// 大きいキャンバスでは、機械の並列度より少ないワーカーで起こす
+///
+/// 抱える量はワーカー数へ比例するので、1枚が重くなるほど起こす数が減る。
+/// 群れを起こす前に判定を済ませるため、フレームを投入しなくても数は決まる。
+#[test]
+fn a_heavy_canvas_wakes_fewer_workers() {
+    let available = available_parallelism().map_or(1, NonZeroUsize::get);
+    let config = config(ColorType::Rgba8, 0);
+
+    let workers = |width, height| {
+        Encoder::new(Cursor::new(Vec::new()), width, height, 2, config)
+            .unwrap()
+            .workers()
+            .get()
+    };
+
+    let small = workers(64, 64);
+    let large = workers(1920, 1080);
+    assert_eq!(small, available, "小さいキャンバスで絞っている");
+    assert!(large <= small, "大きいキャンバスで増えている: {large}");
+    if available >= 8 {
+        assert!(large < available, "上限が掛かっていない: {large}");
+    }
+}
