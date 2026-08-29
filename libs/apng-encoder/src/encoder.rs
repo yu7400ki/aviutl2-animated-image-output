@@ -170,7 +170,7 @@ enum Collapse<'a> {
 
 /// 書き出しが持ち越す状態
 ///
-/// 先頭フレームで出力の画素表現が決まってから作られ、以降のフレームはこれに従う。
+/// 出力の画素表現はここで固定され、フレームはすべてこれに従う。
 struct Writing {
     /// 出力の画素表現
     encoding: Encoding,
@@ -207,12 +207,9 @@ pub struct Encoder<W: Write + Seek> {
     codec: Codec,
     /// 直前のフレームとキャンバスの追跡
     delta: Delta,
-    /// 書き出しの状態。先頭フレームで出力の画素表現が決まるまでは `None`
-    writing: Option<Writing>,
-    /// 出力の色種別をパレット参照へ落とすよう求められたか
-    reduce_color: bool,
+    /// 書き出しの状態
+    writing: Writing,
     num_frames: u32,
-    num_plays: u32,
     /// [`Self::add_frame`] が受け付けたフレーム数
     frames_accepted: u32,
     /// 書き出しに失敗し、チャンク列が中断しているか
@@ -222,11 +219,11 @@ pub struct Encoder<W: Write + Seek> {
 impl<W: Write + Seek> Encoder<W> {
     /// `num_frames` フレームを受け付ける状態にする
     ///
-    /// 出力の色種別が最初から決まっていれば、この時点でシグネチャとヘッダを書き出す。
+    /// この時点でシグネチャと、画素データより前に置くチャンクを書き出す。
     ///
     /// # Errors
     /// 幅・高さ・フレーム数が0のとき、1フレームのバイト数が `usize` で表現できないとき、
-    /// または圧縮レベルが範囲外のとき。
+    /// 圧縮レベルが範囲外のとき、または書き出しに失敗したとき。
     pub fn new(
         writer: W,
         width: u32,
@@ -244,26 +241,69 @@ impl<W: Write + Seek> Encoder<W> {
             return Err(Error::InvalidCompressionLevel(config.compression_level));
         }
 
-        let mut encoder = Encoder {
-            chunks: ChunkWriter::new(writer),
-            layout: Layout::new(width, height, config.color_type)?,
+        let layout = Layout::new(width, height, config.color_type)?;
+        let mut chunks = ChunkWriter::new(writer);
+        let encoding = Self::open(&mut chunks, &layout, num_frames, config)?;
+
+        Ok(Encoder {
+            chunks,
+            layout,
             codec: Codec::new(config.compression_level),
             delta: Delta::new(),
-            writing: None,
-            reduce_color: config.reduce_color,
+            writing: Writing::new(encoding),
             num_frames,
-            num_plays: config.num_plays,
             frames_accepted: 0,
             poisoned: false,
+        })
+    }
+
+    /// 画素データより前に置くチャンクを書き出し、出力の画素表現を決める
+    ///
+    /// パレット参照のPLTEとtRNSは色数が決まる前に場所だけ確保し、
+    /// [`Encoder::finish`] で書き戻す。
+    fn open(
+        chunks: &mut ChunkWriter<W>,
+        layout: &Layout,
+        num_frames: u32,
+        config: Config,
+    ) -> Result<Encoding, Error> {
+        let output = if config.reduce_color {
+            Output::Indexed8
+        } else {
+            Output::from(config.color_type)
         };
 
+        chunks.write_signature()?;
+
+        let mut ihdr = [0u8; 13];
+        ihdr[0..4].copy_from_slice(&layout.width.to_be_bytes());
+        ihdr[4..8].copy_from_slice(&layout.height.to_be_bytes());
+        ihdr[8] = 8;
+        ihdr[9] = output.code();
+        chunks.write(*b"IHDR", &ihdr)?;
+
+        let mut actl = [0u8; 8];
+        actl[0..4].copy_from_slice(&num_frames.to_be_bytes());
+        actl[4..8].copy_from_slice(&config.num_plays.to_be_bytes());
+        chunks.write(*b"acTL", &actl)?;
+
         if !config.reduce_color {
-            let output = Output::from(config.color_type);
-            let (_, mut parts) = encoder.split();
-            parts.write_header(output)?;
-            encoder.writing = Some(Writing::new(Encoding::Direct(output)));
+            return Ok(Encoding::Direct(output));
         }
-        Ok(encoder)
+
+        let plte = chunks.position()?;
+        chunks.write(*b"PLTE", &PLTE_PLACEHOLDER)?;
+        // アルファを持たない入力にはアルファが現れないため、tRNS自体が要らない
+        let trns = match layout.input {
+            ColorType::Rgb8 => None,
+            ColorType::Rgba8 => {
+                let at = chunks.position()?;
+                chunks.write(*b"tRNS", &TRNS_PLACEHOLDER)?;
+                Some(at)
+            }
+        };
+
+        Ok(Encoding::Indexed(Palette::new(plte, trns)))
     }
 
     /// パレットに載せた色数
@@ -271,11 +311,7 @@ impl<W: Write + Seek> Encoder<W> {
     /// パレット参照で書き出していなければ `None`。載る色数は投入されたフレームの
     /// ぶんまで伸びるため、全フレームを投入した後の値が出力に載る色数になる。
     pub fn palette_colors(&self) -> Option<u16> {
-        if !self.reduce_color {
-            return None;
-        }
-
-        match &self.writing.as_ref()?.encoding {
+        match &self.writing.encoding {
             Encoding::Direct(_) => None,
             Encoding::Indexed(palette) => Some(palette.colors()),
         }
@@ -284,16 +320,14 @@ impl<W: Write + Seek> Encoder<W> {
     /// 書き出しの状態と、それに依らない部品に分けて借りる
     ///
     /// 状態を取り出したまま部品を触れるようにする。
-    fn split(&mut self) -> (&mut Option<Writing>, Parts<'_, W>) {
+    fn split(&mut self) -> (&mut Writing, Parts<'_, W>) {
         let Encoder {
             chunks,
             layout,
             codec,
             delta,
             writing,
-            reduce_color: _,
-            num_frames,
-            num_plays,
+            num_frames: _,
             frames_accepted,
             poisoned: _,
         } = self;
@@ -305,8 +339,6 @@ impl<W: Write + Seek> Encoder<W> {
                 layout,
                 codec,
                 delta,
-                num_frames: *num_frames,
-                num_plays: *num_plays,
                 frame: *frames_accepted,
             },
         )
@@ -353,14 +385,8 @@ impl<W: Write + Seek> Encoder<W> {
     }
 
     /// 投入されたフレームを書き出す
-    ///
-    /// 先頭フレームを書き出す前に、パレット参照のヘッダを並べる。
     fn accept(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
-        let (slot, mut parts) = self.split();
-        if slot.is_none() {
-            *slot = Some(parts.open()?);
-        }
-        let writing = slot.as_mut().expect("先頭フレームで書き出しの状態が決まる");
+        let (writing, mut parts) = self.split();
         parts.write_frame(writing, data, delay)
     }
 
@@ -381,12 +407,10 @@ impl<W: Write + Seek> Encoder<W> {
         }
 
         // 次のフレームが無いため、最後のフレームは捨てても復元される先が無い
-        let (slot, mut parts) = self.split();
-        if let Some(writing) = slot {
-            parts.flush_pending(&mut writing.pending, DISPOSE_OP_NONE)?;
-            if let Encoding::Indexed(palette) = &writing.encoding {
-                parts.settle(palette)?;
-            }
+        let (writing, mut parts) = self.split();
+        parts.flush_pending(&mut writing.pending, DISPOSE_OP_NONE)?;
+        if let Encoding::Indexed(palette) = &writing.encoding {
+            parts.settle(palette)?;
         }
 
         self.chunks.write(*b"IEND", &[])?;
@@ -402,52 +426,11 @@ struct Parts<'a, W: Write + Seek> {
     layout: &'a Layout,
     codec: &'a mut Codec,
     delta: &'a mut Delta,
-    num_frames: u32,
-    num_plays: u32,
     /// 処理しているフレームの、投入された順の位置
     frame: u32,
 }
 
 impl<W: Write + Seek> Parts<'_, W> {
-    /// シグネチャと、画素データより前に置くチャンクを書き出す
-    fn write_header(&mut self, output: Output) -> Result<(), Error> {
-        self.chunks.write_signature()?;
-
-        let mut ihdr = [0u8; 13];
-        ihdr[0..4].copy_from_slice(&self.layout.width.to_be_bytes());
-        ihdr[4..8].copy_from_slice(&self.layout.height.to_be_bytes());
-        ihdr[8] = 8;
-        ihdr[9] = output.code();
-        self.chunks.write(*b"IHDR", &ihdr)?;
-
-        let mut actl = [0u8; 8];
-        actl[0..4].copy_from_slice(&self.num_frames.to_be_bytes());
-        actl[4..8].copy_from_slice(&self.num_plays.to_be_bytes());
-        self.chunks.write(*b"acTL", &actl)?;
-
-        Ok(())
-    }
-
-    /// パレット参照で書き出すためのヘッダを並べる
-    ///
-    /// PLTEとtRNSは色数が決まる前に場所だけ確保し、[`Encoder::finish`] で書き戻す。
-    fn open(&mut self) -> Result<Writing, Error> {
-        self.write_header(Output::Indexed8)?;
-        let plte = self.chunks.position()?;
-        self.chunks.write(*b"PLTE", &PLTE_PLACEHOLDER)?;
-        // アルファを持たない入力にはアルファが現れないため、tRNS自体が要らない
-        let trns = match self.layout.input {
-            ColorType::Rgb8 => None,
-            ColorType::Rgba8 => {
-                let at = self.chunks.position()?;
-                self.chunks.write(*b"tRNS", &TRNS_PLACEHOLDER)?;
-                Some(at)
-            }
-        };
-
-        Ok(Writing::new(Encoding::Indexed(Palette::new(plte, trns))))
-    }
-
     /// 場所を確保しておいた位置へPLTEとtRNSを書き戻す
     fn settle(&mut self, palette: &Palette) -> Result<(), Error> {
         self.chunks
@@ -1088,8 +1071,7 @@ mod tests {
 
     /// フレームを受け付けたエンコーダが持つ間合い
     fn pacing_of<W: Write + Seek>(encoder: &Encoder<W>) -> &BlendPacing {
-        let writing = encoder.writing.as_ref().expect("書き出しが始まっている");
-        &writing.blend_pacing
+        &encoder.writing.blend_pacing
     }
 
     /// 書き出しの経路は、候補を立てる前に間合いを見る
