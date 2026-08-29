@@ -65,7 +65,7 @@ impl Table {
 
 /// 全フレームに現れた色の和集合
 ///
-/// 見つけた色が [`MAX_COLORS`] を超えた時点で走査をやめ、以降は何も数えない。
+/// 見つけた色が [`MAX_COLORS`] を超えた時点で、以降は何も数えない。
 pub struct Colors {
     table: Table,
     /// [`pack`] で詰めた色を見つけた順に並べたもの
@@ -90,13 +90,6 @@ impl Colors {
         }
     }
 
-    /// 色数が上限を超えたか
-    ///
-    /// 一度真になったら戻らないため、以降の走査は要らない。
-    pub fn exceeded(&self) -> bool {
-        self.exceeded
-    }
-
     /// 数えた色の種類数
     ///
     /// 上限を超えた後は数えないため、超えていない間だけ意味を持つ。
@@ -104,33 +97,9 @@ impl Colors {
         self.entries.len() as u16
     }
 
-    /// 画素列に現れる色を数える
-    ///
-    /// `pixels` は1画素 `bpp` バイトが隙間なく並んでいること。`bpp` は3か4であること。
-    pub fn observe(&mut self, pixels: &[u8], bpp: usize) {
-        if self.exceeded {
-            return;
-        }
-
-        match bpp {
-            3 => self.scan::<3>(pixels),
-            4 => self.scan::<4>(pixels),
-            other => panic!("1画素あたり3バイトか4バイトのみ扱える: {other}"),
-        }
-    }
-
-    fn scan<const BPP: usize>(&mut self, pixels: &[u8]) {
-        for pixel in pixels.chunks_exact(BPP) {
-            if !self.insert(pack::<BPP>(pixel)) {
-                self.exceeded = true;
-                return;
-            }
-        }
-    }
-
     /// 色を1つ数える。上限を超えて入らなければ偽を返す
     ///
-    /// 入らなかった時点で [`Colors::exceeded`] が立つ。
+    /// 一度入らなかった後は、既に数えた色でも偽を返す。
     pub fn observe_color(&mut self, color: u32) -> bool {
         if self.exceeded {
             return false;
@@ -244,7 +213,7 @@ mod tests {
     /// 画素列を数えた表
     fn counted(pixels: &[u8], bpp: usize) -> Colors {
         let mut colors = Colors::new();
-        colors.observe(pixels, bpp);
+        assert!(colors.append_indices(pixels, bpp, &mut Vec::new()));
         colors
     }
 
@@ -319,7 +288,7 @@ mod tests {
         }
 
         assert!(!colors.observe_color(MAX_COLORS as u32));
-        assert!(colors.exceeded());
+        assert!(!colors.observe_color(0), "溢れた後に数えている");
         assert_eq!(colors.index_of(MAX_COLORS as u32), None);
         assert_eq!(colors.index_of(0), Some(0));
         assert_eq!(
@@ -355,8 +324,7 @@ mod tests {
     /// 既に数えた色は、写すときも同じ添字を引く
     #[test]
     fn already_counted_colors_keep_their_indices_when_mapped() {
-        let mut colors = Colors::new();
-        colors.observe(&distinct_rgb(3), 3);
+        let mut colors = counted(&distinct_rgb(3), 3);
 
         let mut indices = Vec::new();
         assert!(colors.append_indices(&distinct_rgb(3), 3, &mut indices));
@@ -372,14 +340,13 @@ mod tests {
         assert!(!colors.append_indices(&distinct_rgb(MAX_COLORS + 1), 3, &mut indices));
 
         assert_eq!(indices, [0xAA]);
-        assert!(colors.exceeded());
+        assert!(!colors.observe_color(0), "溢れた後に数えている");
     }
 
     /// 画素から添字を引ける。数えていない色は `None`
     #[test]
     fn a_counted_pixel_is_looked_up_by_its_bytes() {
-        let mut colors = Colors::new();
-        colors.observe(&rgba(&[[1, 2, 3, 0xFF], [4, 5, 6, 0x80]]), 4);
+        let colors = counted(&rgba(&[[1, 2, 3, 0xFF], [4, 5, 6, 0x80]]), 4);
 
         assert_eq!(colors.index_of_pixel(&[1, 2, 3, 0xFF], 4), Some(0));
         assert_eq!(colors.index_of_pixel(&[1, 2, 3], 3), Some(0));
@@ -387,11 +354,10 @@ mod tests {
         assert_eq!(colors.index_of_pixel(&[4, 5, 6], 3), None);
     }
 
-    /// 画素列から数えた色も、1色ずつ数えた色と同じ表に載る
+    /// 写しながら数えた色も、1色ずつ数えた色と同じ表に載る
     #[test]
     fn the_two_ways_of_counting_share_one_table() {
-        let mut colors = Colors::new();
-        colors.observe(&rgba(&[[1, 2, 3, 0xFF]]), 4);
+        let mut colors = counted(&rgba(&[[1, 2, 3, 0xFF]]), 4);
         assert!(colors.observe_color(pack::<3>(&[4, 5, 6])));
 
         assert_eq!(colors.index_of(pack::<3>(&[1, 2, 3])), Some(0));
