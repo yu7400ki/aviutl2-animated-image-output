@@ -3,6 +3,7 @@ use aviutl2::IniConfig;
 use aviutl2::ini::{Ini, Properties};
 use std::num::NonZeroUsize;
 use std::thread::available_parallelism;
+use webp_encoder::{METHOD_RANGE, QUALITY_RANGE};
 
 /// 設定が採れるワーカー数の上限
 ///
@@ -59,13 +60,13 @@ impl IniConfig for Config {
             .and_then(|s| s.get("quality"))
             .and_then(|s| s.parse::<f32>().ok())
             .unwrap_or(default.quality)
-            .clamp(0.0, 100.0);
+            .clamp(*QUALITY_RANGE.start(), *QUALITY_RANGE.end());
 
         let method = section
             .and_then(|s| s.get("method"))
             .and_then(|s| s.parse::<u8>().ok())
             .unwrap_or(default.method)
-            .clamp(0, 6);
+            .clamp(*METHOD_RANGE.start(), *METHOD_RANGE.end());
 
         let workers = section
             .and_then(|s| s.get("workers"))
@@ -169,8 +170,8 @@ method=3
     fn out_of_range_quality_and_method_are_clamped() {
         let config = load(&[("quality", "1000"), ("method", "99")]);
 
-        assert_eq!(config.quality, 100.0);
-        assert_eq!(config.method, 6);
+        assert_eq!(config.quality, *QUALITY_RANGE.end());
+        assert_eq!(config.method, *METHOD_RANGE.end());
     }
 
     /// 値域の外のワーカー数は、走らせる機械の並列度の内側へ収まる

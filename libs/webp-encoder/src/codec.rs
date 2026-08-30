@@ -245,6 +245,7 @@ fn locate_payload(bytes: &[u8]) -> Option<(Option<Range<usize>>, Range<usize>)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{METHOD_RANGE, QUALITY_RANGE};
 
     /// 決定的な擬似乱数列
     fn noise(len: usize, seed: u32) -> Vec<u8> {
@@ -485,8 +486,12 @@ mod tests {
         assert_eq!((lossless.thread_level, lossy.thread_level), (0, 0));
     }
 
+    /// 名乗っている値域の内と外を、libwebp の判定そのもので分ける
+    ///
+    /// 値域は呼び出し側が入力欄の値域にも使うので、libwebp が受ける範囲と
+    /// ずれていないことをここで押さえる。
     #[test]
-    fn a_quality_or_method_outside_the_range_is_refused() {
+    fn the_ends_of_the_declared_ranges_are_the_ends_libwebp_accepts() {
         let base = Config {
             color_type: ColorType::Rgba8,
             lossless: false,
@@ -494,13 +499,40 @@ mod tests {
             method: 4,
             num_plays: 0,
         };
+
         for config in [
             Config {
-                quality: 101.0,
+                quality: *QUALITY_RANGE.start(),
                 ..base
             },
             Config {
-                quality: -1.0,
+                quality: *QUALITY_RANGE.end(),
+                ..base
+            },
+            Config {
+                method: *METHOD_RANGE.start(),
+                ..base
+            },
+            Config {
+                method: *METHOD_RANGE.end(),
+                ..base
+            },
+        ] {
+            assert!(
+                Codec::new(&config).is_ok(),
+                "quality {} method {}",
+                config.quality,
+                config.method
+            );
+        }
+
+        for config in [
+            Config {
+                quality: QUALITY_RANGE.end() + 1.0,
+                ..base
+            },
+            Config {
+                quality: QUALITY_RANGE.start() - 1.0,
                 ..base
             },
             Config {
@@ -511,7 +543,10 @@ mod tests {
                 quality: f32::INFINITY,
                 ..base
             },
-            Config { method: 7, ..base },
+            Config {
+                method: METHOD_RANGE.end() + 1,
+                ..base
+            },
         ] {
             assert!(
                 matches!(

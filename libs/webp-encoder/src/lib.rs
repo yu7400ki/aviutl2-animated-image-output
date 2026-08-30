@@ -15,6 +15,14 @@ pub use anim_core::{ColorType, FrameDelay};
 pub use encoder::Encoder;
 pub use error::{EncodingError, Error};
 
+use std::ops::RangeInclusive;
+
+/// [`Config::quality`] が採れる値
+pub const QUALITY_RANGE: RangeInclusive<f32> = 0.0..=100.0;
+
+/// [`Config::method`] が採れる値
+pub const METHOD_RANGE: RangeInclusive<u8> = 0..=6;
+
 /// エンコード設定
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
@@ -24,9 +32,11 @@ pub struct Config {
     pub color_type: ColorType,
     /// 可逆で符号化するか
     pub lossless: bool,
-    /// 品質 0.0..=100.0 (非可逆では画質、可逆では圧縮の努力)
+    /// 品質 ([`QUALITY_RANGE`] の範囲)
+    ///
+    /// 非可逆では画質を決める。可逆では画素を動かさず、圧縮率と速度を決める。
     pub quality: f32,
-    /// 速度と圧縮率の均衡 0..=6
+    /// 圧縮率と速度の均衡 ([`METHOD_RANGE`] の範囲)
     pub method: u8,
     /// アニメーションの再生回数 (0で無限ループ)
     pub num_plays: u32,
