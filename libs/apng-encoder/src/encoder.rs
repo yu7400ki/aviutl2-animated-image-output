@@ -273,33 +273,6 @@ impl<W: Write + Seek> Encoder<W> {
         }
     }
 
-    /// 書き出しの状態と、それに依らない部品に分けて借りる
-    ///
-    /// 状態を取り出したまま部品を触れるようにする。
-    fn split(&mut self) -> (&mut Writing, Parts<'_, W>) {
-        let Encoder {
-            chunks,
-            layout,
-            codec,
-            delta,
-            writing,
-            num_frames: _,
-            frames_accepted,
-            poisoned: _,
-        } = self;
-
-        (
-            writing,
-            Parts {
-                chunks,
-                layout,
-                codec,
-                delta,
-                frame: *frames_accepted,
-            },
-        )
-    }
-
     /// フレームを1つ投入する
     ///
     /// `data` は上から下・左から右の順に並んだ `幅 * 高さ * 1画素のバイト数` バイトであること。
@@ -340,10 +313,22 @@ impl<W: Write + Seek> Encoder<W> {
         Ok(())
     }
 
-    /// 投入されたフレームを書き出す
+    /// 保留中のフレームを書き出し、投入されたフレームを保留にする
     fn accept(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
-        let (writing, mut parts) = self.split();
-        parts.write_frame(writing, data, delay)
+        let disposal = self.choose_dispose(data)?;
+        let (dispose, rect) = (disposal.op, disposal.rect);
+        let (blend, candidate) = self.choose_blend(data, disposal);
+        let body = candidate.into_body();
+
+        self.flush_pending(dispose)?;
+        self.writing.pending = Some(Pending {
+            rect,
+            delay,
+            blend,
+            body,
+        });
+        self.delta.advance(data, dispose);
+        Ok(())
     }
 
     /// 終端して書き出し先を返す
@@ -363,32 +348,21 @@ impl<W: Write + Seek> Encoder<W> {
         }
 
         // 次のフレームが無いため、最後のフレームは捨てても復元される先が無い
-        let (writing, mut parts) = self.split();
-        parts.flush_pending(&mut writing.pending, DISPOSE_OP_NONE)?;
-        if let Encoding::Indexed(palette) = &writing.encoding {
-            parts.settle(palette)?;
-        }
+        self.flush_pending(DISPOSE_OP_NONE)?;
+        self.settle()?;
 
         self.chunks.write(*b"IEND", &[])?;
         Ok(self.chunks.into_inner())
     }
-}
 
-/// [`Encoder`] から [`Writing`] 以外を借りたもの
-///
-/// 書き出しの状態は引数で受け取る。フレーム1つを処理する判断と書き出しを担う。
-struct Parts<'a, W: Write + Seek> {
-    chunks: &'a mut ChunkWriter<W>,
-    layout: &'a Layout,
-    codec: &'a mut Codec,
-    delta: &'a mut Delta,
-    /// 処理しているフレームの、投入された順の位置
-    frame: u32,
-}
-
-impl<W: Write + Seek> Parts<'_, W> {
     /// 場所を確保しておいた位置へPLTEとtRNSを書き戻す
-    fn settle(&mut self, palette: &Palette) -> Result<(), Error> {
+    ///
+    /// 書き戻す先を持つのはパレット参照で書き出したときだけ。
+    fn settle(&mut self) -> Result<(), Error> {
+        let Encoding::Indexed(palette) = &self.writing.encoding else {
+            return Ok(());
+        };
+
         self.chunks
             .rewrite(palette.plte_at(), *b"PLTE", &palette.plte())?;
         if let Some(at) = palette.trns_at() {
@@ -397,48 +371,20 @@ impl<W: Write + Seek> Parts<'_, W> {
         Ok(())
     }
 
-    /// 保留中のフレームを書き出し、投入されたフレームを保留にする
-    fn write_frame(
-        &mut self,
-        writing: &mut Writing,
-        data: &[u8],
-        delay: FrameDelay,
-    ) -> Result<(), Error> {
-        let disposal =
-            self.choose_dispose(&mut writing.encoding, data, writing.pending.is_some())?;
-        let (dispose, rect) = (disposal.op, disposal.rect);
-        let (blend, candidate) =
-            self.choose_blend(&writing.encoding, data, disposal, &mut writing.blend_pacing);
-        let body = candidate.into_body();
-
-        self.flush_pending(&mut writing.pending, dispose)?;
-        writing.pending = Some(Pending {
-            rect,
-            delay,
-            blend,
-            body,
-        });
-        self.delta.advance(data, dispose);
-        Ok(())
-    }
-
     /// 保留中のフレームのdispose_opと、投入されたフレームの矩形を決める
     ///
     /// 保留中のフレームをdispose_op=PREVIOUSで捨てると、投入されたフレームは
     /// それを描く直前のキャンバスとの差分になる。両方の候補を圧縮して小さい方を採り、
     /// 採った側を戻り値へ残して、退けた側のバッファはプールへ返す。同じ大きさなら捨てない。
-    fn choose_dispose(
-        &mut self,
-        encoding: &mut Encoding,
-        data: &[u8],
-        disposable: bool,
-    ) -> Result<Disposal, Error> {
-        let kept = self.delta.kept_rect(self.layout, data, self.frame);
+    fn choose_dispose(&mut self, data: &[u8]) -> Result<Disposal, Error> {
+        let frame = self.frames_accepted;
+        let disposable = self.writing.pending.is_some();
+        let kept = self.delta.kept_rect(&self.layout, data, frame);
         let restored = self
             .delta
-            .restored_rect(self.layout, data, kept, self.frame, disposable);
+            .restored_rect(&self.layout, data, kept, frame, disposable);
 
-        let kept_candidate = self.compress_rect(encoding, data, kept)?;
+        let kept_candidate = self.compress_rect(data, kept)?;
         let keep = |candidate| Disposal {
             op: DISPOSE_OP_NONE,
             rect: kept,
@@ -448,17 +394,17 @@ impl<W: Write + Seek> Parts<'_, W> {
             return Ok(keep(kept_candidate));
         };
 
-        let restored_candidate = self.compress_rect(encoding, data, restored)?;
+        let restored_candidate = self.compress_rect(data, restored)?;
 
         if restored_candidate.len() < kept_candidate.len() {
-            kept_candidate.discard(self.codec);
+            kept_candidate.discard(&mut self.codec);
             Ok(Disposal {
                 op: DISPOSE_OP_PREVIOUS,
                 rect: restored,
                 candidate: restored_candidate,
             })
         } else {
-            restored_candidate.discard(self.codec);
+            restored_candidate.discard(&mut self.codec);
             Ok(keep(kept_candidate))
         }
     }
@@ -472,23 +418,17 @@ impl<W: Write + Seek> Parts<'_, W> {
     ///
     /// 潰した画素を書けない出力では候補が立たない。先頭フレームはキャンバスがまだ空で、
     /// 重ねる先が無い。負けが続く間は [`Pacing`] が候補を立てるのを休ませる。
-    fn choose_blend(
-        &mut self,
-        encoding: &Encoding,
-        data: &[u8],
-        disposal: Disposal,
-        pacing: &mut Pacing,
-    ) -> (u8, Candidate) {
+    fn choose_blend(&mut self, data: &[u8], disposal: Disposal) -> (u8, Candidate) {
         let Disposal {
             op: dispose,
             rect,
             candidate: source,
         } = disposal;
 
-        let Some(collapse) = encoding.collapse() else {
+        let Some(collapse) = self.writing.encoding.collapse() else {
             return (BLEND_OP_SOURCE, source);
         };
-        if self.frame == 0 || !pacing.should_try() {
+        if self.frames_accepted == 0 || !self.writing.blend_pacing.should_try() {
             return (BLEND_OP_SOURCE, source);
         }
 
@@ -511,26 +451,26 @@ impl<W: Write + Seek> Parts<'_, W> {
             return (BLEND_OP_SOURCE, source);
         }
 
-        let out_bpp = encoding.output().bytes_per_pixel();
+        let out_bpp = self.writing.encoding.output().bytes_per_pixel();
         let over_candidate = self
             .codec
             .compress(&over, rect.width as usize * out_bpp, out_bpp);
         self.codec.give(over);
 
         let taken = over_candidate.len() < source.len();
-        pacing.record(taken);
+        self.writing.blend_pacing.record(taken);
         if taken {
-            source.discard(self.codec);
+            source.discard(&mut self.codec);
             (BLEND_OP_OVER, over_candidate)
         } else {
-            over_candidate.discard(self.codec);
+            over_candidate.discard(&mut self.codec);
             (BLEND_OP_SOURCE, source)
         }
     }
 
     /// 保留中のフレームを `dispose` で書き出す
-    fn flush_pending(&mut self, pending: &mut Option<Pending>, dispose: u8) -> Result<(), Error> {
-        let Some(pending) = pending.take() else {
+    fn flush_pending(&mut self, dispose: u8) -> Result<(), Error> {
+        let Some(pending) = self.writing.pending.take() else {
             return Ok(());
         };
 
@@ -549,18 +489,13 @@ impl<W: Write + Seek> Parts<'_, W> {
     ///
     /// # Errors
     /// パレットに載る色数を超えたとき。
-    fn compress_rect(
-        &mut self,
-        encoding: &mut Encoding,
-        data: &[u8],
-        rect: Rect,
-    ) -> Result<Candidate, Error> {
+    fn compress_rect(&mut self, data: &[u8], rect: Rect) -> Result<Candidate, Error> {
         let stride = self.layout.stride;
         let bpp = self.layout.bytes_per_pixel;
         let row_len = rect.width as usize * bpp;
         let head = rect.y as usize * stride + rect.x as usize * bpp;
 
-        match encoding {
+        match &mut self.writing.encoding {
             Encoding::Direct(_) => {
                 if row_len == stride {
                     // 全幅の矩形は `data` 上で既に連続している
@@ -581,7 +516,9 @@ impl<W: Write + Seek> Parts<'_, W> {
                     let start = head + y * stride;
                     if !palette.append_indices(&data[start..start + row_len], bpp, &mut indices) {
                         self.codec.give(indices);
-                        return Err(Error::ColorLimitExceeded { frame: self.frame });
+                        return Err(Error::ColorLimitExceeded {
+                            frame: self.frames_accepted,
+                        });
                     }
                 }
                 let candidate = self.codec.compress(&indices, rect.width as usize, 1);
