@@ -1,6 +1,5 @@
 //! WebPエンコーダ
 
-mod budget;
 mod codec;
 mod delay;
 mod encoder;

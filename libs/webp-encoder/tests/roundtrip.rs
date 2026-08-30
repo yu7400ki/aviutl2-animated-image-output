@@ -1156,31 +1156,32 @@ fn a_writer_that_cannot_take_the_header_is_rejected() {
     ));
 }
 
-/// 大きいキャンバスでは、機械の並列度より少ないワーカーで起こす
+/// 起こすワーカー数は、指した数と機械の並列度で決まる
 ///
-/// 抱える量はワーカー数へ比例するので、1枚が重くなるほど起こす数が減る。
 /// 群れを起こす前に判定を済ませるため、フレームを投入しなくても数は決まる。
+/// キャンバスの大きさは数に効かない。
 #[test]
-fn a_heavy_canvas_wakes_fewer_workers() {
-    let available = available_parallelism().map_or(1, NonZeroUsize::get);
+fn the_woken_workers_follow_the_number_that_was_asked_for() {
     let config = config(ColorType::Rgba8, 0);
 
-    let workers = |width, height| {
+    let asked = |workers| {
+        Encoder::with_workers(Cursor::new(Vec::new()), 64, 64, 2, config, workers)
+            .unwrap()
+            .workers()
+    };
+    for workers in [1, 2, 5, 64] {
+        let workers = NonZeroUsize::new(workers).unwrap();
+        assert_eq!(asked(workers), workers, "指した数で起こしていない");
+    }
+
+    let available = available_parallelism().unwrap_or(NonZeroUsize::MIN);
+    let default = |width, height| {
         Encoder::new(Cursor::new(Vec::new()), width, height, 2, config)
             .unwrap()
             .workers()
-            .get()
     };
-
-    let small = workers(64, 64);
-    let large = workers(1920, 1080);
-    assert!(small <= available, "並列度を超えて起こしている: {small}");
-    assert!(large <= small, "大きいキャンバスで増えている: {large}");
-    // 1920x1080の可逆は8つに届かないので、そこを超える機械でだけ差が出る
-    if available >= 8 {
-        assert!(large < available, "上限が掛かっていない: {large}");
-        assert!(large < small, "大きさで数が変わっていない: {large}");
-    }
+    assert_eq!(default(64, 64), available, "機械の並列度で起こしていない");
+    assert_eq!(default(1920, 1080), available, "大きさで数が変わっている");
 }
 
 /// 最も重い動作点の可逆でも、合成結果が入力へバイト一致で戻る

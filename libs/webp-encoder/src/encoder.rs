@@ -1,6 +1,5 @@
 //! 全体の駆動
 
-use crate::budget;
 use crate::codec::{Codec, EncodedFrame, Job};
 use crate::delay::{Durations, MAX_DURATION, Milliseconds};
 use crate::error::Error;
@@ -206,8 +205,8 @@ impl<W: Write + Seek> Encoder<W> {
     ///
     /// フレーム数が2以上のとき、RIFFヘッダ・VP8X・ANIMをここで書く。
     ///
-    /// 符号化を回すワーカー数は、機械の並列度と、抱える量に置いた予算の
-    /// 小さい方になる。実際に起こした数は [`Encoder::workers`] が返す。
+    /// 符号化を回すワーカー数は機械の並列度になる。実際に起こした数は
+    /// [`Encoder::workers`] が返す。
     ///
     /// # Errors
     /// 寸法が0か16383を超えるとき [`Error::InvalidDimensions`]。フレーム数が0の
@@ -220,17 +219,15 @@ impl<W: Write + Seek> Encoder<W> {
         num_frames: u32,
         config: Config,
     ) -> Result<Self, Error> {
-        let available = available_parallelism().unwrap_or(NonZeroUsize::MIN);
-        let layout = Layout::new(width, height, config.color_type)?;
-        let workers = budget::workers(&layout, &config, available);
+        let workers = available_parallelism().unwrap_or(NonZeroUsize::MIN);
         Self::with_workers(writer, width, height, num_frames, config, workers)
     }
 
     /// ワーカー数を指してエンコーダを作る
     ///
-    /// 渡した数をそのまま起こす。[`Encoder::new`] が置く取り分の上限は掛からない。
-    /// ワーカーが1つなら群れを起こさず、投入した場で符号化する。決定も
-    /// 書き出しの順序もワーカー数に依らないので、出力はどちらでも同じになる。
+    /// 渡した数をそのまま起こす。ワーカーが1つなら群れを起こさず、投入した場で
+    /// 符号化する。決定も書き出しの順序もワーカー数に依らないので、出力は
+    /// どちらでも同じになる。
     ///
     /// # Errors
     /// [`Encoder::new`] と同じ。加えてスレッドを起こせないとき [`Error::Io`]。
@@ -557,6 +554,9 @@ mod tests {
     ///
     /// 非可逆も回す。libwebp が最初の符号化で据える関数表はこちらの方が広く、
     /// プラグインの既定でもある。
+    ///
+    /// フレーム数を超えるワーカー数も回す。仕掛かりの上限がフレーム数を上回ると
+    /// 投入の途中で一度も書き出さないので、書き出しの起きる位置が変わる。
     #[test]
     fn the_output_does_not_depend_on_the_number_of_workers() {
         let (width, height) = (160, 120);
@@ -567,7 +567,7 @@ mod tests {
                 sprite_frames(width, height, 24),
             ] {
                 let (expected, report) = encode(width, height, &frames, 1, config);
-                for workers in [2, 3, 4, 8] {
+                for workers in [2, 3, 4, 8, 32, 64] {
                     let (bytes, parallel) = encode(width, height, &frames, workers, config);
                     assert_eq!(bytes, expected, "可逆{lossless} ワーカー{workers}個の出力");
                     assert_eq!(parallel, report, "可逆{lossless} ワーカー{workers}個の結果");
