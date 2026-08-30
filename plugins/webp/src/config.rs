@@ -1,6 +1,16 @@
 pub use aviutl2::ColorFormat;
 use aviutl2::IniConfig;
 use aviutl2::ini::{Ini, Properties};
+use std::num::NonZeroUsize;
+use std::thread::available_parallelism;
+
+/// 符号化を回せるワーカー数の上限
+///
+/// 符号化はCPUバウンドなので、論理CPUを超えて起こしても処理量は増えず、
+/// 抱える量と切り替えの手間だけが伸びる。機械の並列度を読めなければ1を返す。
+pub fn max_workers() -> usize {
+    available_parallelism().map_or(1, NonZeroUsize::get)
+}
 
 #[derive(Clone)]
 pub struct Config {
@@ -9,6 +19,7 @@ pub struct Config {
     pub lossless: bool,
     pub quality: f32,
     pub method: u8,
+    pub workers: usize,
 }
 
 impl Default for Config {
@@ -19,6 +30,7 @@ impl Default for Config {
             lossless: false,
             quality: 75.0,
             method: 4,
+            workers: (max_workers() / 2).max(1),
         }
     }
 }
@@ -56,12 +68,19 @@ impl IniConfig for Config {
             .unwrap_or(default.method)
             .clamp(0, 6);
 
+        let workers = section
+            .and_then(|s| s.get("workers"))
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(default.workers)
+            .clamp(1, max_workers());
+
         Self {
             repeat,
             color_format,
             lossless,
             quality,
             method,
+            workers,
         }
     }
 
@@ -71,7 +90,8 @@ impl IniConfig for Config {
             .set("color_format", self.color_format.to_index().to_string())
             .set("lossless", self.lossless.to_string())
             .set("quality", self.quality.to_string())
-            .set("method", self.method.to_string());
+            .set("method", self.method.to_string())
+            .set("workers", self.workers.to_string());
     }
 }
 
@@ -98,6 +118,7 @@ mod tests {
         assert_eq!(config.lossless, default.lossless);
         assert_eq!(config.quality, default.quality);
         assert_eq!(config.method, default.method);
+        assert_eq!(config.workers, default.workers);
     }
 
     #[test]
@@ -108,6 +129,7 @@ mod tests {
             lossless: true,
             quality: 100.0,
             method: 6,
+            workers: max_workers(),
         };
 
         let mut ini = Ini::new();
@@ -119,6 +141,7 @@ mod tests {
         assert_eq!(loaded.lossless, saved.lossless);
         assert_eq!(loaded.quality, saved.quality);
         assert_eq!(loaded.method, saved.method);
+        assert_eq!(loaded.workers, saved.workers);
     }
 
     /// 設定ファイルの中身をそのまま読み、セクション名と項目名まで含めて確かめる
@@ -149,6 +172,17 @@ method=3
 
         assert_eq!(config.quality, 100.0);
         assert_eq!(config.method, 6);
+    }
+
+    /// 値域の外のワーカー数は、走らせる機械の並列度の内側へ収まる
+    ///
+    /// 別の機械で書いた ini をそのまま読んでも、この機械で意味のある数になる。
+    #[test]
+    fn out_of_range_workers_are_clamped() {
+        let over = (max_workers() + 1).to_string();
+
+        assert_eq!(load(&[("workers", "0")]).workers, 1);
+        assert_eq!(load(&[("workers", &over)]).workers, max_workers());
     }
 
     /// 読めない値の項目だけが既定値へ落ちる

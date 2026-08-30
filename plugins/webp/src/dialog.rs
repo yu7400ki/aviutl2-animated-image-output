@@ -1,4 +1,4 @@
-use crate::config::{ColorFormat, Config};
+use crate::config::{ColorFormat, Config, max_workers};
 use win32_dialog::{
     Dialog, MessageBox,
     layout::{FlexLayout, JustifyContent, SizeValue, labeled},
@@ -30,6 +30,10 @@ pub fn show_config_dialog(
         .value(default_config.method as i32)
         .range(0, 6);
 
+    let workers_input = Number::new()
+        .value(default_config.workers as i32)
+        .range(1, max_workers() as i32);
+
     let dialog = Dialog::new("WebP出力設定");
     let handle = dialog.handle();
 
@@ -41,12 +45,24 @@ pub fn show_config_dialog(
         let lossless_checkbox = lossless_checkbox.clone();
         let quality_input = quality_input.clone();
         let method_input = method_input.clone();
+        let workers_input = workers_input.clone();
         move || {
             let owner = handle.hwnd();
             if repeat_input.get_value::<i32>().is_err() {
                 MessageBox::error(
                     owner,
                     "ループ回数の値が無効です。正しい数値を入力してください。",
+                    "エラー",
+                );
+                return;
+            }
+            if workers_input.get_value::<i32>().is_err() {
+                MessageBox::error(
+                    owner,
+                    &format!(
+                        "ワーカー数の値が無効です。1-{}の値を入力してください。",
+                        max_workers()
+                    ),
                     "エラー",
                 );
                 return;
@@ -87,6 +103,10 @@ pub fn show_config_dialog(
         .with_widget(lossless_checkbox.clone())
         .with_layout(labeled("品質 (0-100)", quality_input.clone()))
         .with_layout(labeled("メソッド (0-6)", method_input.clone()))
+        .with_layout(labeled(
+            &format!("ワーカー数 (1-{})", max_workers()),
+            workers_input.clone(),
+        ))
         .with_layout(
             FlexLayout::row()
                 .with_gap(10.0)
@@ -125,5 +145,6 @@ pub fn show_config_dialog(
         } else {
             method_input.get_value::<i32>().map_err(|_| ())? as u8
         },
+        workers: workers_input.get_value::<i32>().map_err(|_| ())? as usize,
     }))
 }

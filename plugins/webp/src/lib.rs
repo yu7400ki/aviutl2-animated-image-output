@@ -8,6 +8,7 @@ use aviutl2::{
 use config::{ColorFormat, Config};
 use dialog::show_config_dialog;
 use std::io::BufWriter;
+use std::num::NonZeroUsize;
 use webp_encoder::{ColorType, Config as EncoderConfig, Encoder, FrameDelay, Report};
 use win32_dialog::MessageBox;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
@@ -80,12 +81,13 @@ fn create_webp_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
     let num_frames = to_u32(info.num_frames(), "フレーム数")?;
 
     write_or_discard(&info.savefile(), |output_file| {
-        let mut encoder = Encoder::new(
+        let mut encoder = Encoder::with_workers(
             BufWriter::new(output_file),
             width,
             height,
             num_frames,
             encoder_config(config),
+            NonZeroUsize::new(config.workers).unwrap_or(NonZeroUsize::MIN),
         )
         .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
 
