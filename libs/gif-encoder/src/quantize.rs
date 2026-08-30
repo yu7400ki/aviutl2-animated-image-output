@@ -39,49 +39,21 @@ impl Moment for u128 {
     }
 }
 
-/// ヒストグラムへ積む画素の選び方
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "選ばれていない側は量子化の材料のつまみとして残す")
-)]
-pub(crate) enum Material {
-    /// 窓の各フレームで、その1つ前のフレームから変わった画素
-    Changed,
-    /// 窓の全画素
-    Whole,
-}
-
-/// 窓のフレームから量子化の材料を積む
+/// 窓のフレームの全画素から量子化の材料を積む
 ///
-/// 透過標識は色を持たないため積まない。`base` は窓の1つ前のフレームの
-/// 正規化した入力で、先頭フレームでは空。`window` は書き出し位置から順に
+/// 透過標識は色を持たないため積まない。`window` は書き出し位置から順に
 /// 並んだフレーム。
-pub(crate) fn material<'a>(
-    layout: &Layout,
-    material: Material,
-    base: &'a [u8],
-    window: impl Iterator<Item = &'a [u8]>,
-) -> Histogram {
+pub(crate) fn material<'a>(layout: &Layout, window: impl Iterator<Item = &'a [u8]>) -> Histogram {
     let bpp = layout.bytes_per_pixel;
     let mut histogram = Histogram::new();
-    let mut previous = base;
     for frame in window {
-        for (at, pixel) in frame.chunks_exact(bpp).enumerate() {
-            let at = at * bpp;
-            if material == Material::Changed
-                && !previous.is_empty()
-                && previous[at..at + bpp] == *pixel
-            {
-                continue;
-            }
+        for pixel in frame.chunks_exact(bpp) {
             let color = pack(pixel, bpp);
             if color == TRANSPARENT {
                 continue;
             }
             histogram.observe_color(color, 1);
         }
-        previous = frame;
     }
     histogram
 }
@@ -729,50 +701,18 @@ mod tests {
         Layout::new(2, 1, crate::layout::ColorType::Rgb8).unwrap()
     }
 
-    /// 入力が変わっていない画素は積まない
-    #[test]
-    fn unchanged_pixels_are_left_out_of_the_changed_material() {
-        let base = [1u8, 1, 1, 200, 200, 200];
-        let frame = [1u8, 1, 1, 9, 9, 9];
-
-        let histogram = material(
-            &layout(),
-            Material::Changed,
-            &base,
-            std::iter::once(&frame[..]),
-        );
-        assert_eq!(histogram.distinct(), 1);
-    }
-
-    /// 窓の全画素を積む材料は、変わっていない画素も数える
-    #[test]
-    fn the_whole_material_counts_the_pixels_that_did_not_change() {
-        let base = [1u8, 1, 1, 200, 200, 200];
-        let frame = [1u8, 1, 1, 9, 9, 9];
-
-        let histogram = material(
-            &layout(),
-            Material::Whole,
-            &base,
-            std::iter::once(&frame[..]),
-        );
-        assert_eq!(histogram.distinct(), 2, "変わっていない画素を積んでいない");
-    }
-
-    /// 窓の中の後続フレームは、その1つ前のフレームとの差分で積む
+    /// 窓の後続フレームで持ち越した画素も積む
     ///
-    /// 比較相手を書き出し位置の1つ前に固定すると、窓の中で元の色へ戻った画素が
-    /// 「変わっていない」と読める。
+    /// 色 `10` は2枚に跨って3画素あり、色 `30` は1画素。重みが3対1なら平均は 15 で、
+    /// 持ち越した1画素を落とすと2対1になって 17 へずれる。
     #[test]
-    fn later_frames_in_the_window_are_compared_with_the_one_before() {
-        let base = [1u8, 1, 1, 10, 10, 10];
-        let first = [1u8, 1, 1, 200, 200, 200];
-        let second = base;
+    fn pixels_carried_over_within_the_window_are_counted_again() {
+        let first = [10u8, 10, 10, 10, 10, 10];
+        let second = [10u8, 10, 10, 30, 30, 30];
         let frames = [&first[..], &second[..]];
 
-        let histogram = material(&layout(), Material::Changed, &base, frames.into_iter());
-        // 先頭で変わった色と、次のフレームで戻った色
-        assert_eq!(histogram.distinct(), 2);
+        let histogram = material(&layout(), frames.into_iter());
+        assert_eq!(histogram.quantize(1), vec![pack([15, 15, 15])]);
     }
 
     /// 透過標識は積まない
@@ -781,10 +721,8 @@ mod tests {
         let layout = Layout::new(2, 1, crate::layout::ColorType::Rgba8).unwrap();
         let frame = [0u8, 0, 0, 0, 200, 200, 200, 255];
 
-        for kind in [Material::Changed, Material::Whole] {
-            let histogram = material(&layout, kind, &[], std::iter::once(&frame[..]));
-            assert_eq!(histogram.distinct(), 1, "{kind:?}");
-        }
+        let histogram = material(&layout, std::iter::once(&frame[..]));
+        assert_eq!(histogram.distinct(), 1);
     }
 
     /// RGB8の入力に透過は無く、黒はそのまま積む
@@ -795,12 +733,7 @@ mod tests {
     fn black_is_counted_when_the_input_has_no_alpha() {
         let frame = [0u8, 0, 0, 40, 40, 40];
 
-        let histogram = material(
-            &layout(),
-            Material::Changed,
-            &[],
-            std::iter::once(&frame[..]),
-        );
+        let histogram = material(&layout(), std::iter::once(&frame[..]));
         assert_eq!(histogram.distinct(), 2, "黒を積んでいない");
         assert_eq!(histogram.quantize(1), vec![0xFF14_1414], "黒に重みが無い");
     }

@@ -10,7 +10,7 @@ use crate::frame::{Canvas, Screen, Written};
 use crate::layout::{ColorType, Layout};
 use crate::lzw;
 use crate::normalize::{self, Binarized, TRANSPARENT, pack};
-use crate::quantize::{Histogram, Material, material};
+use crate::quantize::{Histogram, material};
 use crate::ring::Ring;
 use crate::table::{ColorTable, Palette, QUANTIZED_COLORS};
 use anim_core::{Colors, FrameDelay, Rect};
@@ -113,9 +113,6 @@ const ESCAPE_DRIFT_PER_AXIS: u64 = 8;
 /// 作る。床は RGB の3軸それぞれがちょうど [`ESCAPE_DRIFT_PER_AXIS`] だけずれた
 /// 画素の二乗距離に当たる。
 const ESCAPE_FLOOR: u64 = 3 * ESCAPE_DRIFT_PER_AXIS * ESCAPE_DRIFT_PER_AXIS;
-
-/// グローバルカラーテーブルを量子化するときにヒストグラムへ積む画素
-const GLOBAL_QUANTIZE_MATERIAL: Material = Material::Whole;
 
 /// 描く直前へ戻す候補を試すのをやめるまでの連敗数
 const RESTORE_LOSS_STREAK: u32 = 6;
@@ -720,7 +717,7 @@ impl<W: Write + Seek> Parts<'_, W> {
                 .global
                 .admit(self.layout.bytes_per_pixel, previous, pixels)
         {
-            self.settle(&mut palettes.global, ring, previous, pixels)?;
+            self.settle(&mut palettes.global, ring, pixels)?;
         }
 
         // 逃げた色表は床を再び超えるまで引き継ぐ。まずその色表で写して誤差を測る
@@ -729,7 +726,7 @@ impl<W: Write + Seek> Parts<'_, W> {
         // 色で埋まったテーブルは透過添字を持たない。標識を書く先が無いフレームは
         // 表現できないため、閉じて透過添字を取り直す
         if palettes.global.is_open() && self.lacks_transparent(&palettes.global, rendered, ring) {
-            self.settle(&mut palettes.global, ring, previous, pixels)?;
+            self.settle(&mut palettes.global, ring, pixels)?;
             mapped = canvas.render(previous, pixels, &mut palettes.global, rendered);
         }
 
@@ -798,24 +795,13 @@ impl<W: Write + Seek> Parts<'_, W> {
 
     /// 開いたテーブルを閉じ、グローバルカラーテーブルを書き戻す
     ///
-    /// 量子化の材料は書き出し位置のフレームと先読みの窓で、そこで入力が変わった
-    /// 画素の色を積む。目標色数は透過添字の余地を残した空きぶん。
-    fn settle(
-        &mut self,
-        palette: &mut Palette,
-        ring: &Ring,
-        previous: &[u8],
-        pixels: &[u8],
-    ) -> Result<(), Error> {
+    /// 量子化の材料は書き出し位置のフレームと先読みの窓の全画素。目標色数は
+    /// 透過添字の余地を残した空きぶん。
+    fn settle(&mut self, palette: &mut Palette, ring: &Ring, pixels: &[u8]) -> Result<(), Error> {
         let free = QUANTIZED_COLORS.saturating_sub(usize::from(palette.colors()));
         let mut quantized = Vec::new();
         if free > 0 {
-            let histogram = material(
-                self.layout,
-                GLOBAL_QUANTIZE_MATERIAL,
-                previous,
-                std::iter::once(pixels).chain(ring.window()),
-            );
+            let histogram = material(self.layout, std::iter::once(pixels).chain(ring.window()));
             if histogram.distinct() > 0 {
                 quantized = histogram.quantize(free);
             }
