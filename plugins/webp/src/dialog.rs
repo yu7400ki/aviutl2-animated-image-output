@@ -3,23 +3,9 @@ use std::ops::RangeInclusive;
 use win32_dialog::{
     Dialog, MessageBox,
     layout::{FlexLayout, JustifyContent, SizeValue, labeled},
-    widget::{Button, CheckBox, ComboBox, Label, Number},
+    widget::{Button, CheckBox, ComboBox, Number},
 };
 use windows::Win32::Foundation::HWND;
-
-/// ロスレス圧縮のチェックボックスに出す名前
-const LOSSLESS_LABEL: &str = "ロスレス圧縮";
-
-/// ロスレス圧縮に添える但し書き
-///
-/// ロスレスでも品質とメソッドは効く。効く先が画質ではなく圧縮の手間になる。
-const LOSSLESS_NOTE: &str = "品質・メソッドは画質でなく圧縮の手間になります";
-
-/// 設定項目を並べる幅
-const CONTENT_WIDTH: f32 = 300.0;
-
-/// 設定項目の周りの余白
-const CONTENT_PADDING: f32 = 15.0;
 
 /// 品質の値域
 const QUALITY_RANGE: RangeInclusive<i32> = 0..=100;
@@ -74,7 +60,7 @@ impl Inputs {
                     ColorFormat::Rgb24 => 0,
                     ColorFormat::Rgba32 => 1,
                 }),
-            lossless: CheckBox::new(LOSSLESS_LABEL).checked(default_config.lossless),
+            lossless: CheckBox::new("ロスレス圧縮").checked(default_config.lossless),
             quality: Number::new()
                 .value(default_config.quality as i32)
                 .range(*QUALITY_RANGE.start(), *QUALITY_RANGE.end()),
@@ -94,21 +80,14 @@ impl Inputs {
     }
 
     /// 設定項目を縦へ並べる
-    ///
-    /// ロスレス圧縮だけは、名前の下に但し書きを添える。
     fn layout(&self) -> FlexLayout {
         FlexLayout::column()
-            .with_width(SizeValue::Points(CONTENT_WIDTH))
-            .with_padding(CONTENT_PADDING)
+            .with_width(SizeValue::Points(300.0))
+            .with_padding(15.0)
             .with_gap(10.0)
             .with_layout(labeled("ループ回数 (0=無限ループ)", self.repeat.clone()))
             .with_layout(labeled("カラーフォーマット", self.color.clone()))
-            .with_layout(
-                FlexLayout::column()
-                    .with_gap(3.0)
-                    .with_widget(self.lossless.clone())
-                    .with_widget(Label::new(LOSSLESS_NOTE)),
-            )
+            .with_widget(self.lossless.clone())
             .with_layout(labeled(
                 &ranged_label("品質", &QUALITY_RANGE),
                 self.quality.clone(),
@@ -201,7 +180,6 @@ pub fn show_config_dialog(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use win32_dialog::{Font, layout::Layout, widget::MeasureCtx};
 
     fn inputs() -> Inputs {
         Inputs::new(&Config::default())
@@ -265,41 +243,5 @@ mod tests {
             range_error("品質", &QUALITY_RANGE),
             "品質の値が無効です。0-100の値を入力してください。"
         );
-    }
-
-    /// ロスレスは、品質とメソッドが何に効くかをダイアログへ出す
-    ///
-    /// 名前だけでは、ロスレスでも両方が効くことが読めない。
-    #[test]
-    fn the_lossless_setting_shows_what_quality_and_method_do() {
-        let texts = inputs().layout().texts();
-
-        let checkbox = texts
-            .iter()
-            .position(|text| text == LOSSLESS_LABEL)
-            .expect("ロスレス圧縮のチェックボックスが要る");
-        assert_eq!(
-            texts.get(checkbox + 1).map(String::as_str),
-            Some(LOSSLESS_NOTE),
-            "{texts:?}"
-        );
-
-        assert!(LOSSLESS_NOTE.contains("品質"), "{LOSSLESS_NOTE}");
-        assert!(LOSSLESS_NOTE.contains("メソッド"), "{LOSSLESS_NOTE}");
-    }
-
-    /// 但し書きは折り返さないので、設定の幅に収まる長さで書く
-    #[test]
-    fn the_lossless_note_fits_the_width_of_the_settings() {
-        let font = Font::system(96).expect("システムフォントが要る");
-        let measure = MeasureCtx {
-            font: &font,
-            scale: 1.0,
-        };
-
-        let width = measure.text_size(LOSSLESS_NOTE).expect("測れること").0;
-        let room = CONTENT_WIDTH - CONTENT_PADDING * 2.0;
-
-        assert!(width <= room, "{width}pt / {room}pt: {LOSSLESS_NOTE}");
     }
 }
