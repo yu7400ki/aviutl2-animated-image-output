@@ -219,13 +219,6 @@ impl Codec {
         }
     }
 
-    /// フィルタ後のバイト列を圧縮する
-    fn deflate(&mut self, filtered: &[u8]) -> Vec<u8> {
-        let mut body = self.pool.take();
-        self.compressor.compress_into(filtered, &mut body);
-        body
-    }
-
     /// 短い方を残し、もう一方のバッファをプールへ返す
     fn shorter(&mut self, adaptive: Vec<u8>, unfiltered: Vec<u8>) -> Vec<u8> {
         if adaptive.len() < unfiltered.len() {
@@ -255,9 +248,8 @@ impl Codec {
             &mut self.filtered,
         );
 
-        let filtered = std::mem::take(&mut self.filtered);
-        let body = self.deflate(&filtered);
-        self.filtered = filtered;
+        let mut body = self.pool.take();
+        self.compressor.compress_into(&self.filtered, &mut body);
         body
     }
 }
