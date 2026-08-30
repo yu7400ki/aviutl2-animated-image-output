@@ -707,7 +707,7 @@ mod tests {
         for y in 0..HEIGHT as usize {
             for x in 0..WIDTH as usize {
                 let pixel = y * WIDTH as usize + x;
-                if pixel % MOTTLED_CLEAR == 0 {
+                if pixel.is_multiple_of(MOTTLED_CLEAR) {
                     frame.extend_from_slice(&[0, 0, 0, 0]);
                     continue;
                 }

@@ -2040,7 +2040,7 @@ fn mottled_frame(color_type: ColorType, seed: u32) -> Vec<u8> {
     for y in 0..FILTER_HEIGHT as usize {
         for x in 0..FILTER_WIDTH as usize {
             let pixel = y * FILTER_WIDTH as usize + x;
-            if pixel % MOTTLED_CLEAR == 0 {
+            if pixel.is_multiple_of(MOTTLED_CLEAR) {
                 frame.extend(std::iter::repeat_n(0, bpp));
                 continue;
             }
