@@ -698,7 +698,7 @@ mod tests {
     }
 
     fn layout() -> Layout {
-        Layout::new(2, 1, crate::layout::ColorType::Rgb8).unwrap()
+        Layout::new(2, 1, anim_core::ColorType::Rgb8).unwrap()
     }
 
     /// 窓の後続フレームで持ち越した画素も積む
@@ -718,7 +718,7 @@ mod tests {
     /// 透過標識は積まない
     #[test]
     fn the_transparent_marker_is_not_counted() {
-        let layout = Layout::new(2, 1, crate::layout::ColorType::Rgba8).unwrap();
+        let layout = Layout::new(2, 1, anim_core::ColorType::Rgba8).unwrap();
         let frame = [0u8, 0, 0, 0, 200, 200, 200, 255];
 
         let histogram = material(&layout, std::iter::once(&frame[..]));

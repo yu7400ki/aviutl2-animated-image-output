@@ -12,10 +12,9 @@ mod picture;
 mod pipeline;
 mod riff;
 
-pub use anim_core::FrameDelay;
+pub use anim_core::{ColorType, FrameDelay};
 pub use encoder::Encoder;
 pub use error::{EncodingError, Error};
-pub use layout::ColorType;
 
 /// エンコード設定
 #[derive(Debug, Clone, Copy)]

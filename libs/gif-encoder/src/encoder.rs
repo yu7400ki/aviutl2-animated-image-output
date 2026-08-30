@@ -7,13 +7,13 @@ use crate::block::{
 use crate::delay::Hundredths;
 use crate::error::Error;
 use crate::frame::{Canvas, Screen, Written};
-use crate::layout::{ColorType, Layout};
+use crate::layout::Layout;
 use crate::lzw;
 use crate::normalize::{self, Binarized, TRANSPARENT, pack};
 use crate::quantize::{Histogram, material};
 use crate::ring::Ring;
 use crate::table::{ColorTable, Palette, QUANTIZED_COLORS};
-use anim_core::{Colors, FrameDelay, Pacing, Rect};
+use anim_core::{ColorType, Colors, FrameDelay, Pacing, Rect};
 use std::borrow::Cow;
 use std::io::{Seek, SeekFrom, Write};
 

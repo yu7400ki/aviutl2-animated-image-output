@@ -6,10 +6,10 @@ use crate::chunk::{
 use crate::codec::{Candidate, Codec};
 use crate::delta::Delta;
 use crate::error::Error;
-use crate::layout::{ColorType, Layout, Output};
+use crate::layout::{Layout, Output};
 use crate::over;
 use crate::palette::{PLTE_PLACEHOLDER, Palette, TRNS_PLACEHOLDER};
-use anim_core::{FrameDelay, Pacing, Rect, crop};
+use anim_core::{ColorType, FrameDelay, Pacing, Rect, crop};
 use std::io::{Seek, Write};
 use std::ops::RangeInclusive;
 

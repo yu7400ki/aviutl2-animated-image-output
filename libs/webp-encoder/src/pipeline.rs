@@ -2,7 +2,8 @@
 
 use crate::codec::{Codec, EncodedFrame, Job};
 use crate::error::Error;
-use crate::layout::{ColorType, Layout};
+use crate::layout::Layout;
+use anim_core::ColorType;
 use std::any::Any;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;

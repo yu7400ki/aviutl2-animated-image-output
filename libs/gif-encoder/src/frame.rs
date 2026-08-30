@@ -1,10 +1,10 @@
 //! 差分矩形・廃棄方法・透過ランの決定
 
 use crate::block::{DISPOSAL_DO_NOT_DISPOSE, DISPOSAL_RESTORE_TO_BACKGROUND};
-use crate::layout::{ColorType, Layout};
+use crate::layout::Layout;
 use crate::normalize::TRANSPARENT;
 use crate::table::{Fit, Palette};
-use anim_core::{Rect, dirty_rect};
+use anim_core::{ColorType, Rect, dirty_rect};
 
 /// 差分の無いフレームが書く矩形
 ///

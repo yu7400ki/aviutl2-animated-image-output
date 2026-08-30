@@ -57,7 +57,7 @@ pub(crate) fn workers(layout: &Layout, config: &Config, available: NonZeroUsize)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::ColorType;
+    use anim_core::ColorType;
 
     const AVAILABLE: NonZeroUsize = NonZeroUsize::new(16).unwrap();
 

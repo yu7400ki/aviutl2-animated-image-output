@@ -12,10 +12,9 @@ mod quantize;
 mod ring;
 mod table;
 
-pub use anim_core::FrameDelay;
+pub use anim_core::{ColorType, FrameDelay};
 pub use encoder::{Config, Encoder, PaletteKind, Report};
 pub use error::Error;
-pub use layout::ColorType;
 
 /// テストで共有する素材の生成
 #[cfg(test)]

@@ -12,11 +12,10 @@ mod over;
 mod palette;
 mod zlib;
 
-pub use anim_core::FrameDelay;
+pub use anim_core::{ColorType, FrameDelay};
 pub use delay::delay_parts;
 pub use encoder::{COMPRESSION_LEVELS, Config, Encoder};
 pub use error::Error;
-pub use layout::ColorType;
 
 /// テストで共有する素材の生成
 #[cfg(test)]

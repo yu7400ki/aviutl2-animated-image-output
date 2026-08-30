@@ -1,7 +1,7 @@
 //! `WebPPicture` と `WebPMemoryWriter` のRAII
 
 use crate::error::{EncodingError, Error};
-use crate::layout::ColorType;
+use anim_core::ColorType;
 use std::ffi::{c_int, c_void};
 use std::mem::MaybeUninit;
 use std::slice;
