@@ -286,11 +286,18 @@ mod tests {
     }
 
     /// 対を並列に走らせても順に走らせても、書き出す本体は変わらない
+    ///
+    /// 並列に走らせる先がある環境では、比べる片方が本当に相方を起こしている
+    /// ことまで確かめる。相方が起きなければ順と順を比べるだけになる。
     #[test]
     fn running_the_pair_in_parallel_keeps_the_same_body() {
+        let mates_are_possible = thread::available_parallelism().is_ok_and(|n| n.get() >= 2);
         for rows in [1, 256] {
             let region = noise(rows * STRIDE, rows as u32);
             let mut parallel = Codec::new(6);
+            if mates_are_possible {
+                assert!(parallel.mate.is_some(), "相方が起きていること");
+            }
             let mut serial = Codec::new(6);
             serial.mate = None;
             assert_eq!(
