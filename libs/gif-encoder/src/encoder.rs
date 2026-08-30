@@ -100,12 +100,19 @@ pub struct Report {
 /// 含むので、リングに留まるのは `LOOKAHEAD - 1` フレーム。
 const LOOKAHEAD: usize = 8;
 
+/// 逃げるかどうかを分ける、色の1軸あたりのずれ
+///
+/// 単位は R/G/B いずれか1軸の差。比べる相手が二乗距離の平均なので、この値は
+/// 二乗平均平方根 (RMS) にあたる。
+const ESCAPE_DRIFT_PER_AXIS: u64 = 8;
+
 /// 逃げるかどうかを分ける誤差の床
 ///
 /// 単位は二乗距離 (RGB各軸の差の二乗和) の平均。入力が変わった画素を今引いている
 /// カラーテーブルへ写し、その二乗距離の平均がこれを超えたフレームは自分の色表を
-/// 作る。この値は `private/bench` の全素材で決める。
-const BENCH_TUNED_ESCAPE_FLOOR: u64 = 192;
+/// 作る。床は RGB の3軸それぞれがちょうど [`ESCAPE_DRIFT_PER_AXIS`] だけずれた
+/// 画素の二乗距離に当たる。
+const ESCAPE_FLOOR: u64 = 3 * ESCAPE_DRIFT_PER_AXIS * ESCAPE_DRIFT_PER_AXIS;
 
 /// グローバルカラーテーブルを量子化するときにヒストグラムへ積む画素
 const GLOBAL_QUANTIZE_MATERIAL: Material = Material::Whole;
@@ -728,7 +735,7 @@ impl<W: Write + Seek> Parts<'_, W> {
 
         // 変わった画素の誤差が床を超えたフレームと、透過添字の要るフレームは、
         // 自分の色表へ逃げる
-        if mapped.mean_error_exceeds(BENCH_TUNED_ESCAPE_FLOOR)
+        if mapped.mean_error_exceeds(ESCAPE_FLOOR)
             || self.lacks_transparent(palettes.current(), rendered, ring)
         {
             debug_assert!(
