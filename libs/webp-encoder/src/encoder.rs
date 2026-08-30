@@ -209,8 +209,8 @@ impl<W: Write + Seek> Encoder<W> {
     /// [`Encoder::workers`] が返す。
     ///
     /// # Errors
-    /// 寸法が0か16383を超えるとき [`Error::InvalidDimensions`]。フレーム数が0の
-    /// とき [`Error::InvalidFrameCount`]。設定が値域の外のとき [`Error::Encode`]。
+    /// フレーム数が0のとき [`Error::InvalidFrameCount`]。寸法が0か16383を超える
+    /// とき [`Error::InvalidDimensions`]。設定が値域の外のとき [`Error::Encode`]。
     /// 書き出しに失敗したとき [`Error::Io`]。
     pub fn new(
         writer: W,
@@ -555,8 +555,9 @@ mod tests {
     /// 非可逆も回す。libwebp が最初の符号化で据える関数表はこちらの方が広く、
     /// プラグインの既定でもある。
     ///
-    /// フレーム数を超えるワーカー数も回す。仕掛かりの上限がフレーム数を上回ると
-    /// 投入の途中で一度も書き出さないので、書き出しの起きる位置が変わる。
+    /// フレーム数に並ぶワーカー数と、それを超える数も回す。仕掛かりの上限が
+    /// フレーム数へ届くと投入の途中で書き出さなくなるので、書き出しの起きる
+    /// 位置が変わる。
     #[test]
     fn the_output_does_not_depend_on_the_number_of_workers() {
         let (width, height) = (160, 120);
@@ -567,7 +568,7 @@ mod tests {
                 sprite_frames(width, height, 24),
             ] {
                 let (expected, report) = encode(width, height, &frames, 1, config);
-                for workers in [2, 3, 4, 8, 32, 64] {
+                for workers in [2, 3, 4, 8, 12, 32] {
                     let (bytes, parallel) = encode(width, height, &frames, workers, config);
                     assert_eq!(bytes, expected, "可逆{lossless} ワーカー{workers}個の出力");
                     assert_eq!(parallel, report, "可逆{lossless} ワーカー{workers}個の結果");
