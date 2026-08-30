@@ -40,3 +40,14 @@ source = "target/debug/gif_output.dll"
 [artifacts.gif_output.profiles.release]
 source = "target/release/gif_output.dll"
 build = { group = "release_all" }
+
+[artifacts.webp_output]
+destination = "Plugin/webp_output.auo2"
+build = { group = "debug_all" }
+
+[artifacts.webp_output.profiles.debug]
+source = "target/debug/webp_output.dll"
+
+[artifacts.webp_output.profiles.release]
+source = "target/release/webp_output.dll"
+build = { group = "release_all" }
