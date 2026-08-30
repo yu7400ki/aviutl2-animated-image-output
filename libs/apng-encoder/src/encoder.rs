@@ -9,7 +9,7 @@ use crate::error::Error;
 use crate::layout::{ColorType, Layout, Output};
 use crate::over;
 use crate::palette::{PLTE_PLACEHOLDER, Palette, TRNS_PLACEHOLDER};
-use anim_core::{FrameDelay, Rect, crop};
+use anim_core::{FrameDelay, Pacing, Rect, crop};
 use std::io::{Seek, Write};
 use std::ops::RangeInclusive;
 
@@ -59,50 +59,6 @@ const BLEND_LOSS_STREAK: u32 = 6;
 /// 素材の性質は途中で変わるため、休みを置いてまた試す。長く休むほど圧縮の回数は
 /// 減るが、変わり目を見つけるのが遅れる。
 const BLEND_REST_FRAMES: u32 = 8;
-
-/// blend_op=OVERの候補を立てるかどうかの間合い
-///
-/// 候補は圧縮するまで採否が決まらず、負けた側の圧縮はそのまま無駄になる。
-/// [`BLEND_LOSS_STREAK`] 回続けて負けたら [`BLEND_REST_FRAMES`] フレーム
-/// 立てるのをやめ、休みが明けたらまた試す。一度でも採れば連敗は解ける。
-struct BlendPacing {
-    /// 採られないまま続いた回数
-    losses: u32,
-    /// 残りの休みフレーム数
-    resting: u32,
-}
-
-impl BlendPacing {
-    fn new() -> Self {
-        BlendPacing {
-            losses: 0,
-            resting: 0,
-        }
-    }
-
-    /// 候補を立てるか。休んでいる間は1フレームぶん消費して偽を返す
-    fn should_try(&mut self) -> bool {
-        if self.resting == 0 {
-            return true;
-        }
-        self.resting -= 1;
-        false
-    }
-
-    /// 立てた候補が採られたかどうかを記録する
-    fn record(&mut self, taken: bool) {
-        if taken {
-            self.losses = 0;
-            return;
-        }
-
-        self.losses += 1;
-        if self.losses == BLEND_LOSS_STREAK {
-            self.losses = 0;
-            self.resting = BLEND_REST_FRAMES;
-        }
-    }
-}
 
 /// dispose_opを決めた結果
 ///
@@ -177,7 +133,7 @@ struct Writing {
     /// 書き出しを待っているフレーム
     pending: Option<Pending>,
     /// blend_op=OVERの候補を立てるかどうかの間合い
-    blend_pacing: BlendPacing,
+    blend_pacing: Pacing,
 }
 
 impl Writing {
@@ -186,7 +142,7 @@ impl Writing {
         Writing {
             encoding,
             pending: None,
-            blend_pacing: BlendPacing::new(),
+            blend_pacing: Pacing::new(BLEND_LOSS_STREAK, BLEND_REST_FRAMES),
         }
     }
 }
@@ -515,13 +471,13 @@ impl<W: Write + Seek> Parts<'_, W> {
     /// 戻り値へ残して、退けた側のバッファはプールへ返す。同じ大きさならSOURCEを採る。
     ///
     /// 潰した画素を書けない出力では候補が立たない。先頭フレームはキャンバスがまだ空で、
-    /// 重ねる先が無い。負けが続く間は [`BlendPacing`] が候補を立てるのを休ませる。
+    /// 重ねる先が無い。負けが続く間は [`Pacing`] が候補を立てるのを休ませる。
     fn choose_blend(
         &mut self,
         encoding: &Encoding,
         data: &[u8],
         disposal: Disposal,
-        pacing: &mut BlendPacing,
+        pacing: &mut Pacing,
     ) -> (u8, Candidate) {
         let Disposal {
             op: dispose,
@@ -906,41 +862,26 @@ mod tests {
         }
     }
 
-    /// 連敗が続くと候補を立てるのを休み、休みが明けたらまた試す
-    #[test]
-    fn the_pacing_rests_after_a_streak_of_losses() {
-        let mut pacing = BlendPacing::new();
-        for _ in 0..BLEND_LOSS_STREAK {
-            assert!(pacing.should_try());
-            pacing.record(false);
-        }
-
-        for frame in 0..BLEND_REST_FRAMES {
-            assert!(!pacing.should_try(), "休み {frame} フレーム目");
-        }
-        assert!(pacing.should_try());
-    }
-
     /// 連敗が閾値に届くまでは候補を立てるのをやめない
     ///
     /// 少ない負けで見切ると勝ち負けの揺れを拾い、まだ採られる素材でも候補が
     /// 立たなくなる。休みに入るのは閾値に届いたときだけで、1回の負けでは入らない。
     #[test]
     fn the_pacing_keeps_trying_below_the_streak() {
-        let mut pacing = BlendPacing::new();
+        let mut pacing = Pacing::new(BLEND_LOSS_STREAK, BLEND_REST_FRAMES);
         pacing.record(false);
-        assert_eq!(pacing.resting, 0, "1回の負けで休みに入っている");
+        assert_eq!(pacing.resting(), 0, "1回の負けで休みに入っている");
 
         for loss in 2..BLEND_LOSS_STREAK {
             assert!(pacing.should_try(), "連敗 {loss} 回目");
             pacing.record(false);
-            assert_eq!(pacing.resting, 0, "連敗 {loss} 回で休みに入っている");
+            assert_eq!(pacing.resting(), 0, "連敗 {loss} 回で休みに入っている");
         }
         assert!(pacing.should_try(), "閾値に届く前に休みに入っている");
     }
 
     /// フレームを受け付けたエンコーダが持つ間合い
-    fn pacing_of<W: Write + Seek>(encoder: &Encoder<W>) -> &BlendPacing {
+    fn pacing_of<W: Write + Seek>(encoder: &Encoder<W>) -> &Pacing {
         &encoder.writing.blend_pacing
     }
 
@@ -979,26 +920,10 @@ mod tests {
             encoder.add_frame(frame, delay).unwrap();
         }
         let blend_pacing = pacing_of(&encoder);
-        assert_eq!(blend_pacing.resting, BLEND_REST_FRAMES);
+        assert_eq!(blend_pacing.resting(), BLEND_REST_FRAMES);
 
         encoder.add_frame(&speckled, delay).unwrap();
         let blend_pacing = pacing_of(&encoder);
-        assert_eq!(blend_pacing.resting, BLEND_REST_FRAMES - 1);
-    }
-
-    /// 候補が採られると連敗は解ける
-    #[test]
-    fn a_taken_candidate_clears_the_losses() {
-        let mut pacing = BlendPacing::new();
-        for _ in 0..BLEND_LOSS_STREAK - 1 {
-            pacing.record(false);
-        }
-        pacing.record(true);
-
-        for _ in 0..BLEND_LOSS_STREAK - 1 {
-            assert!(pacing.should_try());
-            pacing.record(false);
-        }
-        assert!(pacing.should_try());
+        assert_eq!(blend_pacing.resting(), BLEND_REST_FRAMES - 1);
     }
 }

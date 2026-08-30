@@ -13,7 +13,7 @@ use crate::normalize::{self, Binarized, TRANSPARENT, pack};
 use crate::quantize::{Histogram, material};
 use crate::ring::Ring;
 use crate::table::{ColorTable, Palette, QUANTIZED_COLORS};
-use anim_core::{Colors, FrameDelay, Rect};
+use anim_core::{Colors, FrameDelay, Pacing, Rect};
 use std::borrow::Cow;
 use std::io::{Seek, SeekFrom, Write};
 
@@ -119,49 +119,6 @@ const RESTORE_LOSS_STREAK: u32 = 6;
 
 /// 連敗した後、描く直前へ戻す候補を立てないフレーム数
 const RESTORE_REST_FRAMES: u32 = 8;
-
-/// 描く直前へ戻す候補を立てるかどうかの間合い
-///
-/// [`RESTORE_LOSS_STREAK`] 回続けて負けたら [`RESTORE_REST_FRAMES`] フレーム
-/// 立てるのを休む。
-struct RestorePacing {
-    /// 採られないまま続いた回数
-    losses: u32,
-    /// 残りの休みフレーム数
-    resting: u32,
-}
-
-impl RestorePacing {
-    fn new() -> Self {
-        RestorePacing {
-            losses: 0,
-            resting: 0,
-        }
-    }
-
-    /// 候補を立てるか。休んでいる間は1フレームぶん消費して偽を返す
-    fn should_try(&mut self) -> bool {
-        if self.resting == 0 {
-            return true;
-        }
-        self.resting -= 1;
-        false
-    }
-
-    /// 立てた候補が採られたかどうかを記録する
-    fn record(&mut self, taken: bool) {
-        if taken {
-            self.losses = 0;
-            return;
-        }
-
-        self.losses += 1;
-        if self.losses == RESTORE_LOSS_STREAK {
-            self.losses = 0;
-            self.resting = RESTORE_REST_FRAMES;
-        }
-    }
-}
 
 /// 書き出しを待っているフレーム
 ///
@@ -442,7 +399,7 @@ struct Writing {
     /// 書き出しを待っているフレーム
     pending: Option<Pending>,
     /// 描く直前へ戻す候補を立てる間合い
-    pacing: RestorePacing,
+    pacing: Pacing,
 }
 
 impl Writing {
@@ -454,7 +411,7 @@ impl Writing {
             rendered: Vec::new(),
             indices: Vec::new(),
             pending: None,
-            pacing: RestorePacing::new(),
+            pacing: Pacing::new(RESTORE_LOSS_STREAK, RESTORE_REST_FRAMES),
         }
     }
 }
@@ -900,7 +857,7 @@ fn choose_disposal(
     pending: &mut Pending,
     rendered: &mut [u8],
     delay: u16,
-    pacing: &mut RestorePacing,
+    pacing: &mut Pacing,
 ) -> (u8, Pending) {
     if canvas.kept().expressible(rendered) {
         let laid = lay_out(
@@ -1119,50 +1076,19 @@ mod tests {
         assert_eq!(table.transparent(), Some(QUANTIZED_COLORS as u8));
     }
 
-    /// 連敗が続くと候補を立てるのを休み、休みが明けたらまた試す
-    #[test]
-    fn the_pacing_rests_after_a_streak_of_losses() {
-        let mut pacing = RestorePacing::new();
-        for _ in 0..RESTORE_LOSS_STREAK {
-            assert!(pacing.should_try());
-            pacing.record(false);
-        }
-
-        for frame in 0..RESTORE_REST_FRAMES {
-            assert!(!pacing.should_try(), "休み {frame} フレーム目");
-        }
-        assert!(pacing.should_try());
-    }
-
     /// 連敗が閾値に届くまでは候補を立てるのをやめない
     ///
     /// 少ない負けで見切ると勝ち負けの揺れを拾い、まだ採られる素材でも候補が
     /// 立たなくなる。休みに入るのは閾値に届いたときだけ。
     #[test]
     fn the_pacing_keeps_trying_below_the_streak() {
-        let mut pacing = RestorePacing::new();
+        let mut pacing = Pacing::new(RESTORE_LOSS_STREAK, RESTORE_REST_FRAMES);
         for loss in 1..RESTORE_LOSS_STREAK {
             assert!(pacing.should_try(), "連敗 {loss} 回目");
             pacing.record(false);
-            assert_eq!(pacing.resting, 0, "連敗 {loss} 回で休みに入っている");
+            assert_eq!(pacing.resting(), 0, "連敗 {loss} 回で休みに入っている");
         }
         assert!(pacing.should_try(), "閾値に届く前に休みに入っている");
-    }
-
-    /// 候補が採られると連敗は解ける
-    #[test]
-    fn a_taken_candidate_clears_the_losses() {
-        let mut pacing = RestorePacing::new();
-        for _ in 0..RESTORE_LOSS_STREAK - 1 {
-            pacing.record(false);
-        }
-        pacing.record(true);
-
-        for _ in 0..RESTORE_LOSS_STREAK - 1 {
-            assert!(pacing.should_try());
-            pacing.record(false);
-        }
-        assert!(pacing.should_try());
     }
 
     /// 透過背景を1画素ずつ動く不透明なスプライト
@@ -1190,7 +1116,7 @@ mod tests {
     ///
     /// 廃棄方法が決まるのは書き出しへ渡されたフレームの1つ前なので、書き出しへ
     /// 渡すのは1つ多い。書き出しは先読みリングのぶん遅れる。
-    fn pacing_after(decisions: u32) -> RestorePacing {
+    fn pacing_after(decisions: u32) -> Pacing {
         let count = decisions + 1 + (LOOKAHEAD as u32 - 1);
         let config = Config {
             color_type: ColorType::Rgba8,
@@ -1209,11 +1135,15 @@ mod tests {
     #[test]
     fn the_write_path_consults_the_pacing() {
         let pacing = pacing_after(RESTORE_LOSS_STREAK);
-        assert_eq!(pacing.resting, RESTORE_REST_FRAMES, "連敗で休みに入らない");
+        assert_eq!(
+            pacing.resting(),
+            RESTORE_REST_FRAMES,
+            "連敗で休みに入らない"
+        );
 
         let pacing = pacing_after(RESTORE_LOSS_STREAK + 1);
         assert_eq!(
-            pacing.resting,
+            pacing.resting(),
             RESTORE_REST_FRAMES - 1,
             "休みがフレームごとに減らない"
         );
