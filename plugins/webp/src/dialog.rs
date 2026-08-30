@@ -13,7 +13,13 @@ const LOSSLESS_LABEL: &str = "ロスレス圧縮";
 /// ロスレス圧縮に添える但し書き
 ///
 /// ロスレスでも品質とメソッドは効く。効く先が画質ではなく圧縮の手間になる。
-const LOSSLESS_NOTE: &str = "品質・メソッドは圧縮の手間として効きます (画素は変わりません)";
+const LOSSLESS_NOTE: &str = "品質・メソッドは画質でなく圧縮の手間になります";
+
+/// 設定項目を並べる幅
+const CONTENT_WIDTH: f32 = 300.0;
+
+/// 設定項目の周りの余白
+const CONTENT_PADDING: f32 = 15.0;
 
 /// 品質の値域
 const QUALITY_RANGE: RangeInclusive<i32> = 0..=100;
@@ -92,8 +98,8 @@ impl Inputs {
     /// ロスレス圧縮だけは、名前の下に但し書きを添える。
     fn layout(&self) -> FlexLayout {
         FlexLayout::column()
-            .with_width(SizeValue::Points(300.0))
-            .with_padding(15.0)
+            .with_width(SizeValue::Points(CONTENT_WIDTH))
+            .with_padding(CONTENT_PADDING)
             .with_gap(10.0)
             .with_layout(labeled("ループ回数 (0=無限ループ)", self.repeat.clone()))
             .with_layout(labeled("カラーフォーマット", self.color.clone()))
@@ -195,7 +201,7 @@ pub fn show_config_dialog(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use win32_dialog::layout::Layout;
+    use win32_dialog::{Font, layout::Layout, widget::MeasureCtx};
 
     fn inputs() -> Inputs {
         Inputs::new(&Config::default())
@@ -280,5 +286,20 @@ mod tests {
 
         assert!(LOSSLESS_NOTE.contains("品質"), "{LOSSLESS_NOTE}");
         assert!(LOSSLESS_NOTE.contains("メソッド"), "{LOSSLESS_NOTE}");
+    }
+
+    /// 但し書きは折り返さないので、設定の幅に収まる長さで書く
+    #[test]
+    fn the_lossless_note_fits_the_width_of_the_settings() {
+        let font = Font::system(96).expect("システムフォントが要る");
+        let measure = MeasureCtx {
+            font: &font,
+            scale: 1.0,
+        };
+
+        let width = measure.text_size(LOSSLESS_NOTE).expect("測れること").0;
+        let room = CONTENT_WIDTH - CONTENT_PADDING * 2.0;
+
+        assert!(width <= room, "{width}pt / {room}pt: {LOSSLESS_NOTE}");
     }
 }
