@@ -416,6 +416,35 @@ impl Writing {
     }
 }
 
+/// 色とタイミングについて決めたこと
+///
+/// フレームを書き出すたびに積み、[`Encoder::finish`] が [`Report`] へ写す。
+/// 遅延の丸めは残りを次のフレームへ持ち越すため、決めた結果に加えてその残りも
+/// 持つ。
+struct Decisions {
+    /// グローバルカラーテーブルの据え方
+    ///
+    /// 据え方が決まるのはテーブルを書き戻す時点なので、それまでは `None`。
+    palette_kind: Option<PaletteKind>,
+    /// ローカルカラーテーブルを書いたフレーム数
+    local_tables: u32,
+    /// 1/100秒への累積の丸め
+    hundredths: Hundredths,
+    /// 遅延を下限で切り上げたか
+    delay_clamped: bool,
+}
+
+impl Decisions {
+    fn new() -> Self {
+        Decisions {
+            palette_kind: None,
+            local_tables: 0,
+            hundredths: Hundredths::new(),
+            delay_clamped: false,
+        }
+    }
+}
+
 /// GIFのエンコーダ
 ///
 /// [`Encoder::new`] で寸法とフレーム数を宣言し、[`Encoder::add_frame`] で
@@ -435,16 +464,10 @@ pub struct Encoder<W: Write + Seek> {
     frames_accepted: u32,
     /// 書き出しに失敗し、ブロックの列が中断しているか
     poisoned: bool,
-    /// グローバルカラーテーブルの据え方。書き戻すまでは `None`
-    palette_kind: Option<PaletteKind>,
-    /// ローカルカラーテーブルを書いたフレーム数
-    local_tables: u32,
+    /// 色とタイミングについて決めたこと
+    decisions: Decisions,
     /// 2値化で見た目が変わった画素数
     binarized: Binarized,
-    /// 1/100秒への累積の丸め
-    hundredths: Hundredths,
-    /// 遅延を下限で切り上げたか
-    delay_clamped: bool,
 }
 
 impl<W: Write + Seek> Encoder<W> {
@@ -483,11 +506,8 @@ impl<W: Write + Seek> Encoder<W> {
             num_frames,
             frames_accepted: 0,
             poisoned: false,
-            palette_kind: None,
-            local_tables: 0,
+            decisions: Decisions::new(),
             binarized: Binarized::default(),
-            hundredths: Hundredths::new(),
-            delay_clamped: false,
         })
     }
 
@@ -570,15 +590,16 @@ impl<W: Write + Seek> Encoder<W> {
 
         let report = Report {
             palette: self
+                .decisions
                 .palette_kind
                 .expect("全フレームを書き終えた時点で色は決まっている"),
-            local_tables: self.local_tables,
+            local_tables: self.decisions.local_tables,
             approximated_pixels,
             substituted_pixels,
             black_fallback,
             binarized_to_transparent: self.binarized.to_transparent,
             binarized_to_opaque: self.binarized.to_opaque,
-            delay_clamped: self.delay_clamped,
+            delay_clamped: self.decisions.delay_clamped,
         };
         Ok((self.writer, report))
     }
@@ -593,11 +614,8 @@ impl<W: Write + Seek> Encoder<W> {
             num_frames: _,
             frames_accepted: _,
             poisoned: _,
-            palette_kind,
-            local_tables,
+            decisions,
             binarized: _,
-            hundredths,
-            delay_clamped,
         } = self;
 
         (
@@ -606,10 +624,7 @@ impl<W: Write + Seek> Encoder<W> {
             Parts {
                 writer,
                 layout,
-                palette_kind,
-                local_tables,
-                hundredths,
-                delay_clamped,
+                decisions,
             },
         )
     }
@@ -630,10 +645,7 @@ impl<W: Write + Seek> Encoder<W> {
 struct Parts<'a, W: Write + Seek> {
     writer: &'a mut W,
     layout: &'a Layout,
-    palette_kind: &'a mut Option<PaletteKind>,
-    local_tables: &'a mut u32,
-    hundredths: &'a mut Hundredths,
-    delay_clamped: &'a mut bool,
+    decisions: &'a mut Decisions,
 }
 
 impl<W: Write + Seek> Parts<'_, W> {
@@ -713,8 +725,8 @@ impl<W: Write + Seek> Parts<'_, W> {
             .note_approximated(mapped.approximated);
         palettes.current_mut().note_substituted(mapped.substituted);
 
-        let (delay, clamped) = self.hundredths.next(delay);
-        *self.delay_clamped |= clamped;
+        let (delay, clamped) = self.decisions.hundredths.next(delay);
+        self.decisions.delay_clamped |= clamped;
         match pending.take() {
             None => {
                 let laid = lay_out(
@@ -765,7 +777,7 @@ impl<W: Write + Seek> Parts<'_, W> {
         }
 
         palette.settle(&quantized);
-        *self.palette_kind = Some(PaletteKind::Quantized {
+        self.decisions.palette_kind = Some(PaletteKind::Quantized {
             colors: palette.colors(),
         });
         self.write_global_table(palette)
@@ -777,7 +789,7 @@ impl<W: Write + Seek> Parts<'_, W> {
             return Ok(());
         }
 
-        *self.palette_kind = Some(PaletteKind::Exact {
+        self.decisions.palette_kind = Some(PaletteKind::Exact {
             colors: palette.colors(),
         });
         self.write_global_table(palette)
@@ -833,7 +845,7 @@ impl<W: Write + Seek> Parts<'_, W> {
         )?;
         if let Some(table) = &pending.local {
             block::color_table(self.writer, table.bytes())?;
-            *self.local_tables += 1;
+            self.decisions.local_tables += 1;
         }
         block::image_body(self.writer, pending.min_code_size, &pending.body)?;
         Ok(())
