@@ -33,6 +33,11 @@ fn encoder_config(config: &Config) -> EncoderConfig {
     }
 }
 
+/// 設定のワーカー数をエンコーダへ渡す形にする
+fn encoder_workers(config: &Config) -> NonZeroUsize {
+    NonZeroUsize::new(config.workers).unwrap_or(NonZeroUsize::MIN)
+}
+
 /// ログの深刻さ
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Severity {
@@ -87,7 +92,7 @@ fn create_webp_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
             height,
             num_frames,
             encoder_config(config),
-            NonZeroUsize::new(config.workers).unwrap_or(NonZeroUsize::MIN),
+            encoder_workers(config),
         )
         .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
 
@@ -213,12 +218,13 @@ mod tests {
         let delay = frame_delay(1, 30).unwrap();
 
         write_or_discard(path, |output_file| {
-            let mut encoder = Encoder::new(
+            let mut encoder = Encoder::with_workers(
                 BufWriter::new(output_file),
                 FRAME_WIDTH,
                 FRAME_HEIGHT,
                 declared,
                 encoder_config(&config),
+                encoder_workers(&config),
             )
             .map_err(|e| e.to_string())?;
 
@@ -328,6 +334,33 @@ mod tests {
             })
             .num_plays,
             0
+        );
+    }
+
+    #[test]
+    fn workers_are_passed_through_as_the_number_to_wake() {
+        for workers in [1, 2, 7] {
+            assert_eq!(
+                encoder_workers(&Config {
+                    workers,
+                    ..Config::default()
+                })
+                .get(),
+                workers
+            );
+        }
+    }
+
+    /// 0 は起こせないので1へ寄る
+    #[test]
+    fn a_zero_worker_count_becomes_one() {
+        assert_eq!(
+            encoder_workers(&Config {
+                workers: 0,
+                ..Config::default()
+            })
+            .get(),
+            1
         );
     }
 

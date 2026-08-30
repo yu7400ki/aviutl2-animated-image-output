@@ -30,9 +30,10 @@ pub fn show_config_dialog(
         .value(default_config.method as i32)
         .range(0, 6);
 
+    let ceiling = max_workers() as i32;
     let workers_input = Number::new()
         .value(default_config.workers as i32)
-        .range(1, max_workers() as i32);
+        .range(1, ceiling);
 
     let dialog = Dialog::new("WebP出力設定");
     let handle = dialog.handle();
@@ -56,13 +57,11 @@ pub fn show_config_dialog(
                 );
                 return;
             }
-            if workers_input.get_value::<i32>().is_err() {
+            // 上下ボタンの値域は打ち込みを縛らないので、ここで値域まで検める
+            if !matches!(workers_input.get_value::<i32>(), Ok(n) if (1..=ceiling).contains(&n)) {
                 MessageBox::error(
                     owner,
-                    &format!(
-                        "ワーカー数の値が無効です。1-{}の値を入力してください。",
-                        max_workers()
-                    ),
+                    &format!("ワーカー数の値が無効です。1-{ceiling}の値を入力してください。"),
                     "エラー",
                 );
                 return;
@@ -104,7 +103,7 @@ pub fn show_config_dialog(
         .with_layout(labeled("品質 (0-100)", quality_input.clone()))
         .with_layout(labeled("メソッド (0-6)", method_input.clone()))
         .with_layout(labeled(
-            &format!("ワーカー数 (1-{})", max_workers()),
+            &format!("ワーカー数 (1-{ceiling})"),
             workers_input.clone(),
         ))
         .with_layout(

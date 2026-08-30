@@ -4,10 +4,9 @@ use aviutl2::ini::{Ini, Properties};
 use std::num::NonZeroUsize;
 use std::thread::available_parallelism;
 
-/// 符号化を回せるワーカー数の上限
+/// 設定が採れるワーカー数の上限
 ///
-/// 符号化はCPUバウンドなので、論理CPUを超えて起こしても処理量は増えず、
-/// 抱える量と切り替えの手間だけが伸びる。機械の並列度を読めなければ1を返す。
+/// この機械の論理CPU数。読めなければ1を返す。
 pub fn max_workers() -> usize {
     available_parallelism().map_or(1, NonZeroUsize::get)
 }
@@ -183,6 +182,25 @@ method=3
 
         assert_eq!(load(&[("workers", "0")]).workers, 1);
         assert_eq!(load(&[("workers", &over)]).workers, max_workers());
+    }
+
+    /// 既定のワーカー数は上限の内側で控えめに採る
+    ///
+    /// 上限をそのまま採ると、書き出しが機械を独り占めする。上限が1の機械では
+    /// 1つしか採れないので、そこだけ上限と一致する。
+    #[test]
+    fn the_default_workers_stay_inside_the_ceiling() {
+        let default = Config::default().workers;
+        let ceiling = max_workers();
+
+        assert!(default >= 1, "{default}");
+        assert!(default <= ceiling, "{default} / {ceiling}");
+        if ceiling >= 2 {
+            assert!(
+                default < ceiling,
+                "上限をそのまま採っている: {default} / {ceiling}"
+            );
+        }
     }
 
     /// 読めない値の項目だけが既定値へ落ちる
