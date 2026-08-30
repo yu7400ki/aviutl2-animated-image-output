@@ -2020,19 +2020,23 @@ fn detailed_frame(color_type: ColorType, seed: u32) -> Vec<u8> {
     frame
 }
 
-/// [`mottled_frame`] が敷く色数
+/// [`mottled_frame`] が値に取る色の数
 ///
-/// キャンバスがこの全部を覆う値域になっている。
+/// キャンバスがこの全部を覆う値域になっている。全チャネルが0の画素の色が
+/// 別に加わるので、載るのは1つ多い。
 const MOTTLED_COLORS: usize = 128;
 
-/// [`mottled_frame`] が完全に透明な画素を置く間隔
+/// [`mottled_frame`] が全チャネルを0にする画素の間隔
+///
+/// `Rgba8` ではこの画素が完全に透明になり、パレットにアルファ0の色が載る。
+/// 隣接画素の差の並びが Paeth の同点を踏む値を選んである。
 const MOTTLED_CLEAR: usize = 13;
 
 /// 値がなだらかに動く土台へ微小なゆらぎを載せたフレーム
 ///
 /// 3チャネルとも値ごとに動き、隣接画素の差は揃わない。色を見つける順は
 /// 値の昇順から少しずつずれ、パレット参照の添字も同じだけ乱れる。
-/// [`MOTTLED_CLEAR`] 画素ごとに完全に透明な画素が入る。
+/// [`MOTTLED_CLEAR`] 画素ごとに全チャネルが0の画素が入る。
 fn mottled_frame(color_type: ColorType, seed: u32) -> Vec<u8> {
     let bpp = color_type.bytes_per_pixel();
     let grain = frame_data((FILTER_WIDTH * FILTER_HEIGHT) as usize, seed + 1);
