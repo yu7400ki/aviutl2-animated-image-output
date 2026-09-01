@@ -6,11 +6,15 @@ use std::path::{Path, PathBuf};
 /// submodule として置く vendor のディレクトリ名
 const VENDORED: [&str; 3] = ["libavif", "aom", "libyuv"];
 
-/// Release 構成の最適化。CMake の既定と同じ値を明示する
+/// Release 構成の最適化
 ///
 /// `cmake` クレートは `CMAKE_<LANG>_FLAGS_RELEASE` を自前の flag で上書きするため、
 /// 置かなければ最適化なしで組まれる。CRT の選択は `CMAKE_<LANG>_FLAGS` 側が持つ。
-const RELEASE_FLAGS: &str = "/O2 /Ob2 /DNDEBUG";
+///
+/// 展開は CMake の既定の `/Ob2` ではなく `/Ob1` に留める。`/Ob2` の MSVC x64 は
+/// 16 バイトの定数を 8 バイト整列のスタックの区画へ写し、それを整列を要する SSE
+/// 命令で読み戻すコードを aom の動き補償の探索に生む。読み戻しは一般保護例外になる。
+const RELEASE_FLAGS: &str = "/O2 /Ob1 /DNDEBUG";
 
 /// libavif の CMake へ渡すビルド設定
 const CMAKE_DEFINES: [(&str, &str); 11] = [
