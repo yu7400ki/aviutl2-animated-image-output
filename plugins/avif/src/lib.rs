@@ -33,6 +33,34 @@ fn encoder_config(config: &Config, timescale: u32) -> EncoderConfig {
     }
 }
 
+/// 符号化器へ渡す、素材の枚数と時間の刻み
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Sequence {
+    num_frames: u32,
+    /// 1秒あたりの刻み数
+    timescale: u32,
+    /// 1フレームが占める刻み数
+    duration: u32,
+}
+
+impl Sequence {
+    /// 1フレームが `scale` / `rate` 秒の素材が `num_frames` 枚
+    ///
+    /// 刻みを `rate` に据えると、1フレームは `scale` 刻みになる。
+    fn new(num_frames: i32, rate: i32, scale: i32) -> std::result::Result<Self, String> {
+        Ok(Self {
+            num_frames: to_u32(num_frames, "フレーム数")?,
+            timescale: to_u32(rate, "フレームレート")?,
+            duration: to_u32(scale, "フレームレートのスケール")?,
+        })
+    }
+
+    /// 動きを持たない1枚の素材か
+    fn single(&self) -> bool {
+        self.num_frames == 1
+    }
+}
+
 /// aomの動作の用途の説明
 fn usage_label(usage: Usage) -> &'static str {
     match usage {
@@ -43,8 +71,8 @@ fn usage_label(usage: Usage) -> &'static str {
 }
 
 /// speedから解決された動作点を、利用者が読める形にする
-fn operating_point_message(config: &EncoderConfig, single: bool) -> String {
-    let point = config.operating_point(single);
+fn operating_point_message(config: &EncoderConfig, sequence: &Sequence) -> String {
+    let point = config.operating_point(sequence.single());
     format!(
         "speed {} → {} (cpu_used={})",
         config.speed,
@@ -56,26 +84,24 @@ fn operating_point_message(config: &EncoderConfig, single: bool) -> String {
 fn create_avif_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
     let width = to_u32(info.width(), "幅")?;
     let height = to_u32(info.height(), "高さ")?;
-    let num_frames = to_u32(info.num_frames(), "フレーム数")?;
-    let timescale = to_u32(info.rate(), "フレームレート")?;
-    let duration = to_u32(info.scale(), "フレームレートのスケール")?;
+    let sequence = Sequence::new(info.num_frames(), info.rate(), info.scale())?;
 
-    let encoder_config = encoder_config(config, timescale);
+    let encoder_config = encoder_config(config, sequence.timescale);
 
     write_or_discard(&info.savefile(), |output_file| {
         let mut encoder = Encoder::new(
             BufWriter::new(output_file),
             width,
             height,
-            num_frames,
+            sequence.num_frames,
             encoder_config,
         )
         .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
 
-        logger::info(&operating_point_message(&encoder_config, num_frames == 1));
+        logger::info(&operating_point_message(&encoder_config, &sequence));
 
         info.encode_frames(config.color_format, |frame_data| {
-            encoder.add_frame(&frame_data, duration)
+            encoder.add_frame(&frame_data, sequence.duration)
         })
         .map_err(|e| e.to_string())?;
 
@@ -225,9 +251,19 @@ mod tests {
         );
     }
 
+    /// 1フレームがscale / rate秒なので、rateが刻み数、scaleが1フレームの長さ
     #[test]
-    fn the_rate_becomes_the_timescale() {
-        assert_eq!(encoder_config(&Config::default(), 30000).timescale, 30000);
+    fn the_rate_becomes_the_timescale_and_the_scale_becomes_the_duration() {
+        let sequence = Sequence::new(24, 30000, 1001).unwrap();
+        assert_eq!(sequence.timescale, 30000);
+        assert_eq!(sequence.duration, 1001);
+    }
+
+    #[test]
+    fn a_negative_frame_count_or_frame_rate_is_rejected() {
+        assert!(Sequence::new(-1, 30000, 1001).is_err());
+        assert!(Sequence::new(24, -1, 1001).is_err());
+        assert!(Sequence::new(24, 30000, -1).is_err());
     }
 
     #[test]
@@ -267,12 +303,27 @@ mod tests {
             30,
         );
 
-        let sequence = operating_point_message(&config, false);
-        assert!(sequence.contains("speed 8"), "{sequence}");
-        assert!(sequence.contains("realtime"), "{sequence}");
+        let message = operating_point_message(&config, &Sequence::new(24, 30, 1).unwrap());
+        assert!(message.contains("speed 8"), "{message}");
+        assert!(message.contains("realtime"), "{message}");
+    }
 
-        let single = operating_point_message(&config, true);
+    /// 1枚だけの素材は、動きを持つ素材とは別の動作点へ解決される
+    #[test]
+    fn a_lone_frame_resolves_to_all_intra() {
+        let config = encoder_config(
+            &Config {
+                speed: 8,
+                ..Config::default()
+            },
+            30,
+        );
+
+        let single = operating_point_message(&config, &Sequence::new(1, 30, 1).unwrap());
         assert!(single.contains("all-intra"), "{single}");
+
+        let pair = operating_point_message(&config, &Sequence::new(2, 30, 1).unwrap());
+        assert!(!pair.contains("all-intra"), "{pair}");
     }
 
     /// まだ存在しない一時ファイルの場所
