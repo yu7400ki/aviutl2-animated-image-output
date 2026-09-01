@@ -69,7 +69,7 @@ impl Default for Config {
         Self {
             repeat: 0,
             quality: 75,
-            speed: 10,
+            speed: 6,
             color_format: ColorFormat::default(),
             yuv_format: YuvFormat::default(),
             threads: std::thread::available_parallelism().map_or(1, |p| p.get()),
@@ -168,7 +168,7 @@ mod tests {
         let saved = Config {
             repeat: 3,
             quality: 90,
-            speed: 6,
+            speed: 9,
             color_format: ColorFormat::Rgba32,
             yuv_format: YuvFormat::Yuv444,
             threads: 4,
