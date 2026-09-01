@@ -34,12 +34,12 @@ impl FromStr for YuvFormat {
     }
 }
 
-impl From<YuvFormat> for rustavif::PixelFormat {
+impl From<YuvFormat> for avif_encoder::YuvFormat {
     fn from(value: YuvFormat) -> Self {
         match value {
-            YuvFormat::Yuv420 => rustavif::PixelFormat::Yuv420,
-            YuvFormat::Yuv422 => rustavif::PixelFormat::Yuv422,
-            YuvFormat::Yuv444 => rustavif::PixelFormat::Yuv444,
+            YuvFormat::Yuv420 => avif_encoder::YuvFormat::Yuv420,
+            YuvFormat::Yuv422 => avif_encoder::YuvFormat::Yuv422,
+            YuvFormat::Yuv444 => avif_encoder::YuvFormat::Yuv444,
         }
     }
 }
