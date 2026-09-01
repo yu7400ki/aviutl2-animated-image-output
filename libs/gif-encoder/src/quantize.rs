@@ -146,6 +146,23 @@ fn bin_of(color: u32) -> usize {
         + (b >> BIN_SHIFT) as usize
 }
 
+/// 順位を人口と誤差の間に置く指数 `[a, b]`
+const RANK_EXPONENTS: [u32; 2] = [0, 1];
+
+/// 箱を並べる順位 `count^a * error^b`
+///
+/// `count` は箱の中の画素数、`error` は箱の中の総二乗誤差。`a` を上げるほど
+/// 順位が人口寄り、`b` を上げるほど誤差寄りになる。
+///
+/// 誤差が残っていない箱は割っても代表色が変わらないため、指数に依らず誤差を
+/// そのまま順位にする。
+fn rank(count: f64, error: f64, [a, b]: [u32; 2]) -> f64 {
+    if error <= 0.0 {
+        return error;
+    }
+    count.powi(a as i32) * error.powi(b as i32)
+}
+
 /// 分割する軸
 #[derive(Clone, Copy)]
 enum Axis {
@@ -326,13 +343,13 @@ impl Histogram {
 
     /// もう一度割る値打ち
     ///
-    /// ビンが1つしかない箱はどの軸でも切れないため、分散を見るまでもなく0。
+    /// ビンが1つしかない箱はどの軸でも切れないため、順位を見るまでもなく0。
     fn split_gain(&self, cube: Cube) -> f64 {
-        if cube.bins() > 1 {
-            self.variance(cube)
-        } else {
-            0.0
+        if cube.bins() <= 1 {
+            return 0.0;
         }
+        let count = volume(cube, &self.weight) as f64;
+        rank(count, self.variance(cube), RANK_EXPONENTS)
     }
 
     /// 軸方向に切る位置と、そのときの評価値
@@ -602,12 +619,10 @@ mod tests {
         assert_eq!(histogram.quantize(64).len(), 2);
     }
 
-    /// 箱の順位付けは総二乗誤差で決まり、重みでは決まらない
+    /// 重いが散らばりの小さい箱と、軽いが散らばりの大きい箱
     ///
-    /// 重いが散らばりの小さい箱が、軽いが散らばりの大きい箱を追い越さないこと。
-    /// 二乗誤差に重みを掛けると順位が入れ替わり、色が重い箱へ偏る。
-    #[test]
-    fn boxes_are_ranked_by_their_total_squared_error() {
+    /// 重い箱は 2,000 画素が実値で 4 離れ、軽い箱は 2 画素が 248 離れている。
+    fn contrasting_boxes() -> (Histogram, Cube, Cube) {
         let mut histogram = Histogram::new();
         observe_color(&mut histogram, [0, 0, 0], 1000);
         observe_color(&mut histogram, [4, 0, 0], 1000);
@@ -631,11 +646,126 @@ mod tests {
             b0: 0,
             b1: 1,
         };
+        (histogram, heavy, light)
+    }
+
+    /// 総二乗誤差は箱の中の画素を1つずつ数え上げた量
+    ///
+    /// 2,000 画素が平均から 2 離れて 8,000、2 画素が 124 離れて 30,752。
+    #[test]
+    fn the_total_squared_error_of_a_box_counts_every_pixel() {
+        let (histogram, heavy, light) = contrasting_boxes();
+
         assert_eq!(volume(heavy, &histogram.weight), 2000);
         assert_eq!(volume(light, &histogram.weight), 2);
 
         assert_eq!(histogram.variance(heavy), 8_000.0);
         assert_eq!(histogram.variance(light), 30_752.0);
+    }
+
+    /// 2つの箱のどちらを先に割るかは指数が決める
+    ///
+    /// 誤差だけを見る `[0, 1]` では軽い箱が上に立ち、人口を1乗掛ける `[1, 1]`
+    /// では重い箱が追い越す。
+    #[test]
+    fn the_exponents_decide_which_of_two_boxes_is_ranked_first() {
+        let (histogram, heavy, light) = contrasting_boxes();
+        let rank_of = |cube, exponents| {
+            let count = volume(cube, &histogram.weight) as f64;
+            rank(count, histogram.variance(cube), exponents)
+        };
+
+        assert_eq!(rank_of(heavy, [0, 1]), 8_000.0);
+        assert_eq!(rank_of(light, [0, 1]), 30_752.0);
+
+        assert_eq!(rank_of(heavy, [1, 1]), 16_000_000.0);
+        assert_eq!(rank_of(light, [1, 1]), 61_504.0);
+    }
+
+    /// 既定の指数は総二乗誤差そのものを順位にする
+    #[test]
+    fn the_default_exponents_rank_boxes_by_their_total_squared_error() {
+        let (histogram, heavy, light) = contrasting_boxes();
+
+        assert_eq!(histogram.split_gain(heavy), 8_000.0);
+        assert_eq!(histogram.split_gain(light), 30_752.0);
+    }
+
+    /// 誤差の無い箱は、誤差を見ない指数でも順位が立たない
+    ///
+    /// 割っても代表色が同じなので、人口だけを見る `[1, 0]` でエントリを
+    /// 引き当てないこと。
+    #[test]
+    fn a_box_with_no_error_stays_at_zero_when_the_error_is_ignored() {
+        let mut histogram = Histogram::new();
+        observe_color(&mut histogram, [0, 0, 0], 2000);
+        observe_color(&mut histogram, [0, 252, 0], 1);
+        histogram.accumulate();
+
+        let flat = Cube {
+            r0: 0,
+            r1: 1,
+            g0: 0,
+            g1: 1,
+            b0: 0,
+            b1: 1,
+        };
+        let spread = Cube {
+            r0: 0,
+            r1: BINS,
+            g0: 0,
+            g1: BINS,
+            b0: 0,
+            b1: BINS,
+        };
+        let rank_of = |cube, exponents| {
+            let count = volume(cube, &histogram.weight) as f64;
+            rank(count, histogram.variance(cube), exponents)
+        };
+
+        assert_eq!(volume(flat, &histogram.weight), 2000);
+        assert_eq!(histogram.variance(flat), 0.0);
+        assert_eq!(rank_of(flat, [1, 0]), 0.0);
+        assert_eq!(rank_of(spread, [1, 0]), 2001.0);
+    }
+
+    /// ビンが1つしかない箱は、誤差が残っていても割る値打ちを持たない
+    #[test]
+    fn a_box_of_a_single_bin_has_no_split_gain() {
+        let mut histogram = Histogram::new();
+        // 同じビン (実値 40..=43) の2色
+        observe_color(&mut histogram, [40, 40, 40], 100);
+        observe_color(&mut histogram, [43, 40, 40], 100);
+        histogram.accumulate();
+
+        let bin = Cube {
+            r0: 10,
+            r1: 11,
+            g0: 10,
+            g1: 11,
+            b0: 10,
+            b1: 11,
+        };
+        assert_eq!(volume(bin, &histogram.weight), 200);
+        assert_eq!(histogram.variance(bin), 450.0);
+        assert_eq!(histogram.split_gain(bin), 0.0);
+    }
+
+    /// 順位は指数を上げても f64 の範囲に収まる
+    ///
+    /// 論理画面の上限 4,294,836,225 画素と総二乗誤差の上限 5.03e15 を、順位が最も
+    /// 大きくなる `[3, 1]` で混ぜると 3.9e44 になり、i128 の上限 1.7e38 を超える。
+    #[test]
+    fn the_rank_stays_within_f64_at_the_upper_bounds() {
+        const COUNT: f64 = 4_294_836_225.0;
+        const ERROR: f64 = 5.03e15;
+
+        let highest = rank(COUNT, ERROR, [3, 1]);
+        assert!(
+            highest > i128::MAX as f64,
+            "i128 に収まる大きさになっている"
+        );
+        assert!(highest.is_finite(), "順位が f64 からあふれている");
     }
 
     /// 分散の評価は u64 で表せない大きさを扱う
