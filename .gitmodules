@@ -1,3 +1,12 @@
 [submodule "libs/webp-sys/vendor"]
 	path = libs/webp-sys/vendor
 	url = https://github.com/webmproject/libwebp.git
+[submodule "libs/avif-sys/vendor/libavif"]
+	path = libs/avif-sys/vendor/libavif
+	url = https://github.com/AOMediaCodec/libavif.git
+[submodule "libs/avif-sys/vendor/aom"]
+	path = libs/avif-sys/vendor/aom
+	url = https://aomedia.googlesource.com/aom
+[submodule "libs/avif-sys/vendor/libyuv"]
+	path = libs/avif-sys/vendor/libyuv
+	url = https://chromium.googlesource.com/libyuv/libyuv
