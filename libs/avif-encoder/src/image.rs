@@ -100,6 +100,12 @@ impl Image {
     pub(crate) fn has_alpha(&self) -> bool {
         !unsafe { (*self.raw).alphaPlane }.is_null()
     }
+
+    /// 変換先の `avifPixelFormat`
+    #[cfg(test)]
+    pub(crate) fn raw_yuv_format(&self) -> c_int {
+        unsafe { (*self.raw).yuvFormat }
+    }
 }
 
 impl Drop for Image {
@@ -175,6 +181,21 @@ mod tests {
                 .unwrap()
                 .has_alpha()
         );
+    }
+
+    /// クロマサブサンプリングの選択が変換先の画素形式に届く
+    #[test]
+    fn the_chroma_subsampling_reaches_the_converted_image() {
+        let layout = Layout::new(16, 16, ColorType::Rgb8).unwrap();
+        let data = vec![0; layout.frame_len];
+        for (yuv_format, expected) in [
+            (YuvFormat::Yuv420, AVIF_PIXEL_FORMAT_YUV420),
+            (YuvFormat::Yuv422, AVIF_PIXEL_FORMAT_YUV422),
+            (YuvFormat::Yuv444, AVIF_PIXEL_FORMAT_YUV444),
+        ] {
+            let image = Image::import(&data, &layout, yuv_format).unwrap();
+            assert_eq!(image.raw_yuv_format(), expected, "{yuv_format:?}");
+        }
     }
 
     #[test]

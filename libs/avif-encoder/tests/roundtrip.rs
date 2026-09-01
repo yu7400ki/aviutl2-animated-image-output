@@ -177,6 +177,24 @@ fn cicp(bytes: &[u8], stream: u32) -> Option<Vec<String>> {
     Some(lines)
 }
 
+/// `stream` 番のストリームの画素形式を `expected` と突き合わせる
+fn assert_pix_fmt(bytes: &[u8], stream: u32, expected: &str) {
+    let Some(lines) = probe(
+        bytes,
+        &[
+            "-select_streams",
+            &stream.to_string(),
+            "-show_entries",
+            "stream=pix_fmt",
+            "-of",
+            "csv=p=0",
+        ],
+    ) else {
+        return;
+    };
+    assert_eq!(lines.first().map(String::as_str), Some(expected));
+}
+
 /// `data` に並ぶ箱を、型と中身の組で返す
 fn children(data: &[u8]) -> Vec<([u8; 4], &[u8])> {
     let mut boxes = Vec::new();
@@ -396,6 +414,25 @@ fn the_color_description_is_written_explicitly() {
             "color_transfer=iec61966-2-1",
         ]
     );
+}
+
+#[test]
+fn the_chroma_subsampling_reaches_the_file() {
+    let frames: Vec<Vec<u8>> = (0..3).map(gradient_rgb).collect();
+    for (yuv_format, pix_fmt) in [
+        (YuvFormat::Yuv420, "yuv420p"),
+        (YuvFormat::Yuv422, "yuv422p"),
+        (YuvFormat::Yuv444, "yuv444p"),
+    ] {
+        let bytes = encode(
+            &frames,
+            Config {
+                yuv_format,
+                ..config(ColorType::Rgb8, 1)
+            },
+        );
+        assert_pix_fmt(&bytes, 1, pix_fmt);
+    }
 }
 
 #[test]
