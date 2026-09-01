@@ -120,6 +120,10 @@ pub struct Encoder<W: Write> {
     frames_accepted: u32,
 }
 
+// SAFETY: 抱える生ポインタは唯一の所有で別名を持たず、libavifとaomの符号化経路は
+// スレッド固有の状態を持たない。同時アクセスは [`Sync`] を付けないことで防ぐ。
+unsafe impl<W: Write + Send> Send for Encoder<W> {}
+
 impl<W: Write> Encoder<W> {
     /// `width` x `height` の `num_frames` フレームを `writer` へ書き出す
     ///
@@ -221,7 +225,8 @@ impl<W: Write> Encoder<W> {
 mod tests {
     use super::*;
     use crate::ColorType;
-    use std::io::Cursor;
+    use std::fs::File;
+    use std::io::{BufWriter, Cursor};
 
     fn config() -> Config {
         Config {
@@ -233,6 +238,13 @@ mod tests {
             timescale: 30000,
             max_threads: 4,
         }
+    }
+
+    /// 符号化を作業スレッドへ渡せる
+    #[test]
+    fn the_encoder_moves_across_threads() {
+        fn assert_send<T: Send>() {}
+        assert_send::<Encoder<BufWriter<File>>>();
     }
 
     /// 符号化器へ書いた項目を読み戻す
