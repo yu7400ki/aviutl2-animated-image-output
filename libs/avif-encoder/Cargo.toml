@@ -1,0 +1,7 @@
+[package]
+name = "avif_encoder"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+avif-sys = { path = "../avif-sys" }

@@ -1,0 +1,145 @@
+//! `avifResult` の写像と、入力検査のエラー
+
+use std::ffi::{CStr, c_int};
+use std::fmt;
+
+/// AVIFエンコード中に発生するエラー
+#[derive(Debug)]
+pub enum Error {
+    /// 幅または高さが0、または1行のバイト数が符号化器の欄に収まらない
+    InvalidDimensions { width: u32, height: u32 },
+    /// フレーム数が0
+    InvalidFrameCount,
+    /// 1秒あたりの時間刻み数が0
+    InvalidTimescale,
+    /// フレームの表示時間が0
+    InvalidDuration,
+    /// フレームのバイト数が `幅 * 高さ * チャンネル数` と一致しない
+    FrameSizeMismatch { expected: usize, actual: usize },
+    /// 投入されたフレーム数が宣言したフレーム数と一致しない
+    FrameCountMismatch { expected: u32, actual: u32 },
+    /// libavifの符号化が失敗した
+    Encode(EncodingError),
+    /// 書き出し先のI/Oエラー
+    Io(std::io::Error),
+}
+
+/// libavifが返した失敗
+///
+/// `avifResult` の総称名に、符号化器が書いた具体的な原因を添える。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodingError {
+    code: c_int,
+    name: String,
+    detail: String,
+}
+
+impl EncodingError {
+    /// `code` の総称名をlibavifから引き、`detail` を添える
+    pub(crate) fn new(code: c_int, detail: String) -> Self {
+        let name = unsafe { CStr::from_ptr(avif_sys::avifResultToString(code)) }
+            .to_string_lossy()
+            .into_owned();
+        EncodingError { code, name, detail }
+    }
+
+    /// libavifが返した `avifResult`
+    pub fn code(&self) -> c_int {
+        self.code
+    }
+
+    /// `avifResult` の総称名
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// 符号化器が書いた原因。書かれていなければ空
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::InvalidDimensions { width, height } => {
+                write!(f, "画像サイズが不正です: {width}x{height}")
+            }
+            Error::InvalidFrameCount => write!(f, "フレーム数は1以上である必要があります"),
+            Error::InvalidTimescale => write!(f, "時間刻み数は1以上である必要があります"),
+            Error::InvalidDuration => write!(f, "表示時間は1以上である必要があります"),
+            Error::FrameSizeMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "フレームのバイト数が一致しません: {expected} バイト必要ですが {actual} バイトです"
+                )
+            }
+            Error::FrameCountMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "フレーム数が一致しません: 宣言 {expected}、投入 {actual}"
+                )
+            }
+            Error::Encode(e) => write!(f, "符号化に失敗しました: {e}"),
+            Error::Io(e) => write!(f, "書き出しに失敗しました: {e}"),
+        }
+    }
+}
+
+impl fmt::Display for EncodingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.detail.is_empty() {
+            write!(f, "{}", self.name)
+        } else {
+            write!(f, "{} ({})", self.name, self.detail)
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl std::error::Error for EncodingError {}
+
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Error::Io(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_generic_name_comes_from_the_linked_library() {
+        let e = EncodingError::new(avif_sys::AVIF_RESULT_INVALID_ARGUMENT, String::new());
+        assert_eq!(e.code(), avif_sys::AVIF_RESULT_INVALID_ARGUMENT);
+        assert_eq!(e.name(), "Invalid argument");
+        assert_eq!(e.to_string(), "Invalid argument");
+    }
+
+    /// 総称名だけでは検証失敗の中身が潰れるので、原因を並べて出す
+    #[test]
+    fn the_detail_is_shown_beside_the_generic_name() {
+        let e = EncodingError::new(
+            avif_sys::AVIF_RESULT_ENCODE_COLOR_FAILED,
+            "aom_codec_encode() failed".to_owned(),
+        );
+        assert_eq!(
+            e.to_string(),
+            "Encoding of color planes failed (aom_codec_encode() failed)"
+        );
+    }
+
+    #[test]
+    fn a_code_outside_the_enumeration_still_has_a_name() {
+        assert!(!EncodingError::new(9999, String::new()).name().is_empty());
+    }
+}
