@@ -61,7 +61,6 @@ fn create_avif_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
     let duration = to_u32(info.scale(), "フレームレートのスケール")?;
 
     let encoder_config = encoder_config(config, timescale);
-    logger::info(&operating_point_message(&encoder_config, num_frames == 1));
 
     write_or_discard(&info.savefile(), |output_file| {
         let mut encoder = Encoder::new(
@@ -72,6 +71,8 @@ fn create_avif_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
             encoder_config,
         )
         .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
+
+        logger::info(&operating_point_message(&encoder_config, num_frames == 1));
 
         info.encode_frames(config.color_format, |frame_data| {
             encoder.add_frame(&frame_data, duration)
