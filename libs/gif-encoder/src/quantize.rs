@@ -1,5 +1,6 @@
 //! Wu量子化 (6-6-6ヒストグラム → 最大256色) と最近傍写像
 
+use crate::distance::AXIS_WEIGHTS;
 use crate::layout::Layout;
 use crate::normalize::{TRANSPARENT, pack};
 
@@ -187,12 +188,15 @@ struct Whole {
 ///
 /// ビンには画素数だけでなく実値の和と二乗和も積む。パレットの色が箱内の平均に
 /// なるのはこのためで、丸めが効くのは箱の境界の粒度だけになる。
+///
+/// 一次モーメントは実値のまま積む。代表色は軸ごとに独立な最小化で決まり、
+/// [`AXIS_WEIGHTS`] を掛けても動かないため。
 pub(crate) struct Histogram {
     weight: Box<[u64]>,
     red: Box<[u64]>,
     green: Box<[u64]>,
     blue: Box<[u64]>,
-    /// 実値の二乗和
+    /// 実値の重み付き二乗和
     squared: Box<[u128]>,
     /// 重みが載ったビンの数
     distinct: usize,
@@ -240,7 +244,10 @@ impl Histogram {
         self.red[cell] += count * r;
         self.green[cell] += count * g;
         self.blue[cell] += count * b;
-        self.squared[cell] += u128::from(count) * u128::from(r * r + g * g + b * b);
+        let weighted = u64::from(AXIS_WEIGHTS[0]) * r * r
+            + u64::from(AXIS_WEIGHTS[1]) * g * g
+            + u64::from(AXIS_WEIGHTS[2]) * b * b;
+        self.squared[cell] += u128::from(count) * u128::from(weighted);
     }
 
     /// 積んだ色を `target` 色以下へ割り、箱ごとの平均色を添字順に返す
@@ -308,9 +315,10 @@ impl Histogram {
         accumulate(&mut self.squared);
     }
 
-    /// 箱の中の画素が平均色から離れている量 (二乗誤差の総和)
+    /// 箱の中の画素が平均色から離れている量 (重み付き二乗誤差の総和)
     ///
-    /// `m2 - (dr^2 + dg^2 + db^2) / wt`。
+    /// `m2 - Σ_a w_a d_a^2 / wt`。`m2` は積むときに [`AXIS_WEIGHTS`] が
+    /// 掛かっているので、一次モーメントの側だけをここで掛ける。
     fn variance(&self, cube: Cube) -> f64 {
         let weight = volume(cube, &self.weight);
         if weight <= 0 {
@@ -320,7 +328,9 @@ impl Histogram {
         let red = volume(cube, &self.red);
         let green = volume(cube, &self.green);
         let blue = volume(cube, &self.blue);
-        let deviation = red * red + green * green + blue * blue;
+        let deviation = i128::from(AXIS_WEIGHTS[0]) * red * red
+            + i128::from(AXIS_WEIGHTS[1]) * green * green
+            + i128::from(AXIS_WEIGHTS[2]) * blue * blue;
         volume(cube, &self.squared) as f64 - deviation as f64 / weight as f64
     }
 
@@ -337,8 +347,11 @@ impl Histogram {
 
     /// 軸方向に切る位置と、そのときの評価値
     ///
-    /// 切ってできる2つの箱の一次モーメントの二乗和を重みで割ったものを最大化する。
-    /// どちらかが空になる位置は候補にしない。
+    /// 切ってできる2つの箱の一次モーメントの重み付き二乗和を画素数で割ったものを
+    /// 最大化する。どちらかが空になる位置は候補にしない。
+    ///
+    /// 重みは [`Self::variance`] と同じ [`AXIS_WEIGHTS`]。同じ箱の同じ量を別の形で
+    /// 見ているので、順位を付けた基準と切る位置を選んだ基準が揃う。
     fn maximize(
         &self,
         cube: Cube,
@@ -366,7 +379,11 @@ impl Histogram {
                 break;
             }
 
-            let square = |r: i128, g: i128, b: i128| (r * r + g * g + b * b) as f64;
+            let square = |r: i128, g: i128, b: i128| {
+                (i128::from(AXIS_WEIGHTS[0]) * r * r
+                    + i128::from(AXIS_WEIGHTS[1]) * g * g
+                    + i128::from(AXIS_WEIGHTS[2]) * b * b) as f64
+            };
             let gain = square(red, green, blue) / weight as f64
                 + square(whole.red - red, whole.green - green, whole.blue - blue) / rest as f64;
             if gain > best {
@@ -518,6 +535,8 @@ impl Nearest {
     }
 
     /// ビンの中心色に最も近い候補の添字。等距離なら添字の小さい方
+    ///
+    /// 近さは2倍座標での [`AXIS_WEIGHTS`] 付き二乗距離で測る。
     fn search(&self, bin: usize) -> u8 {
         let center = [
             center_doubled(bin >> 12),
@@ -527,7 +546,9 @@ impl Nearest {
 
         let mut best = None;
         for (color, index) in &self.candidates {
-            let distance: i32 = (0..3).map(|c| (center[c] - color[c]).pow(2)).sum();
+            let distance: i32 = (0..3)
+                .map(|c| AXIS_WEIGHTS[c] as i32 * (center[c] - color[c]).pow(2))
+                .sum();
             if best.is_none_or(|(shortest, _)| distance < shortest) {
                 best = Some((distance, *index));
             }
@@ -602,10 +623,11 @@ mod tests {
         assert_eq!(histogram.quantize(64).len(), 2);
     }
 
-    /// 箱の順位付けは総二乗誤差で決まり、重みでは決まらない
+    /// 箱の順位付けは総二乗誤差で決まり、画素数では決まらない
     ///
-    /// 重いが散らばりの小さい箱が、軽いが散らばりの大きい箱を追い越さないこと。
-    /// 二乗誤差に重みを掛けると順位が入れ替わり、色が重い箱へ偏る。
+    /// 画素の多い散らばりの小さい箱が、画素の少ない散らばりの大きい箱を
+    /// 追い越さないこと。二乗誤差に画素数を掛けると順位が入れ替わり、
+    /// 色が画素の多い箱へ偏る。
     #[test]
     fn boxes_are_ranked_by_their_total_squared_error() {
         let mut histogram = Histogram::new();
@@ -634,15 +656,16 @@ mod tests {
         assert_eq!(volume(heavy, &histogram.weight), 2000);
         assert_eq!(volume(light, &histogram.weight), 2);
 
-        assert_eq!(histogram.variance(heavy), 8_000.0);
-        assert_eq!(histogram.variance(light), 30_752.0);
+        // 赤に散らばる箱は重み 5、緑に散らばる箱は重み 8 が掛かる
+        assert_eq!(histogram.variance(heavy), 40_000.0);
+        assert_eq!(histogram.variance(light), 246_016.0);
     }
 
     /// 分散の評価は u64 で表せない大きさを扱う
     ///
-    /// 同じ画素数の黒と白では二乗誤差の総和が `95256 * 画素数` になる。ここで積む
-    /// 画素数では総和が 1.91e19、二乗和が 3.81e19 で、どちらも u64 の上限
-    /// 1.84e19 を超える。割る前の分子はさらに大きく 7.62e33 になる。
+    /// 同じ画素数の黒と白では重み付き二乗誤差の総和が `571536 * 画素数` になる。
+    /// ここで積む画素数では総和が 1.14e20、二乗和が 2.29e20 で、どちらも u64 の
+    /// 上限 1.84e19 を超える。割る前の分子はさらに大きく 4.57e34 になる。
     #[test]
     fn the_variance_is_evaluated_beyond_the_range_of_u64() {
         const COUNT: u64 = 200_000_000_000_000;
@@ -660,7 +683,7 @@ mod tests {
             b0: 0,
             b1: BINS,
         };
-        let expected = 95_256.0 * COUNT as f64;
+        let expected = 571_536.0 * COUNT as f64;
         assert!(expected > u64::MAX as f64, "u64 に収まる大きさになっている");
         assert!(
             volume(whole, &histogram.squared) as f64 > u64::MAX as f64,
