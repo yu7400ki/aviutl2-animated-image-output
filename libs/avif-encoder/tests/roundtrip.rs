@@ -47,6 +47,14 @@ fn gradient_rgba(phase: u32) -> Vec<u8> {
         .collect()
 }
 
+/// `gradient_rgb` に、全面不透明な α を足したもの
+fn opaque_rgba(phase: u32) -> Vec<u8> {
+    gradient_rgb(phase)
+        .chunks_exact(3)
+        .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
+        .collect()
+}
+
 fn config(color_type: ColorType, num_plays: u32) -> Config {
     Config {
         color_type,
@@ -425,6 +433,21 @@ fn a_lone_frame_becomes_a_still_image() {
         return;
     };
     assert_frames_match(&decoded, &frames);
+}
+
+/// 全面不透明な α のペイロードは、単葉として符号化したときだけ落ちる
+///
+/// 1枚しか積まないファイルは単葉として組まれるので、単葉であることは
+/// トラックの有無には出ない。落ちた α だけが単葉としての符号化を示す。
+#[test]
+fn an_opaque_alpha_is_dropped_from_a_lone_frame() {
+    let still = encode(&[opaque_rgba(0)], config(ColorType::Rgba8, 1));
+    assert_ftyp(&still, b"avif");
+    assert_stream_count(&still, 1);
+
+    let sequence: Vec<Vec<u8>> = (0..3).map(opaque_rgba).collect();
+    let sequence = encode(&sequence, config(ColorType::Rgba8, 1));
+    assert_stream_count(&sequence, 4);
 }
 
 #[test]

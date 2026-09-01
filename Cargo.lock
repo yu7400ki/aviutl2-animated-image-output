@@ -46,6 +46,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "avif_encoder"
+version = "0.1.0"
+dependencies = [
+ "avif-sys",
+]
+
+[[package]]
 name = "avif_output"
 version = "1.1.3"
 dependencies = [
