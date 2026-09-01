@@ -116,21 +116,21 @@ const ESCAPE_FLOOR: u64 = 3 * ESCAPE_DRIFT_PER_AXIS * ESCAPE_DRIFT_PER_AXIS;
 
 /// 外れた画素と呼ぶ、色の1軸あたりのずれ
 ///
-/// 単位は R/G/B いずれか1軸の差。[`ESCAPE_DRIFT_PER_AXIS`] の2倍にあたる。
-const ESCAPE_STRAY_DRIFT_PER_AXIS: u64 = 16;
+/// 単位は R/G/B いずれか1軸の差。[`ESCAPE_DRIFT_PER_AXIS`] の1.5倍にあたる。
+const ESCAPE_STRAY_DRIFT_PER_AXIS: u64 = 12;
 
 /// 外れた画素と呼ぶ二乗距離
 ///
 /// 単位は二乗距離 (RGB各軸の差の二乗和)。入力が変わった画素を今引いている
 /// カラーテーブルへ写し、その二乗距離がこれを超えた画素を外れた画素として数える。
-/// [`ESCAPE_FLOOR`] のちょうど4倍で、平均が許すずれの2倍を1軸に許す。
+/// [`ESCAPE_FLOOR`] の2.25倍で、平均が許すずれの1.5倍を1軸に許す。
 const ESCAPE_STRAY_FLOOR: u64 = 3 * ESCAPE_STRAY_DRIFT_PER_AXIS * ESCAPE_STRAY_DRIFT_PER_AXIS;
 
 /// 逃げるかどうかを分ける、外れた画素の割合
 ///
 /// 単位は千分率。入力が変わった画素のうち [`ESCAPE_STRAY_FLOOR`] より遠くへ写った
 /// ものがこの割合を超えたフレームは、自分の色表を作る。
-const ESCAPE_STRAY_PERMILLE: u64 = 40;
+const ESCAPE_STRAY_PERMILLE: u64 = 30;
 
 /// 描く直前へ戻す候補を試すのをやめるまでの連敗数
 const RESTORE_LOSS_STREAK: u32 = 6;
