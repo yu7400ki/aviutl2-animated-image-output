@@ -156,6 +156,8 @@ pub(crate) struct Rendered {
     pub(crate) mapped: u64,
     /// 写した画素とその写し先の二乗距離の総和
     pub(crate) error: u64,
+    /// 写し先との二乗距離が外れの閾値を超えた画素数
+    pub(crate) strayed: u64,
 }
 
 impl Rendered {
@@ -164,6 +166,13 @@ impl Rendered {
     /// 1画素も写していないフレームは超えない。
     pub(crate) fn mean_error_exceeds(&self, floor: u64) -> bool {
         self.error > floor * self.mapped
+    }
+
+    /// 外れた画素が、写した画素の `permille` 千分率を超えるか
+    ///
+    /// 1画素も写していないフレームは超えない。
+    pub(crate) fn strayed_ratio_exceeds(&self, permille: u64) -> bool {
+        self.strayed * 1000 > permille * self.mapped
     }
 }
 
@@ -331,11 +340,14 @@ impl Canvas {
     /// 保つため、パレットが変わっても静止した領域は揺れない。
     ///
     /// `previous` は直前に投入されたフレームの正規化した入力。先頭フレームでは空。
+    /// `stray_floor` は外れた画素と呼ぶ二乗距離で、写し先がこれより遠い画素を
+    /// 別に数える。
     pub(crate) fn render(
         &self,
         previous: &[u8],
         frame: &[u8],
         palette: &mut Palette,
+        stray_floor: u64,
         out: &mut Vec<u8>,
     ) -> Rendered {
         let bpp = self.layout.bytes_per_pixel;
@@ -347,6 +359,7 @@ impl Canvas {
             substituted: 0,
             mapped: 0,
             error: 0,
+            strayed: 0,
         };
         // 先頭フレームには前が無く、持ち越せる色も無い
         let carried = self.drawn.then_some((previous, self.after.as_slice()));
@@ -366,16 +379,20 @@ impl Canvas {
             }
             let mapped = palette.map(pixel, bpp);
             rendered.mapped += 1;
-            match mapped.fit {
-                Fit::Exact => {}
+            let error = match mapped.fit {
+                Fit::Exact => 0,
                 Fit::Approximated { error } => {
                     rendered.approximated += 1;
-                    rendered.error += u64::from(error);
+                    u64::from(error)
                 }
                 Fit::Substituted { error } => {
                     rendered.substituted += 1;
-                    rendered.error += u64::from(error);
+                    u64::from(error)
                 }
+            };
+            rendered.error += error;
+            if error > stray_floor {
+                rendered.strayed += 1;
             }
             out.extend_from_slice(&palette.color_at(mapped.index).to_le_bytes()[..bpp]);
         }
@@ -763,11 +780,11 @@ mod tests {
         let mut palette = palette_of(&[&first, &second], 4);
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
-        canvas.render(&[], &first, &mut palette, &mut rendered);
+        canvas.render(&[], &first, &mut palette, STRAY_FLOOR, &mut rendered);
         assert_eq!(rendered, first, "先頭フレームが写っていない");
         start(&mut canvas, &rendered);
 
-        canvas.render(&first, &second, &mut palette, &mut rendered);
+        canvas.render(&first, &second, &mut palette, STRAY_FLOOR, &mut rendered);
         assert_eq!(rendered, second);
     }
 
@@ -784,10 +801,10 @@ mod tests {
         let mut palette = palette_of(&[&first], 4);
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
-        canvas.render(&[], &first, &mut palette, &mut rendered);
+        canvas.render(&[], &first, &mut palette, STRAY_FLOOR, &mut rendered);
         start(&mut canvas, &rendered);
 
-        canvas.render(&first, &second, &mut palette, &mut rendered);
+        canvas.render(&first, &second, &mut palette, STRAY_FLOOR, &mut rendered);
         assert_eq!(rendered[..4], [0, 0, 0, 0]);
         assert!(!canvas.kept().expressible(&rendered));
     }
@@ -807,12 +824,18 @@ mod tests {
         let first: Vec<u8> = CARRIED.repeat((WIDTH * HEIGHT) as usize);
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
-        canvas.render(&[], &first, &mut palette_of(&[&first], 4), &mut rendered);
+        canvas.render(
+            &[],
+            &first,
+            &mut palette_of(&[&first], 4),
+            STRAY_FLOOR,
+            &mut rendered,
+        );
         start(&mut canvas, &rendered);
 
         // 入力が変わらない画素は、色表が入れ替わっても持ち越される
         let mut palette = palette_of(&[&SETTLED[..]], 4);
-        canvas.render(&first, &first, &mut palette, &mut rendered);
+        canvas.render(&first, &first, &mut palette, STRAY_FLOOR, &mut rendered);
         assert_eq!(rendered, first, "持ち越しがテーブルを通っている");
 
         // 矩形を透過へ抜いた画面では、持ち越した画素も書き直す
@@ -845,11 +868,17 @@ mod tests {
         let first: Vec<u8> = CARRIED.repeat((WIDTH * HEIGHT) as usize);
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
-        canvas.render(&[], &first, &mut palette_of(&[&first], 4), &mut rendered);
+        canvas.render(
+            &[],
+            &first,
+            &mut palette_of(&[&first], 4),
+            STRAY_FLOOR,
+            &mut rendered,
+        );
         start(&mut canvas, &rendered);
 
         let mut palette = palette_of(&[&SETTLED[..]], 4);
-        canvas.render(&first, &first, &mut palette, &mut rendered);
+        canvas.render(&first, &first, &mut palette, STRAY_FLOOR, &mut rendered);
 
         let rect = layout(ColorType::Rgba8).whole();
         let mut indices = Vec::new();
@@ -878,6 +907,14 @@ mod tests {
     const OFF_BY: [u8; 4] = [0x10, 0x34, 0x30, 0xFF];
     /// [`OFF_BY`] を [`SETTLED`] へ写した二乗距離
     const OFF_BY_ERROR: u64 = 20 * 20;
+    /// 写した結果を数えるときの外れの閾値
+    ///
+    /// [`OFF_BY`] を写した二乗距離ちょうどに置く。
+    const STRAY_FLOOR: u64 = OFF_BY_ERROR;
+    /// [`OFF_BY`] から赤へさらに 1 離れた色
+    ///
+    /// 写した先との二乗距離は [`STRAY_FLOOR`] をちょうど1超える。
+    const BEYOND: [u8; 4] = [0x11, 0x34, 0x30, 0xFF];
 
     /// 平均がちょうど床の誤差は、床を超えたものに数えない
     ///
@@ -891,7 +928,7 @@ mod tests {
         let canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
 
-        let counted = canvas.render(&[], &frame, &mut palette, &mut rendered);
+        let counted = canvas.render(&[], &frame, &mut palette, STRAY_FLOOR, &mut rendered);
         assert_eq!(counted.approximated, pixels, "最近傍へ写していない");
         assert_eq!(counted.mapped, pixels);
         assert_eq!(counted.error, OFF_BY_ERROR * pixels);
@@ -922,7 +959,7 @@ mod tests {
         canvas.start(&previous);
         let mut rendered = Vec::new();
 
-        let counted = canvas.render(&previous, &frame, &mut palette, &mut rendered);
+        let counted = canvas.render(&previous, &frame, &mut palette, STRAY_FLOOR, &mut rendered);
         assert_eq!(counted.mapped, 1, "写していない画素を分母に入れている");
         assert_eq!(counted.error, OFF_BY_ERROR);
         assert!(counted.mean_error_exceeds(OFF_BY_ERROR - 1));
@@ -944,7 +981,7 @@ mod tests {
         let canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
 
-        let counted = canvas.render(&[], &frame, &mut palette, &mut rendered);
+        let counted = canvas.render(&[], &frame, &mut palette, STRAY_FLOOR, &mut rendered);
         assert_eq!(counted.substituted, pixels as u64, "埋め草へ置いていない");
         assert_eq!(counted.approximated, 0, "近似に数えている");
         assert_eq!(counted.error, SUBSTITUTED_ERROR * pixels as u64);
@@ -964,9 +1001,82 @@ mod tests {
         canvas.start(&previous);
         let mut rendered = Vec::new();
 
-        let counted = canvas.render(&previous, &previous, &mut palette, &mut rendered);
+        let counted = canvas.render(
+            &previous,
+            &previous,
+            &mut palette,
+            STRAY_FLOOR,
+            &mut rendered,
+        );
         assert_eq!(counted.mapped, 0);
         assert!(!counted.mean_error_exceeds(0));
+        assert!(!counted.strayed_ratio_exceeds(0));
+    }
+
+    /// 閾値ちょうどの二乗距離は外れた画素に数えない
+    ///
+    /// 外れた画素の割合も逃げるかどうかを決める。境目を含めると、ちょうどの
+    /// 誤差で逃げへ倒れる。
+    #[test]
+    fn an_error_equal_to_the_stray_floor_is_not_a_stray() {
+        let pixels = u64::from(WIDTH * HEIGHT);
+        let frame: Vec<u8> = OFF_BY.repeat(pixels as usize);
+        let mut palette = palette_of(&[&SETTLED[..]], 4);
+        let canvas = Canvas::new(layout(ColorType::Rgba8));
+        let mut rendered = Vec::new();
+
+        let counted = canvas.render(&[], &frame, &mut palette, OFF_BY_ERROR, &mut rendered);
+        assert_eq!(counted.mapped, pixels);
+        assert_eq!(counted.strayed, 0, "閾値ちょうどを外れに数えている");
+
+        let counted = canvas.render(&[], &frame, &mut palette, OFF_BY_ERROR - 1, &mut rendered);
+        assert_eq!(counted.strayed, pixels, "閾値を超えた画素を数えていない");
+
+        let exact: Vec<u8> = SETTLED.repeat(pixels as usize);
+        let counted = canvas.render(&[], &exact, &mut palette, 0, &mut rendered);
+        assert_eq!(counted.mapped, pixels);
+        assert_eq!(counted.strayed, 0, "完全一致した画素を外れに数えている");
+    }
+
+    /// 外れた画素がちょうど千分率のフレームは、割合を超えたものに数えない
+    #[test]
+    fn a_stray_ratio_equal_to_the_permille_does_not_exceed_it() {
+        let pixels = (WIDTH * HEIGHT) as usize;
+        let mut frame: Vec<u8> = SETTLED.repeat(pixels);
+        frame[..4].copy_from_slice(&BEYOND);
+
+        let mut palette = palette_of(&[&SETTLED[..]], 4);
+        let canvas = Canvas::new(layout(ColorType::Rgba8));
+        let mut rendered = Vec::new();
+
+        let counted = canvas.render(&[], &frame, &mut palette, STRAY_FLOOR, &mut rendered);
+        assert_eq!(counted.mapped, pixels as u64);
+        assert_eq!(counted.strayed, 1, "閾値を1超えた画素を数えていない");
+
+        let permille = 1000 / pixels as u64;
+        assert!(
+            !counted.strayed_ratio_exceeds(permille),
+            "ちょうどの割合を超えたものに数えている"
+        );
+        assert!(
+            counted.strayed_ratio_exceeds(permille - 1),
+            "割合を超えたフレームを数えていない"
+        );
+    }
+
+    /// 写した画素がすべて外れても、千分率が 1000 なら割合を超えない
+    #[test]
+    fn a_permille_of_one_thousand_is_never_exceeded() {
+        let pixels = (WIDTH * HEIGHT) as usize;
+        let frame: Vec<u8> = BEYOND.repeat(pixels);
+
+        let mut palette = palette_of(&[&SETTLED[..]], 4);
+        let canvas = Canvas::new(layout(ColorType::Rgba8));
+        let mut rendered = Vec::new();
+
+        let counted = canvas.render(&[], &frame, &mut palette, STRAY_FLOOR, &mut rendered);
+        assert_eq!(counted.strayed, pixels as u64, "全画素が外れていない");
+        assert!(!counted.strayed_ratio_exceeds(1000));
     }
 
     /// 全幅でない矩形は行をまたいで切り出される

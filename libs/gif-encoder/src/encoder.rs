@@ -114,6 +114,24 @@ const ESCAPE_DRIFT_PER_AXIS: u64 = 8;
 /// 画素の二乗距離に当たる。
 const ESCAPE_FLOOR: u64 = 3 * ESCAPE_DRIFT_PER_AXIS * ESCAPE_DRIFT_PER_AXIS;
 
+/// 外れた画素と呼ぶ、色の1軸あたりのずれ
+///
+/// 単位は R/G/B いずれか1軸の差。[`ESCAPE_DRIFT_PER_AXIS`] の2倍にあたる。
+const ESCAPE_STRAY_DRIFT_PER_AXIS: u64 = 16;
+
+/// 外れた画素と呼ぶ二乗距離
+///
+/// 単位は二乗距離 (RGB各軸の差の二乗和)。入力が変わった画素を今引いている
+/// カラーテーブルへ写し、その二乗距離がこれを超えた画素を外れた画素として数える。
+/// [`ESCAPE_FLOOR`] のちょうど4倍で、平均が許すずれの2倍を1軸に許す。
+const ESCAPE_STRAY_FLOOR: u64 = 3 * ESCAPE_STRAY_DRIFT_PER_AXIS * ESCAPE_STRAY_DRIFT_PER_AXIS;
+
+/// 逃げるかどうかを分ける、外れた画素の割合
+///
+/// 単位は千分率。入力が変わった画素のうち [`ESCAPE_STRAY_FLOOR`] より遠くへ写った
+/// ものがこの割合を超えたフレームは、自分の色表を作る。
+const ESCAPE_STRAY_PERMILLE: u64 = 40;
+
 /// 描く直前へ戻す候補を試すのをやめるまでの連敗数
 const RESTORE_LOSS_STREAK: u32 = 6;
 
@@ -691,17 +709,30 @@ impl<W: Write + Seek> Parts<'_, W> {
 
         // 逃げた色表は床を再び超えるまで引き継ぐ。まずその色表で写して誤差を測る
         palettes.hold();
-        let mut mapped = canvas.render(previous, pixels, palettes.current_mut(), rendered);
+        let mut mapped = canvas.render(
+            previous,
+            pixels,
+            palettes.current_mut(),
+            ESCAPE_STRAY_FLOOR,
+            rendered,
+        );
         // 色で埋まったテーブルは透過添字を持たない。標識を書く先が無いフレームは
         // 表現できないため、閉じて透過添字を取り直す
         if palettes.global.is_open() && self.lacks_transparent(&palettes.global, rendered, ring) {
             self.settle(&mut palettes.global, ring, pixels)?;
-            mapped = canvas.render(previous, pixels, &mut palettes.global, rendered);
+            mapped = canvas.render(
+                previous,
+                pixels,
+                &mut palettes.global,
+                ESCAPE_STRAY_FLOOR,
+                rendered,
+            );
         }
 
-        // 変わった画素の誤差が床を超えたフレームと、透過添字の要るフレームは、
-        // 自分の色表へ逃げる
+        // 変わった画素の誤差が床を超えたフレーム、外れた画素が割合を超えたフレーム、
+        // 透過添字の要るフレームは、自分の色表へ逃げる
         if mapped.mean_error_exceeds(ESCAPE_FLOOR)
+            || mapped.strayed_ratio_exceeds(ESCAPE_STRAY_PERMILLE)
             || self.lacks_transparent(palettes.current(), rendered, ring)
         {
             debug_assert!(
@@ -718,7 +749,13 @@ impl<W: Write + Seek> Parts<'_, W> {
                 rendered,
                 disposed,
             ));
-            mapped = canvas.render(previous, pixels, palettes.current_mut(), rendered);
+            mapped = canvas.render(
+                previous,
+                pixels,
+                palettes.current_mut(),
+                ESCAPE_STRAY_FLOOR,
+                rendered,
+            );
         }
         palettes
             .current_mut()
