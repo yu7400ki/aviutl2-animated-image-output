@@ -1,6 +1,5 @@
 //! Wu量子化 (6-6-6ヒストグラム → 最大256色) と最近傍写像
 
-use crate::distance::{AXIS_WEIGHTS, weighted_square};
 use crate::layout::Layout;
 use crate::normalize::{TRANSPARENT, pack};
 
@@ -193,7 +192,7 @@ pub(crate) struct Histogram {
     red: Box<[u64]>,
     green: Box<[u64]>,
     blue: Box<[u64]>,
-    /// 実値の重み付き二乗和
+    /// 実値の二乗和
     squared: Box<[u128]>,
     /// 重みが載ったビンの数
     distinct: usize,
@@ -241,7 +240,7 @@ impl Histogram {
         self.red[cell] += count * r;
         self.green[cell] += count * g;
         self.blue[cell] += count * b;
-        self.squared[cell] += u128::from(count) * u128::from(weighted_square([r, g, b]));
+        self.squared[cell] += u128::from(count) * u128::from(r * r + g * g + b * b);
     }
 
     /// 積んだ色を `target` 色以下へ割り、箱ごとの平均色を添字順に返す
@@ -309,10 +308,9 @@ impl Histogram {
         accumulate(&mut self.squared);
     }
 
-    /// 箱の中の画素が平均色から離れている量 (重み付き二乗誤差の総和)
+    /// 箱の中の画素が平均色から離れている量 (二乗誤差の総和)
     ///
-    /// `m2 - Σ_a w_a d_a^2 / wt`。`m2` は積むときに [`AXIS_WEIGHTS`] が
-    /// 掛かっているので、一次モーメントの側だけをここで掛ける。
+    /// `m2 - (dr^2 + dg^2 + db^2) / wt`。
     fn variance(&self, cube: Cube) -> f64 {
         let weight = volume(cube, &self.weight);
         if weight <= 0 {
@@ -322,7 +320,7 @@ impl Histogram {
         let red = volume(cube, &self.red);
         let green = volume(cube, &self.green);
         let blue = volume(cube, &self.blue);
-        let deviation = weighted_square([red, green, blue]);
+        let deviation = red * red + green * green + blue * blue;
         volume(cube, &self.squared) as f64 - deviation as f64 / weight as f64
     }
 
@@ -339,8 +337,7 @@ impl Histogram {
 
     /// 軸方向に切る位置と、そのときの評価値
     ///
-    /// 切ってできる2つの箱の一次モーメントの重み付き二乗和を画素数で割ったものを
-    /// 最大化する。重みは [`Self::variance`] と同じ [`AXIS_WEIGHTS`]。
+    /// 切ってできる2つの箱の一次モーメントの二乗和を重みで割ったものを最大化する。
     /// どちらかが空になる位置は候補にしない。
     fn maximize(
         &self,
@@ -369,9 +366,9 @@ impl Histogram {
                 break;
             }
 
-            let square = |axes: [i128; 3]| weighted_square(axes) as f64;
-            let gain = square([red, green, blue]) / weight as f64
-                + square([whole.red - red, whole.green - green, whole.blue - blue]) / rest as f64;
+            let square = |r: i128, g: i128, b: i128| (r * r + g * g + b * b) as f64;
+            let gain = square(red, green, blue) / weight as f64
+                + square(whole.red - red, whole.green - green, whole.blue - blue) / rest as f64;
             if gain > best {
                 best = gain;
                 cut = Some(position);
@@ -521,8 +518,6 @@ impl Nearest {
     }
 
     /// ビンの中心色に最も近い候補の添字。等距離なら添字の小さい方
-    ///
-    /// 近さは2倍座標での [`AXIS_WEIGHTS`] 付き二乗距離で測る。
     fn search(&self, bin: usize) -> u8 {
         let center = [
             center_doubled(bin >> 12),
@@ -532,9 +527,7 @@ impl Nearest {
 
         let mut best = None;
         for (color, index) in &self.candidates {
-            let distance: i32 = (0..3)
-                .map(|c| AXIS_WEIGHTS[c] as i32 * (center[c] - color[c]).pow(2))
-                .sum();
+            let distance: i32 = (0..3).map(|c| (center[c] - color[c]).pow(2)).sum();
             if best.is_none_or(|(shortest, _)| distance < shortest) {
                 best = Some((distance, *index));
             }
@@ -546,23 +539,10 @@ impl Nearest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::distance::distance;
 
     /// 色を1画素ぶん積む
     fn observe_color(histogram: &mut Histogram, color: [u8; 3], count: u64) {
         histogram.add(color[0], color[1], color[2], count);
-    }
-
-    /// ビン全体を覆う箱
-    fn whole() -> Cube {
-        Cube {
-            r0: 0,
-            r1: BINS,
-            g0: 0,
-            g1: BINS,
-            b0: 0,
-            b1: BINS,
-        }
     }
 
     fn pack(color: [u8; 3]) -> u32 {
@@ -588,58 +568,15 @@ mod tests {
         assert_eq!(palette, expected);
     }
 
-    /// 箱の色は中の画素を画素数で重み付けた平均になる
+    /// 箱の色は中の画素の重み付き平均になる
     #[test]
-    fn the_color_of_a_box_is_the_mean_weighted_by_pixel_count() {
+    fn the_color_of_a_box_is_the_weighted_mean_of_its_pixels() {
         let mut histogram = Histogram::new();
         // 同じビン (実値 40..=43) の2色。どう割っても同じ箱に入る
         observe_color(&mut histogram, [40, 40, 40], 3);
         observe_color(&mut histogram, [43, 40, 40], 1);
 
         assert_eq!(histogram.quantize(16), vec![pack([41, 40, 40])]);
-    }
-
-    /// 箱の代表色は軸ごとの重みで動かない
-    ///
-    /// 丸めた重心の重み付き二乗誤差が、軸ごとに独立へ最小化した誤差の和に
-    /// 一致すること。
-    #[test]
-    fn the_color_of_a_box_does_not_move_with_the_axis_weights() {
-        const SAMPLES: [([u8; 3], u64); 3] =
-            [([0, 20, 255], 3), ([7, 220, 40], 2), ([255, 90, 4], 5)];
-
-        let mut histogram = Histogram::new();
-        for (color, count) in SAMPLES {
-            observe_color(&mut histogram, color, count);
-        }
-        histogram.accumulate();
-        let average = histogram.average(whole()).expect("箱に画素が無い");
-
-        let centroid: u64 = SAMPLES
-            .iter()
-            .map(|&(color, count)| count * u64::from(distance(pack(color), average)))
-            .sum();
-        let independent: u64 = AXIS_WEIGHTS
-            .iter()
-            .enumerate()
-            .map(|(axis, &weight)| {
-                let smallest = (0..=u64::from(u8::MAX))
-                    .map(|candidate| {
-                        SAMPLES
-                            .iter()
-                            .map(|&(color, count)| {
-                                let difference = u64::from(color[axis]).abs_diff(candidate);
-                                count * difference * difference
-                            })
-                            .sum::<u64>()
-                    })
-                    .min()
-                    .expect("候補が無い");
-                u64::from(weight) * smallest
-            })
-            .sum();
-
-        assert_eq!(centroid, independent, "重心が軸ごとの最小値を外している");
     }
 
     /// 目標色数が集団の数に満たないときは、近い集団から1つの箱へまとまる
@@ -665,11 +602,10 @@ mod tests {
         assert_eq!(histogram.quantize(64).len(), 2);
     }
 
-    /// 箱の順位付けは総二乗誤差で決まり、画素数では決まらない
+    /// 箱の順位付けは総二乗誤差で決まり、重みでは決まらない
     ///
-    /// 画素の多い散らばりの小さい箱が、画素の少ない散らばりの大きい箱を
-    /// 追い越さないこと。二乗誤差に画素数を掛けると順位が入れ替わり、
-    /// 色が画素の多い箱へ偏る。
+    /// 重いが散らばりの小さい箱が、軽いが散らばりの大きい箱を追い越さないこと。
+    /// 二乗誤差に重みを掛けると順位が入れ替わり、色が重い箱へ偏る。
     #[test]
     fn boxes_are_ranked_by_their_total_squared_error() {
         let mut histogram = Histogram::new();
@@ -698,36 +634,15 @@ mod tests {
         assert_eq!(volume(heavy, &histogram.weight), 2000);
         assert_eq!(volume(light, &histogram.weight), 2);
 
-        // 赤に散らばる箱は重み 5、緑に散らばる箱は重み 8 が掛かる
-        assert_eq!(histogram.variance(heavy), 40_000.0);
-        assert_eq!(histogram.variance(light), 246_016.0);
-    }
-
-    /// 分割する軸は軸ごとの重みで入れ替わる
-    ///
-    /// 赤と緑に同じ広がりを持つ箱では、重みを掛けなければ2軸の利得が並び、
-    /// 先に評価する赤で切れる。緑の重みが大きいぶん、切る軸は緑へ移る。
-    #[test]
-    fn the_axis_that_is_cut_follows_the_axis_weights() {
-        let mut histogram = Histogram::new();
-        for color in [[0, 0, 0], [252, 0, 0], [0, 252, 0], [252, 252, 0]] {
-            observe_color(&mut histogram, color, 1);
-        }
-
-        let mut palette = histogram.quantize(2);
-        palette.sort_unstable();
-        assert_eq!(
-            palette,
-            vec![pack([126, 0, 0]), pack([126, 252, 0])],
-            "赤で切っている"
-        );
+        assert_eq!(histogram.variance(heavy), 8_000.0);
+        assert_eq!(histogram.variance(light), 30_752.0);
     }
 
     /// 分散の評価は u64 で表せない大きさを扱う
     ///
-    /// 同じ画素数の黒と白では重み付き二乗誤差の総和が `571536 * 画素数` になる。
-    /// ここで積む画素数では総和が 1.14e20、二乗和が 2.29e20 で、どちらも u64 の
-    /// 上限 1.84e19 を超える。割る前の分子はさらに大きく 4.57e34 になる。
+    /// 同じ画素数の黒と白では二乗誤差の総和が `95256 * 画素数` になる。ここで積む
+    /// 画素数では総和が 1.91e19、二乗和が 3.81e19 で、どちらも u64 の上限
+    /// 1.84e19 を超える。割る前の分子はさらに大きく 7.62e33 になる。
     #[test]
     fn the_variance_is_evaluated_beyond_the_range_of_u64() {
         const COUNT: u64 = 200_000_000_000_000;
@@ -737,14 +652,22 @@ mod tests {
         observe_color(&mut histogram, [252, 252, 252], COUNT);
         histogram.accumulate();
 
-        let expected = 571_536.0 * COUNT as f64;
+        let whole = Cube {
+            r0: 0,
+            r1: BINS,
+            g0: 0,
+            g1: BINS,
+            b0: 0,
+            b1: BINS,
+        };
+        let expected = 95_256.0 * COUNT as f64;
         assert!(expected > u64::MAX as f64, "u64 に収まる大きさになっている");
         assert!(
-            volume(whole(), &histogram.squared) as f64 > u64::MAX as f64,
+            volume(whole, &histogram.squared) as f64 > u64::MAX as f64,
             "二乗和が u64 に収まる大きさになっている"
         );
 
-        let variance = histogram.variance(whole());
+        let variance = histogram.variance(whole);
         assert!(
             (variance - expected).abs() <= expected * 1e-12,
             "{variance} が {expected} から離れている"
@@ -765,22 +688,6 @@ mod tests {
         assert_eq!(nearest.index_of(LOW), 1, "中心色で引いていない");
         // 同じビンのどの色を引いても同じ添字になる
         assert_eq!(nearest.index_of(0xFF67_6767), 1);
-    }
-
-    /// ビンの中心の写す先は軸ごとの重みで入れ替わる
-    ///
-    /// ビン (32,32,32) の中心 129.5 に対し、緑へ約8ずれた候補と赤へ約9ずれた
-    /// 候補を置く。2倍座標の差の二乗和は 291 対 363 で緑の側が近いが、
-    /// 重みを掛けると 2322 対 1818 になって赤の側へ移る。
-    #[test]
-    fn the_target_of_a_bin_follows_the_axis_weights() {
-        let mut nearest = Nearest::new(&[pack([130, 138, 130]), pack([139, 130, 130])]);
-
-        assert_eq!(
-            nearest.index_of(pack([129, 129, 129])),
-            1,
-            "緑のずれを近いと見ている"
-        );
     }
 
     /// 透過標識のエントリは写す先にならない

@@ -5,7 +5,6 @@ use crate::block::{
     GLOBAL_TABLE_OFFSET,
 };
 use crate::delay::Hundredths;
-use crate::distance::WEIGHT_SUM;
 use crate::error::Error;
 use crate::frame::{Canvas, Screen, Written};
 use crate::layout::Layout;
@@ -103,16 +102,17 @@ const LOOKAHEAD: usize = 8;
 
 /// 逃げるかどうかを分ける、色の1軸あたりのずれ
 ///
-/// 単位は R/G/B いずれか1軸の差。比べる相手が重み付き二乗距離の平均なので、
-/// この値は [`WEIGHT_SUM`] で割ってから根を取った重み付き二乗平均平方根にあたる。
+/// 単位は R/G/B いずれか1軸の差。比べる相手が二乗距離の平均なので、この値は
+/// 二乗平均平方根 (RMS) にあたる。
 const ESCAPE_DRIFT_PER_AXIS: u64 = 8;
 
 /// 逃げるかどうかを分ける誤差の床
 ///
-/// 単位は重み付き二乗距離の平均。入力が変わった画素を今引いているカラーテーブルへ
-/// 写し、その平均がこれを超えたフレームは自分の色表を作る。床は RGB の3軸
-/// それぞれがちょうど [`ESCAPE_DRIFT_PER_AXIS`] だけずれた画素の距離に当たる。
-const ESCAPE_FLOOR: u64 = WEIGHT_SUM as u64 * ESCAPE_DRIFT_PER_AXIS * ESCAPE_DRIFT_PER_AXIS;
+/// 単位は二乗距離 (RGB各軸の差の二乗和) の平均。入力が変わった画素を今引いている
+/// カラーテーブルへ写し、その二乗距離の平均がこれを超えたフレームは自分の色表を
+/// 作る。床は RGB の3軸それぞれがちょうど [`ESCAPE_DRIFT_PER_AXIS`] だけずれた
+/// 画素の二乗距離に当たる。
+const ESCAPE_FLOOR: u64 = 3 * ESCAPE_DRIFT_PER_AXIS * ESCAPE_DRIFT_PER_AXIS;
 
 /// 描く直前へ戻す候補を試すのをやめるまでの連敗数
 const RESTORE_LOSS_STREAK: u32 = 6;

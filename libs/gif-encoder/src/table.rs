@@ -1,6 +1,5 @@
 //! カラーテーブルと、色から添字を引く対応
 
-use crate::distance::distance;
 use crate::normalize::{TRANSPARENT, pack};
 use crate::quantize::Nearest;
 use anim_core::{Colors, MAX_COLORS};
@@ -70,18 +69,18 @@ impl ColorTable {
 /// [`Self::Approximated`] と [`Self::Substituted`] は性質が違う。前者は
 /// 「もっと良く表せる」で素材の色に寄った色が画面に残り、後者は
 /// 「表す手立てが無い」で素材の色が失われる。どちらも写した先までの隔たりを
-/// 重み付き二乗距離で持つ。
+/// 二乗距離で持つ。
 pub(crate) enum Fit {
     /// テーブルにその色がそのまま載っていた
     Exact,
     /// 最近傍へ寄せた
     Approximated {
-        /// 写す先の色との重み付き二乗距離
+        /// 写す先の色との二乗距離
         error: u32,
     },
     /// 写す先が無く、[`OPAQUE_BLACK`] の埋め草へ置いた
     Substituted {
-        /// 埋め草との重み付き二乗距離
+        /// 埋め草との二乗距離
         error: u32,
     },
 }
@@ -360,6 +359,17 @@ impl Palette {
             self.entries.push(color);
         }
     }
+}
+
+/// 2色のRGBの二乗距離
+fn distance(a: u32, b: u32) -> u32 {
+    let [ar, ag, ab, _] = a.to_le_bytes();
+    let [br, bg, bb, _] = b.to_le_bytes();
+    let squared = |x: u8, y: u8| {
+        let difference = i32::from(x) - i32::from(y);
+        (difference * difference) as u32
+    };
+    squared(ar, br) + squared(ag, bg) + squared(ab, bb)
 }
 
 #[cfg(test)]
