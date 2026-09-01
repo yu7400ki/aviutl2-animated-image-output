@@ -588,9 +588,9 @@ mod tests {
         assert_eq!(palette, expected);
     }
 
-    /// 箱の色は中の画素の重み付き平均になる
+    /// 箱の色は中の画素を画素数で重み付けた平均になる
     #[test]
-    fn the_color_of_a_box_is_the_weighted_mean_of_its_pixels() {
+    fn the_color_of_a_box_is_the_mean_weighted_by_pixel_count() {
         let mut histogram = Histogram::new();
         // 同じビン (実値 40..=43) の2色。どう割っても同じ箱に入る
         observe_color(&mut histogram, [40, 40, 40], 3);
