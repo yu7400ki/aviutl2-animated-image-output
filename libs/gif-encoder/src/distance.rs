@@ -3,10 +3,6 @@
 use std::ops::{AddAssign, Mul};
 
 /// 二乗距離を軸ごとに重み付ける係数 (R, G, B)
-///
-/// 人の目は緑の差に最も敏感で、赤と青はその半分強しか効かない。軸ごとの固定の
-/// 係数は RGB 空間を軸方向へ伸縮するだけなので、軸に平行な箱を扱う量子化の
-/// 累積モーメントも、箱の代表色を決める重心も形を変えない。
 pub(crate) const AXIS_WEIGHTS: [u32; 3] = [5, 8, 5];
 
 /// [`AXIS_WEIGHTS`] の総和
@@ -60,7 +56,6 @@ mod tests {
         assert!(green > red, "緑のずれを近いと見ている");
     }
 
-    /// 3軸が等しくずれた画素の二乗距離は、ずれの二乗の [`WEIGHT_SUM`] 倍
     #[test]
     fn a_uniform_drift_costs_the_sum_of_the_weights() {
         let drift = distance(pack([0, 0, 0]), pack([8, 8, 8]));

@@ -104,16 +104,14 @@ const LOOKAHEAD: usize = 8;
 /// 逃げるかどうかを分ける、色の1軸あたりのずれ
 ///
 /// 単位は R/G/B いずれか1軸の差。比べる相手が重み付き二乗距離の平均なので、
-/// この値は重み付き二乗平均平方根にあたる。3軸が等しく `d` だけずれた画素の
-/// 平均は `WEIGHT_SUM * d^2` なので、`d = sqrt(平均 / WEIGHT_SUM)` で戻る。
+/// この値は [`WEIGHT_SUM`] で割ってから根を取った重み付き二乗平均平方根にあたる。
 const ESCAPE_DRIFT_PER_AXIS: u64 = 8;
 
 /// 逃げるかどうかを分ける誤差の床
 ///
 /// 単位は重み付き二乗距離の平均。入力が変わった画素を今引いているカラーテーブルへ
 /// 写し、その平均がこれを超えたフレームは自分の色表を作る。床は RGB の3軸
-/// それぞれがちょうど [`ESCAPE_DRIFT_PER_AXIS`] だけずれた画素の距離、すなわち
-/// [`WEIGHT_SUM`] にずれの二乗を掛けたものに当たる。
+/// それぞれがちょうど [`ESCAPE_DRIFT_PER_AXIS`] だけずれた画素の距離に当たる。
 const ESCAPE_FLOOR: u64 = WEIGHT_SUM as u64 * ESCAPE_DRIFT_PER_AXIS * ESCAPE_DRIFT_PER_AXIS;
 
 /// 描く直前へ戻す候補を試すのをやめるまでの連敗数
