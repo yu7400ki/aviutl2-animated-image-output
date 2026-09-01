@@ -113,7 +113,8 @@ impl IniConfig for Config {
         let threads = section
             .and_then(|s| s.get("threads"))
             .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(default.threads);
+            .unwrap_or(default.threads)
+            .max(1);
 
         Self {
             repeat,
@@ -133,5 +134,83 @@ impl IniConfig for Config {
             .set("color_format", self.color_format.to_index().to_string())
             .set("yuv_format", self.yuv_format.to_index().to_string())
             .set("threads", self.threads.to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load(entries: &[(&str, &str)]) -> Config {
+        let mut ini = Ini::new();
+        let mut section = ini.with_section(Some(Config::SECTION));
+        for (key, value) in entries {
+            section.set(*key, *value);
+        }
+        Config::load_from(ini.section(Some(Config::SECTION)))
+    }
+
+    #[test]
+    fn missing_section_falls_back_to_default() {
+        let config = Config::load_from(None);
+        let default = Config::default();
+
+        assert_eq!(config.repeat, default.repeat);
+        assert_eq!(config.quality, default.quality);
+        assert_eq!(config.speed, default.speed);
+        assert!(config.color_format == default.color_format);
+        assert!(config.yuv_format == default.yuv_format);
+        assert_eq!(config.threads, default.threads);
+    }
+
+    #[test]
+    fn a_saved_config_loads_back_unchanged() {
+        let saved = Config {
+            repeat: 3,
+            quality: 90,
+            speed: 6,
+            color_format: ColorFormat::Rgba32,
+            yuv_format: YuvFormat::Yuv444,
+            threads: 4,
+        };
+
+        let mut ini = Ini::new();
+        saved.save_to(&mut ini);
+        let loaded = Config::load_from(ini.section(Some(Config::SECTION)));
+
+        assert_eq!(loaded.repeat, saved.repeat);
+        assert_eq!(loaded.quality, saved.quality);
+        assert_eq!(loaded.speed, saved.speed);
+        assert!(loaded.color_format == saved.color_format);
+        assert!(loaded.yuv_format == saved.yuv_format);
+        assert_eq!(loaded.threads, saved.threads);
+    }
+
+    /// 値域の外の品質と速度は、エンコーダが受け取れる範囲へ収まる
+    #[test]
+    fn out_of_range_quality_and_speed_are_clamped() {
+        let config = load(&[("quality", "200"), ("speed", "99")]);
+
+        assert_eq!(config.quality, 100);
+        assert_eq!(config.speed, 10);
+    }
+
+    /// 0や未検査の値のスレッド数は、1以上へ寄る
+    ///
+    /// 符号化器はスレッド数を並列化の可否にしか使わず、0は無検査で
+    /// 渡すと並列化が効かないだけだが、意味のある下限として1を保つ。
+    #[test]
+    fn a_zero_thread_count_is_clamped_to_at_least_one() {
+        assert_eq!(load(&[("threads", "0")]).threads, 1);
+    }
+
+    /// 読めない値の項目だけが既定値へ落ちる
+    #[test]
+    fn an_unreadable_value_falls_back_on_its_own() {
+        let config = load(&[("repeat", "many"), ("speed", "3")]);
+        let default = Config::default();
+
+        assert_eq!(config.repeat, default.repeat);
+        assert_eq!(config.speed, 3);
     }
 }
