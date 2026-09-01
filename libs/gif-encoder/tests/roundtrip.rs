@@ -2782,6 +2782,120 @@ fn a_carried_table_keeps_its_bytes_while_the_drift_stays_under_the_floor() {
     }
 }
 
+/// 少数の画素へずれを集中させるときに動かす画素数
+///
+/// 論理画面の 10.1% にあたる。
+const STRAY_COUNT: u32 = 104;
+
+/// 集中させた画素が動く距離。二乗距離は 1600
+const STRAY_JUMP: u8 = 40;
+
+/// 集中させた画素が近くへ収まる距離。二乗距離は 400
+const NEAR_JUMP: u8 = 20;
+
+/// 全画素へ均して動かす距離。二乗距離は 169
+const EVEN_STEP: u8 = 13;
+
+/// 先頭フレームの色を1つずらし、先頭から `strays` 画素を青へ `blue` 動かしたフレーム
+///
+/// 色をずらすので全画素が前フレームから変わり、動かさなかった画素もテーブルへ
+/// 写る。ずらした先は先頭フレームが並べた色なので完全一致で解決し、誤差を持つ
+/// のは動かした画素だけになる。
+fn escape_strayed_by(color_type: ColorType, strays: u32, blue: u8) -> Vec<u8> {
+    let bpp = color_type.bytes_per_pixel();
+    let mut frame = Vec::with_capacity((ESCAPE_WIDTH * ESCAPE_HEIGHT) as usize * bpp);
+    for at in 0..ESCAPE_WIDTH * ESCAPE_HEIGHT {
+        let value = ((at + 1) % ESCAPE_BASE_COLORS) as u8;
+        frame.extend_from_slice(&[value, value, 0, 0xFF][..bpp]);
+    }
+    for at in 0..strays as usize {
+        frame[at * bpp + 2] += blue;
+    }
+    frame
+}
+
+/// テーブルを閉じた後、1フレームだけ動く素材のフレーム列
+fn straying_scene(color_type: ColorType, strays: u32, blue: u8) -> Vec<Vec<u8>> {
+    let mut frames = vec![escape_base(color_type)];
+    frames.resize(ESCAPE_AT, escape_settled(color_type));
+    frames.push(escape_strayed_by(color_type, strays, blue));
+    frames
+}
+
+/// フレームを符号化し、動いたフレームの二乗距離をグローバルカラーテーブルから測る
+fn straying_errors(frames: &[Vec<u8>], color_type: ColorType) -> (Report, Vec<u32>) {
+    let (bytes, report) = encode(ESCAPE_WIDTH, ESCAPE_HEIGHT, color_type, frames, 0).unwrap();
+    let table = global_colors(&bytes, ESCAPE_BASE_COLORS as usize);
+    (
+        report,
+        nearest_errors(&frames[ESCAPE_AT], color_type, &table),
+    )
+}
+
+/// 少数の画素へ集中したずれは逃げ、同じ画素数へ均したより大きい平均は逃げない
+///
+/// 逃げる側のほうが平均は小さい。平均だけを見る引き金では、代償が少数派へ
+/// 集中したフレームが立たないまま残る。
+#[test]
+fn a_minority_of_stray_pixels_escapes_where_a_larger_mean_spread_evenly_does_not() {
+    let color = ColorType::Rgb8;
+    let concentrated = straying_scene(color, STRAY_COUNT, STRAY_JUMP);
+    let spread = straying_scene(color, ESCAPE_WIDTH * ESCAPE_HEIGHT, EVEN_STEP);
+
+    // 動いたフレームは全画素が前フレームと変わり、平均も割合も全画素を分母に取る
+    assert!(
+        concentrated[ESCAPE_AT]
+            .chunks_exact(3)
+            .zip(concentrated[ESCAPE_AT - 1].chunks_exact(3))
+            .all(|(now, before)| now != before),
+        "持ち越す画素が残っており、分母が全画素にならない"
+    );
+
+    let (report, errors) = straying_errors(&concentrated, color);
+    assert_eq!(report.local_tables, 1, "集中したずれで逃げていない");
+    let jump = u32::from(STRAY_JUMP) * u32::from(STRAY_JUMP);
+    assert!(
+        errors[..STRAY_COUNT as usize].iter().all(|&e| e == jump),
+        "動かした画素の二乗距離が一様でない"
+    );
+    assert!(
+        errors[STRAY_COUNT as usize..].iter().all(|&e| e == 0),
+        "動かしていない画素が誤差を持っている"
+    );
+    let concentrated_total: u32 = errors.iter().sum();
+
+    let (report, errors) = straying_errors(&spread, color);
+    assert_eq!(report.local_tables, 0, "均したずれで逃げている");
+    let step = u32::from(EVEN_STEP) * u32::from(EVEN_STEP);
+    assert!(
+        errors.iter().all(|&e| e == step),
+        "均したずれの二乗距離が一様でない"
+    );
+    let spread_total: u32 = errors.iter().sum();
+
+    assert!(
+        spread_total > concentrated_total,
+        "逃げた側の平均のほうが大きい: {concentrated_total} < {spread_total}"
+    );
+}
+
+/// 平均の床を超えても外れの閾値に届かないずれは、集中していても逃げない
+///
+/// 外れと呼ぶ二乗距離は平均の床より上にある。
+#[test]
+fn a_minority_that_stays_near_its_nearest_does_not_escape() {
+    let color = ColorType::Rgb8;
+    let frames = straying_scene(color, STRAY_COUNT, NEAR_JUMP);
+
+    let (report, errors) = straying_errors(&frames, color);
+    assert_eq!(report.local_tables, 0, "外れと呼べない距離で逃げている");
+    let jump = u32::from(NEAR_JUMP) * u32::from(NEAR_JUMP);
+    assert!(
+        errors[..STRAY_COUNT as usize].iter().all(|&e| e == jump),
+        "動かした画素の二乗距離が一様でない"
+    );
+}
+
 /// 2度逃げる素材のフレーム列
 ///
 /// 1枚目の色表を引き継いだフレームが近似を積み、その後もう一度床を超える。
