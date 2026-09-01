@@ -2,6 +2,7 @@
 
 mod block;
 mod delay;
+mod distance;
 mod encoder;
 mod error;
 mod frame;

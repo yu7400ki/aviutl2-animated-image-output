@@ -154,12 +154,12 @@ pub(crate) struct Rendered {
     pub(crate) substituted: u64,
     /// テーブルへ写した画素数
     pub(crate) mapped: u64,
-    /// 写した画素とその写し先の二乗距離の総和
+    /// 写した画素とその写し先の重み付き二乗距離の総和
     pub(crate) error: u64,
 }
 
 impl Rendered {
-    /// 写した画素1つあたりの二乗距離の平均が `floor` を超えるか
+    /// 写した画素1つあたりの重み付き二乗距離の平均が `floor` を超えるか
     ///
     /// 1画素も写していないフレームは超えない。
     pub(crate) fn mean_error_exceeds(&self, floor: u64) -> bool {
@@ -455,6 +455,7 @@ fn for_each_row(rect: Rect, layout: &Layout, mut row: impl FnMut(usize, usize)) 
 mod tests {
     use super::*;
     use crate::block::DISPOSAL_RESTORE_TO_PREVIOUS;
+    use crate::distance::AXIS_WEIGHTS;
 
     const WIDTH: u32 = 4;
     const HEIGHT: u32 = 2;
@@ -874,10 +875,10 @@ mod tests {
 
     /// テーブルが持つ唯一の非透過色
     const SETTLED: [u8; 4] = [0x10, 0x20, 0x30, 0xFF];
-    /// 緑だけ 20 離れた色。写した先との二乗距離は 400
+    /// 緑だけ 20 離れた色
     const OFF_BY: [u8; 4] = [0x10, 0x34, 0x30, 0xFF];
-    /// [`OFF_BY`] を [`SETTLED`] へ写した二乗距離
-    const OFF_BY_ERROR: u64 = 20 * 20;
+    /// [`OFF_BY`] を [`SETTLED`] へ写した重み付き二乗距離
+    const OFF_BY_ERROR: u64 = AXIS_WEIGHTS[1] as u64 * 20 * 20;
 
     /// 平均がちょうど床の誤差は、床を超えたものに数えない
     ///
@@ -928,8 +929,10 @@ mod tests {
         assert!(counted.mean_error_exceeds(OFF_BY_ERROR - 1));
     }
 
-    /// [`SETTLED`] を埋め草の黒へ置いた二乗距離
-    const SUBSTITUTED_ERROR: u64 = 0x10 * 0x10 + 0x20 * 0x20 + 0x30 * 0x30;
+    /// [`SETTLED`] を埋め草の黒へ置いた重み付き二乗距離
+    const SUBSTITUTED_ERROR: u64 = AXIS_WEIGHTS[0] as u64 * 0x10 * 0x10
+        + AXIS_WEIGHTS[1] as u64 * 0x20 * 0x20
+        + AXIS_WEIGHTS[2] as u64 * 0x30 * 0x30;
 
     /// 写す先が無い画素は、埋め草までの隔たりを平均へ持ち込む
     ///
