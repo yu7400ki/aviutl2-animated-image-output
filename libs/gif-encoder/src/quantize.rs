@@ -1,6 +1,6 @@
 //! Wu量子化 (6-6-6ヒストグラム → 最大256色) と最近傍写像
 
-use crate::distance::AXIS_WEIGHTS;
+use crate::distance::{AXIS_WEIGHTS, weighted_square};
 use crate::layout::Layout;
 use crate::normalize::{TRANSPARENT, pack};
 
@@ -241,10 +241,7 @@ impl Histogram {
         self.red[cell] += count * r;
         self.green[cell] += count * g;
         self.blue[cell] += count * b;
-        let weighted = u64::from(AXIS_WEIGHTS[0]) * r * r
-            + u64::from(AXIS_WEIGHTS[1]) * g * g
-            + u64::from(AXIS_WEIGHTS[2]) * b * b;
-        self.squared[cell] += u128::from(count) * u128::from(weighted);
+        self.squared[cell] += u128::from(count) * u128::from(weighted_square([r, g, b]));
     }
 
     /// 積んだ色を `target` 色以下へ割り、箱ごとの平均色を添字順に返す
@@ -325,9 +322,7 @@ impl Histogram {
         let red = volume(cube, &self.red);
         let green = volume(cube, &self.green);
         let blue = volume(cube, &self.blue);
-        let deviation = i128::from(AXIS_WEIGHTS[0]) * red * red
-            + i128::from(AXIS_WEIGHTS[1]) * green * green
-            + i128::from(AXIS_WEIGHTS[2]) * blue * blue;
+        let deviation = weighted_square([red, green, blue]);
         volume(cube, &self.squared) as f64 - deviation as f64 / weight as f64
     }
 
@@ -374,13 +369,9 @@ impl Histogram {
                 break;
             }
 
-            let square = |r: i128, g: i128, b: i128| {
-                (i128::from(AXIS_WEIGHTS[0]) * r * r
-                    + i128::from(AXIS_WEIGHTS[1]) * g * g
-                    + i128::from(AXIS_WEIGHTS[2]) * b * b) as f64
-            };
-            let gain = square(red, green, blue) / weight as f64
-                + square(whole.red - red, whole.green - green, whole.blue - blue) / rest as f64;
+            let square = |axes: [i128; 3]| weighted_square(axes) as f64;
+            let gain = square([red, green, blue]) / weight as f64
+                + square([whole.red - red, whole.green - green, whole.blue - blue]) / rest as f64;
             if gain > best {
                 best = gain;
                 cut = Some(position);

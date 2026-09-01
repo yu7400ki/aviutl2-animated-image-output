@@ -1,5 +1,7 @@
 //! 色の隔たりの測り方
 
+use std::ops::{AddAssign, Mul};
+
 /// 二乗距離を軸ごとに重み付ける係数 (R, G, B)
 ///
 /// 人の目は緑の差に最も敏感で、赤と青はその半分強しか効かない。軸ごとの固定の
@@ -12,17 +14,26 @@ pub(crate) const AXIS_WEIGHTS: [u32; 3] = [5, 8, 5];
 /// 3軸が等しく `d` だけずれた画素の二乗距離は `WEIGHT_SUM * d^2` になる。
 pub(crate) const WEIGHT_SUM: u32 = AXIS_WEIGHTS[0] + AXIS_WEIGHTS[1] + AXIS_WEIGHTS[2];
 
+/// RGB順に並べた軸ごとの値の、[`AXIS_WEIGHTS`] を掛けた二乗和
+///
+/// 軸と係数は添字で対応する。
+pub(crate) fn weighted_square<T>(axes: [T; 3]) -> T
+where
+    T: Copy + Default + From<u32> + Mul<Output = T> + AddAssign,
+{
+    let mut total = T::default();
+    for (axis, &weight) in AXIS_WEIGHTS.iter().enumerate() {
+        total += T::from(weight) * axes[axis] * axes[axis];
+    }
+    total
+}
+
 /// 2色のRGBの重み付き二乗距離
 pub(crate) fn distance(a: u32, b: u32) -> u32 {
-    let [ar, ag, ab, _] = a.to_le_bytes();
-    let [br, bg, bb, _] = b.to_le_bytes();
-    let squared = |weight: u32, x: u8, y: u8| {
-        let difference = i32::from(x) - i32::from(y);
-        weight * (difference * difference) as u32
-    };
-    squared(AXIS_WEIGHTS[0], ar, br)
-        + squared(AXIS_WEIGHTS[1], ag, bg)
-        + squared(AXIS_WEIGHTS[2], ab, bb)
+    let (left, right) = (a.to_le_bytes(), b.to_le_bytes());
+    weighted_square(std::array::from_fn(|axis| {
+        u32::from(left[axis].abs_diff(right[axis]))
+    }))
 }
 
 #[cfg(test)]
