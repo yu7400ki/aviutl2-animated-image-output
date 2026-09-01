@@ -8,7 +8,6 @@
 //! 大きさまで一致する。
 
 #![allow(non_snake_case)]
-#![allow(non_upper_case_globals)]
 
 use std::ffi::{c_char, c_int, c_void};
 
@@ -76,11 +75,6 @@ pub const AVIF_TRANSFER_CHARACTERISTICS_SRGB: u16 = 13;
 
 /// `avifMatrixCoefficients` — BT.601 の色行列
 pub const AVIF_MATRIX_COEFFICIENTS_BT601: u16 = 6;
-
-/// `avifPlanesFlags`
-pub const AVIF_PLANES_YUV: u32 = 1 << 0;
-pub const AVIF_PLANES_A: u32 = 1 << 1;
-pub const AVIF_PLANES_ALL: u32 = 0xff;
 
 /// `avifAddImageFlags`
 pub const AVIF_ADD_IMAGE_FLAG_NONE: u32 = 0;
@@ -350,7 +344,7 @@ mod tests {
         let image = unsafe { avifImageCreate(48, 32, 8, AVIF_PIXEL_FORMAT_YUV420) };
         assert!(!image.is_null());
 
-        let mut rgb = MaybeUninit::<avifRGBImage>::uninit();
+        let mut rgb = MaybeUninit::<avifRGBImage>::zeroed();
         unsafe { avifRGBImageSetDefaults(rgb.as_mut_ptr(), image) };
         let rgb = unsafe { rgb.assume_init() };
 
