@@ -30,8 +30,7 @@ pub struct OperatingPoint {
 impl Config {
     /// 符号化に使われるaomの動作点
     ///
-    /// `single` は単葉として符号化するとき。libavifはこの解決を返さないので、
-    /// 同梱したlibavifの解決を写して先に示す。
+    /// `single` は単葉として符号化するとき。
     pub fn operating_point(&self, single: bool) -> OperatingPoint {
         let usage = if single {
             Usage::AllIntra
@@ -316,7 +315,6 @@ mod tests {
         ));
     }
 
-    /// libavifは0の刻み数を黙って1に置き換える。頼まれていない表示時間は書かない
     #[test]
     fn a_zero_timescale_is_rejected() {
         assert!(matches!(
