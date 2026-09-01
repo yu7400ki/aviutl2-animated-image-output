@@ -121,7 +121,7 @@ pub struct Encoder<W: Write> {
 }
 
 // SAFETY: 抱える生ポインタは唯一の所有で別名を持たず、libavifとaomの符号化経路は
-// スレッド固有の状態を持たない。同時アクセスは [`Sync`] を付けないことで防ぐ。
+// スレッド固有の状態を持たない。同時アクセスは Sync を付けないことで防ぐ。
 unsafe impl<W: Write + Send> Send for Encoder<W> {}
 
 impl<W: Write> Encoder<W> {
@@ -245,6 +245,24 @@ mod tests {
     fn the_encoder_moves_across_threads() {
         fn assert_send<T: Send>() {}
         assert_send::<Encoder<BufWriter<File>>>();
+    }
+
+    /// 共有はできない。渡せるのは所有権だけで、同時アクセスは型が拒む
+    ///
+    /// 固有の実装は `Sync` な型にだけ当たり、外れるとトレイトの既定へ落ちる。
+    /// `u32` の判定がこの振り分け自体を見張る。
+    #[test]
+    fn the_encoder_is_not_shared_between_threads() {
+        trait NotSync {
+            const IS_SYNC: bool = false;
+        }
+        impl<T: ?Sized> NotSync for T {}
+        struct Probe<T: ?Sized>(std::marker::PhantomData<T>);
+        impl<T: ?Sized + Sync> Probe<T> {
+            const IS_SYNC: bool = true;
+        }
+        const { assert!(!<Probe<Encoder<BufWriter<File>>>>::IS_SYNC) };
+        const { assert!(<Probe<u32>>::IS_SYNC, "Sync な型を Sync と見抜けていない") };
     }
 
     /// 符号化器へ書いた項目を読み戻す
