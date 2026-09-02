@@ -2,7 +2,7 @@
 
 use jxl::api::{self, states::Initialized};
 use jxl_sys::*;
-use std::ffi::c_void;
+use std::ffi::{c_int, c_void};
 use std::ptr;
 
 const WIDTH: usize = 37;
@@ -23,7 +23,7 @@ fn source_pixels() -> Vec<u8> {
 }
 
 /// 符号化の各段の戻り値を検める
-fn expect_success(enc: *mut JxlEncoder, status: i32, what: &str) {
+fn expect_success(enc: *mut JxlEncoder, status: c_int, what: &str) {
     assert_eq!(
         status,
         JXL_ENC_SUCCESS,
@@ -43,7 +43,7 @@ fn encode_lossless_still(pixels: &[u8]) -> Vec<u8> {
 
         expect_success(
             enc,
-            JxlEncoderSetParallelRunner(enc, JxlThreadParallelRunner, runner),
+            JxlEncoderSetParallelRunner(enc, Some(JxlThreadParallelRunner), runner),
             "SetParallelRunner",
         );
 

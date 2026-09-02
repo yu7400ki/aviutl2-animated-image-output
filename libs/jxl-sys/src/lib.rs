@@ -63,7 +63,7 @@ pub type JxlParallelRunner = unsafe extern "C" fn(
     end_range: u32,
 ) -> JxlParallelRetCode;
 
-/// 確保を差し替える器。NULL で libjxl の既定になる
+/// 確保を差し替える器。[`JxlEncoderCreate`] へ NULL を渡すと libjxl の既定になる
 #[repr(C)]
 pub struct JxlMemoryManager {
     _private: [u8; 0],
@@ -214,7 +214,7 @@ unsafe extern "C" {
     /// フレームを追加する前に呼ぶ
     pub fn JxlEncoderSetParallelRunner(
         enc: *mut JxlEncoder,
-        parallel_runner: JxlParallelRunner,
+        parallel_runner: Option<JxlParallelRunner>,
         parallel_runner_opaque: *mut c_void,
     ) -> c_int;
 
@@ -487,7 +487,7 @@ mod tests {
         );
     }
 
-    /// 手詰めを置き換える初期化。項目の追加にも既定値で追従する
+    /// 項目の追加にも既定値で追従する初期化
     #[test]
     fn init_basic_info_fills_an_8bit_rgb_image() {
         let mut info = MaybeUninit::<JxlBasicInfo>::zeroed();
