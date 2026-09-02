@@ -7,6 +7,7 @@ on:
       - "gif-v*.*.*"
       - "webp-v*.*.*"
       - "avif-v*.*.*"
+      - "jxl-v*.*.*"
 
 permissions:
   contents: write
@@ -43,6 +44,8 @@ jobs:
             echo "format=webp" >> $GITHUB_OUTPUT
           elif [[ "$TAG" == avif-v* ]]; then
             echo "format=avif" >> $GITHUB_OUTPUT
+          elif [[ "$TAG" == jxl-v* ]]; then
+            echo "format=jxl" >> $GITHUB_OUTPUT
           else
             echo "Unknown format"
             exit 1

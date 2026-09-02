@@ -51,3 +51,25 @@ source = "target/debug/webp_output.dll"
 [artifacts.webp_output.profiles.release]
 source = "target/release/webp_output.dll"
 build = { group = "release_all" }
+
+[artifacts.avif_output]
+destination = "Plugin/avif_output.auo2"
+build = { group = "debug_all" }
+
+[artifacts.avif_output.profiles.debug]
+source = "target/debug/avif_output.dll"
+
+[artifacts.avif_output.profiles.release]
+source = "target/release/avif_output.dll"
+build = { group = "release_all" }
+
+[artifacts.jxl_output]
+destination = "Plugin/jxl_output.auo2"
+build = { group = "debug_all" }
+
+[artifacts.jxl_output.profiles.debug]
+source = "target/debug/jxl_output.dll"
+
+[artifacts.jxl_output.profiles.release]
+source = "target/release/jxl_output.dll"
+build = { group = "release_all" }
