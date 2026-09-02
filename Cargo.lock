@@ -240,6 +240,10 @@ dependencies = [
 [[package]]
 name = "jxl-sys"
 version = "0.1.0"
+dependencies = [
+ "cc",
+ "cmake",
+]
 
 [[package]]
 name = "libc"
