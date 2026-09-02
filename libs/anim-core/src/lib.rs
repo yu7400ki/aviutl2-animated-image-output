@@ -12,7 +12,7 @@ mod region;
 pub use alpha::has_transparency;
 pub use color::ColorType;
 pub use delay::FrameDelay;
-pub use diff::{Rect, dirty_rect};
+pub use diff::{Rect, dirty_rect, unchanged_run};
 pub use error::Error;
 pub use pacing::Pacing;
 pub use palette::{Colors, MAX_COLORS};

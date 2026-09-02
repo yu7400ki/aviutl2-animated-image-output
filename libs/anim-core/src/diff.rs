@@ -16,6 +16,27 @@ impl Rect {
     }
 }
 
+/// まとめて比べるバイト数
+const STEP: usize = 32;
+
+/// `at` から始まる、2つのフレームで一致する画素が続く終端のバイト位置
+///
+/// `previous` と `frame` は同じ長さで、`at` は画素の境界にあること。返す位置も
+/// 画素の境界で、`at` の画素が異なれば `at` をそのまま返す。
+pub fn unchanged_run<const BPP: usize>(previous: &[u8], frame: &[u8], at: usize) -> usize {
+    let len = frame.len();
+    let mut end = at;
+    while end + STEP <= len && previous[end..end + STEP] == frame[end..end + STEP] {
+        end += STEP;
+    }
+    // 塊の境界は画素の途中に落ちうるので、戻してから1画素ずつ詰める
+    end -= (end - at) % BPP;
+    while end + BPP <= len && previous[end..end + BPP] == frame[end..end + BPP] {
+        end += BPP;
+    }
+    end
+}
+
 /// 2つのフレームで異なる画素をすべて含む最小の矩形を求める
 ///
 /// `prev` と `curr` は同じ長さで、`stride` バイトの行が隙間なく並んでいること。
@@ -80,6 +101,40 @@ mod tests {
             width,
             height,
         })
+    }
+
+    /// 塊の境界が画素の途中に落ちても、一致する画素を終端に含む
+    ///
+    /// 塊で比べる段は画素の境界を跨ぐ。境界へ戻したあと1画素ずつ詰め直すので、
+    /// 塊の末尾に収まった一致画素も終端に入る。
+    #[test]
+    fn a_run_keeps_the_pixels_that_straddle_a_block_boundary() {
+        const BPP: usize = 3;
+        // 塊を1つ跨いだ先で画素の境界に揃う長さ。塊の終端はその手前の画素の途中に落ちる
+        const MATCHED: usize = (STEP / BPP + 1) * BPP;
+
+        let previous = vec![0x11; MATCHED + STEP];
+        let mut frame = previous.clone();
+        frame[MATCHED..].fill(0x22);
+
+        assert_eq!(unchanged_run::<BPP>(&previous, &frame, 0), MATCHED);
+        assert_eq!(
+            unchanged_run::<BPP>(&previous, &frame, MATCHED),
+            MATCHED,
+            "食い違う画素から始めたのに進んでいる"
+        );
+    }
+
+    /// すべて一致するときは画素の境界に収まる終端を返す
+    #[test]
+    fn a_run_over_identical_frames_stops_on_a_pixel_boundary() {
+        const BPP: usize = 4;
+        let frame = vec![0x33; 100];
+        assert_eq!(unchanged_run::<BPP>(&frame, &frame, 0), 100);
+
+        // 端数のある長さでは、収まる画素までで止まる
+        let frame = vec![0x33; 102];
+        assert_eq!(unchanged_run::<BPP>(&frame, &frame, 0), 100);
     }
 
     #[test]
