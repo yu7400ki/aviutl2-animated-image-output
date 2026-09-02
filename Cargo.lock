@@ -281,6 +281,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jxl_encoder"
+version = "0.1.0"
+dependencies = [
+ "jxl",
+ "jxl-sys",
+]
+
+[[package]]
 name = "jxl_macros"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

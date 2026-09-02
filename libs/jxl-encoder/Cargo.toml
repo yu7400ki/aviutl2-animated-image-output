@@ -1,0 +1,10 @@
+[package]
+name = "jxl_encoder"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+jxl-sys = { path = "../jxl-sys" }
+
+[dev-dependencies]
+jxl = "=0.6.0"
