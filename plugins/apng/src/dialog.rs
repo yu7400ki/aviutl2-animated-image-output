@@ -15,9 +15,17 @@ pub(crate) const REDUCE_COLOR_LABEL: &str = "色数を削減する";
 /// 有効にした書き出しは、全フレームの色が256色に収まらなければ失敗する。
 const REDUCE_COLOR_NOTE: &str = "256色に収まらないと出力に失敗します";
 
-/// 設定項目を縦へ並べる
+/// 色数の削減。
 ///
-/// 色数の削減だけは、名前の下に但し書きを添える。
+/// 名前だけでは書き出しが失敗しうる設定だと読めないため、但し書きを直下へ添える
+fn reduce_color_field(checkbox: &CheckBox) -> FlexLayout {
+    FlexLayout::column()
+        .with_gap(3.0)
+        .with_widget(checkbox.clone())
+        .with_widget(Label::new(REDUCE_COLOR_NOTE))
+}
+
+/// 設定項目を縦へ並べる
 fn settings_layout(
     repeat_input: &Number,
     color_combobox: &ComboBox,
@@ -31,12 +39,7 @@ fn settings_layout(
         .with_layout(labeled("ループ回数 (0=無限ループ)", repeat_input.clone()))
         .with_layout(labeled("カラーフォーマット", color_combobox.clone()))
         .with_layout(labeled(&compression_label(), compression_input.clone()))
-        .with_layout(
-            FlexLayout::column()
-                .with_gap(3.0)
-                .with_widget(reduce_color_checkbox.clone())
-                .with_widget(Label::new(REDUCE_COLOR_NOTE)),
-        )
+        .with_layout(reduce_color_field(reduce_color_checkbox))
 }
 
 pub fn show_config_dialog(
