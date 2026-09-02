@@ -482,14 +482,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "win32_dialog"
-version = "0.0.0"
-dependencies = [
- "taffy",
- "windows",
-]
-
-[[package]]
 name = "windows"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
