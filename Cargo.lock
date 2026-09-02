@@ -300,6 +300,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jxl_output"
+version = "1.0.0"
+dependencies = [
+ "aviutl2",
+ "jxl_encoder",
+ "win32-ui",
+ "windows",
+]
+
+[[package]]
 name = "jxl_simd"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

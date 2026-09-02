@@ -1,0 +1,373 @@
+mod config;
+mod dialog;
+
+use aviutl2::{
+    FileFilter, IniConfig, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
+    register_logger, register_output_plugin, write_or_discard,
+};
+use config::{ColorFormat, Config};
+use dialog::show_config_dialog;
+use jxl_encoder::{ColorType, Config as EncoderConfig, Encoder};
+use std::fs::File;
+use std::io::BufWriter;
+use std::path::Path;
+use win32_ui::MessageBox;
+use windows::Win32::Foundation::{HINSTANCE, HWND};
+
+/// 負の値をエンコーダへ渡さないためのi32からu32への変換
+fn to_u32(value: i32, name: &str) -> Result<u32, String> {
+    u32::try_from(value).map_err(|_| format!("{}が不正です: {}", name, value))
+}
+
+/// 符号化器へ渡す、素材の枚数と時間の刻み
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Sequence {
+    num_frames: u32,
+    /// 1秒あたりのtick数の分子
+    tps_numerator: u32,
+    /// 1秒あたりのtick数の分母
+    tps_denominator: u32,
+    /// 1フレームが占めるtick数
+    duration: u32,
+}
+
+impl Sequence {
+    /// 1フレームが `scale` / `rate` 秒の素材が `num_frames` 枚
+    ///
+    /// 1秒あたりのtick数を `rate` / `scale` に据えると、1フレームは1tickになる。
+    fn new(num_frames: i32, rate: i32, scale: i32) -> Result<Self, String> {
+        Ok(Self {
+            num_frames: to_u32(num_frames, "フレーム数")?,
+            tps_numerator: to_u32(rate, "フレームレート")?,
+            tps_denominator: to_u32(scale, "フレームレートのスケール")?,
+            duration: 1,
+        })
+    }
+}
+
+/// プラグイン設定をエンコーダの設定へ対応付ける
+fn encoder_config(config: &Config, sequence: Sequence) -> EncoderConfig {
+    EncoderConfig {
+        color_type: match config.color_format {
+            ColorFormat::Rgb24 => ColorType::Rgb8,
+            ColorFormat::Rgba32 => ColorType::Rgba8,
+        },
+        lossless: config.lossless,
+        quality: config.quality,
+        effort: config.effort,
+        num_plays: config.num_plays,
+        tps_numerator: sequence.tps_numerator,
+        tps_denominator: sequence.tps_denominator,
+        max_threads: config.max_threads,
+    }
+}
+
+/// `path` へ書き出し、`frames` が投入したフレームを閉じる
+///
+/// 途中で失敗したときは書きかけのファイルを残さない。
+fn write_frames<F>(
+    path: &Path,
+    width: u32,
+    height: u32,
+    sequence: Sequence,
+    config: &Config,
+    frames: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&mut Encoder<BufWriter<File>>) -> Result<(), String>,
+{
+    write_or_discard(path, |output_file| {
+        let mut encoder = Encoder::new(
+            BufWriter::new(output_file),
+            width,
+            height,
+            sequence.num_frames,
+            encoder_config(config, sequence),
+        )
+        .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
+
+        frames(&mut encoder)?;
+
+        encoder
+            .finish()
+            .map_err(|e| format!("エンコーダー終了エラー: {}", e))?
+            .into_inner()
+            .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
+
+        Ok(())
+    })
+}
+
+fn create_jxl_from_video(info: &OutputInfo, config: &Config) -> Result<(), String> {
+    let width = to_u32(info.width(), "幅")?;
+    let height = to_u32(info.height(), "高さ")?;
+    let sequence = Sequence::new(info.num_frames(), info.rate(), info.scale())?;
+
+    write_frames(
+        &info.savefile(),
+        width,
+        height,
+        sequence,
+        config,
+        |encoder| {
+            info.encode_frames(config.color_format, |frame_data| {
+                encoder.add_frame(&frame_data, sequence.duration)
+            })
+            .map_err(|e| e.to_string())
+        },
+    )
+}
+
+struct JxlOutputPlugin;
+
+impl OutputPlugin for JxlOutputPlugin {
+    type Error = String;
+
+    const HAS_CONFIG_DIALOG: bool = true;
+
+    fn info() -> PluginInfo {
+        PluginInfo {
+            flags: PluginFlags::VIDEO,
+            name: "JPEG XL出力プラグイン".into(),
+            file_filter: FileFilter::new()
+                .add("JPEG XL Files (*.jxl)", "*.jxl")
+                .add("All Files (*)", "*"),
+            information: format!(
+                "JPEG XL出力プラグイン v{} by yu7400ki",
+                env!("CARGO_PKG_VERSION")
+            ),
+        }
+    }
+
+    fn output(info: &OutputInfo) -> Result<(), String> {
+        let config = Config::load();
+        create_jxl_from_video(info, &config).map_err(|e| format!("JPEG XL出力エラー: {}", e))
+    }
+
+    fn config(hwnd: HWND, _dll_hinst: HINSTANCE) -> bool {
+        let default_config = Config::load();
+
+        if let Ok(result) = show_config_dialog(hwnd, default_config) {
+            match result {
+                Some(config) => {
+                    // 設定を保存
+                    if let Err(e) = config.save() {
+                        let error_msg = format!("設定保存エラー: {}", e);
+                        logger::warn(&error_msg);
+                        MessageBox::warning(Some(hwnd), &error_msg, "警告");
+                    }
+                    true
+                }
+                None => false,
+            }
+        } else {
+            logger::error("設定の取得に失敗しました。");
+            MessageBox::error(Some(hwnd), "設定の取得に失敗しました。", "エラー");
+            false
+        }
+    }
+}
+
+register_output_plugin!(JxlOutputPlugin);
+register_logger!();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// 書き出しを通すフレームの大きさ
+    const FRAME_WIDTH: u32 = 32;
+    const FRAME_HEIGHT: u32 = 16;
+
+    /// まだ存在しない一時ファイルの場所
+    fn temp_path() -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        std::env::temp_dir().join(format!(
+            "jxl-output-{}-{}.jxl",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    /// 画素ごとに値の違う不透明なRGBA
+    fn frame_of(seed: u32) -> Vec<u8> {
+        (0..FRAME_HEIGHT)
+            .flat_map(|y| {
+                (0..FRAME_WIDTH)
+                    .flat_map(move |x| [(x * 7) as u8, (y * 11) as u8, seed as u8, 0xFF])
+            })
+            .collect()
+    }
+
+    /// フレームを `declared` 枚宣言し、`frames` 枚だけ投入して閉じる
+    fn write_animation(path: &Path, declared: u32, frames: u32) -> Result<(), String> {
+        let config = Config {
+            color_format: ColorFormat::Rgba32,
+            ..Config::default()
+        };
+        let sequence = Sequence::new(declared as i32, 30, 1).unwrap();
+
+        write_frames(
+            path,
+            FRAME_WIDTH,
+            FRAME_HEIGHT,
+            sequence,
+            &config,
+            |encoder| {
+                for seed in 0..frames {
+                    encoder
+                        .add_frame(&frame_of(seed), sequence.duration)
+                        .map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    fn negative_dimensions_are_rejected() {
+        assert_eq!(to_u32(1920, "幅").unwrap(), 1920);
+        assert!(to_u32(-1, "幅").is_err());
+    }
+
+    #[test]
+    fn a_negative_frame_count_or_frame_rate_is_rejected() {
+        assert!(Sequence::new(-1, 30000, 1001).is_err());
+        assert!(Sequence::new(24, -1, 1001).is_err());
+        assert!(Sequence::new(24, 30000, -1).is_err());
+    }
+
+    /// 1フレームがscale / rate秒なので、rateが分子、scaleが分母
+    #[test]
+    fn the_rate_and_the_scale_become_the_ticks_per_second() {
+        let sequence = Sequence::new(24, 30000, 1001).unwrap();
+
+        assert_eq!(sequence.num_frames, 24);
+        assert_eq!(sequence.tps_numerator, 30000);
+        assert_eq!(sequence.tps_denominator, 1001);
+    }
+
+    /// 1秒あたりのtick数がフレームレートそのものなので、1フレームは1tick
+    #[test]
+    fn every_frame_lasts_one_tick() {
+        assert_eq!(Sequence::new(24, 30000, 1001).unwrap().duration, 1);
+        assert_eq!(Sequence::new(1, 30, 1).unwrap().duration, 1);
+    }
+
+    /// 素材の刻みがそのままエンコーダの1秒あたりのtick数になる
+    #[test]
+    fn the_ticks_per_second_reach_the_encoder() {
+        let sequence = Sequence::new(24, 30000, 1001).unwrap();
+        let config = encoder_config(&Config::default(), sequence);
+
+        assert_eq!(config.tps_numerator, 30000);
+        assert_eq!(config.tps_denominator, 1001);
+    }
+
+    #[test]
+    fn color_format_maps_to_the_matching_color_type() {
+        let sequence = Sequence::new(24, 30, 1).unwrap();
+
+        let rgb = encoder_config(
+            &Config {
+                color_format: ColorFormat::Rgb24,
+                ..Config::default()
+            },
+            sequence,
+        );
+        assert_eq!(rgb.color_type, ColorType::Rgb8);
+
+        let rgba = encoder_config(
+            &Config {
+                color_format: ColorFormat::Rgba32,
+                ..Config::default()
+            },
+            sequence,
+        );
+        assert_eq!(rgba.color_type, ColorType::Rgba8);
+    }
+
+    #[test]
+    fn the_compression_settings_are_passed_through() {
+        let sequence = Sequence::new(24, 30, 1).unwrap();
+
+        let lossy = encoder_config(
+            &Config {
+                lossless: false,
+                quality: 80.0,
+                effort: 3,
+                num_plays: 5,
+                max_threads: 4,
+                ..Config::default()
+            },
+            sequence,
+        );
+        assert!(!lossy.lossless);
+        assert_eq!(lossy.quality, 80.0);
+        assert_eq!(lossy.effort, 3);
+        assert_eq!(lossy.num_plays, 5);
+        assert_eq!(lossy.max_threads, 4);
+
+        let lossless = encoder_config(
+            &Config {
+                lossless: true,
+                quality: 100.0,
+                effort: 9,
+                num_plays: 0,
+                max_threads: 1,
+                ..Config::default()
+            },
+            sequence,
+        );
+        assert!(lossless.lossless);
+        assert_eq!(lossless.quality, 100.0);
+        assert_eq!(lossless.effort, 9);
+        assert_eq!(lossless.num_plays, 0);
+        assert_eq!(lossless.max_threads, 1);
+    }
+
+    /// 書き出しはJPEG XLのcodestreamの印から始まる
+    #[test]
+    fn a_written_file_starts_with_the_jpeg_xl_signature() {
+        let path = temp_path();
+
+        write_animation(&path, 4, 4).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(&bytes[..2], &[0xFF, 0x0A]);
+    }
+
+    /// 失敗した書き出しは、書きかけのファイルを残さない
+    #[test]
+    fn a_failed_write_leaves_no_file() {
+        let path = temp_path();
+
+        write_animation(&path, 4, 3).expect_err("宣言より少ないので閉じられない");
+
+        assert!(!path.exists(), "{}", path.display());
+    }
+
+    /// 書けない1秒あたりのtick数は、直し方を添えて利用者へ届く
+    #[test]
+    fn an_unwritable_ticks_per_second_reaches_the_user() {
+        let path = temp_path();
+        let sequence = Sequence::new(2, 1, 1025).unwrap();
+
+        let message = write_frames(
+            &path,
+            FRAME_WIDTH,
+            FRAME_HEIGHT,
+            sequence,
+            &Config::default(),
+            |_| Ok(()),
+        )
+        .expect_err("分母が書ける値域の外");
+
+        assert!(message.contains("1〜1024"), "{message}");
+        assert!(!path.exists(), "{}", path.display());
+    }
+}
