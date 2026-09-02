@@ -650,10 +650,12 @@ impl<W: Write + Seek> Encoder<W> {
     /// 正規化したフレームを先読みリングへ入れ、溢れたぶんを書き出しへ渡す
     fn accept(&mut self, pixels: &[u8], delay: FrameDelay) -> Result<(), Error> {
         let (ring, writing, mut parts) = self.split();
-        let Some(due) = ring.push(pixels.to_vec(), delay) else {
+        let Some(due) = ring.push(pixels, delay) else {
             return Ok(());
         };
-        parts.write_frame(writing, ring, &due.pixels, due.delay)
+        parts.write_frame(writing, ring, &due.pixels, due.delay)?;
+        ring.recycle(due.pixels);
+        Ok(())
     }
 }
 
