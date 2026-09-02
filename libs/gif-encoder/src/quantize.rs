@@ -461,12 +461,17 @@ impl Histogram {
 /// 覚えるのはビンの中心色に対する最近傍で、これはビンだけの関数なので走査順に
 /// 依存しない。量子化器を決定的にした意味が写像でも保たれる。
 pub(crate) struct Nearest {
-    /// 写す先の候補 (2倍した色, 添字)
+    /// 写す先の候補 (2倍した色, 添字)。赤の昇順、同値なら添字の昇順
     candidates: Vec<([i32; 3], u8)>,
     /// ビンごとの最近傍の添字
     cache: Box<[u8]>,
     /// [`Self::cache`] のどの要素が求まっているか
     known: Box<[u64]>,
+}
+
+/// 2倍した座標どうしの二乗距離
+fn distance(center: [i32; 3], color: [i32; 3]) -> i32 {
+    (0..3).map(|axis| (center[axis] - color[axis]).pow(2)).sum()
 }
 
 /// ビンの中心色を2倍した座標
@@ -483,7 +488,7 @@ impl Nearest {
     /// 透過標識は色として近似する相手にならない。2値透過に中間が無く、透過ラン用に
     /// 足したスロットも色を持たないため。
     pub(crate) fn new(entries: &[u32]) -> Self {
-        let candidates = entries
+        let mut candidates: Vec<([i32; 3], u8)> = entries
             .iter()
             .enumerate()
             .filter(|&(_, &color)| color != TRANSPARENT)
@@ -495,6 +500,7 @@ impl Nearest {
                 )
             })
             .collect();
+        candidates.sort_unstable_by_key(|&(color, index)| (color[0], index));
 
         Nearest {
             candidates,
@@ -525,20 +531,35 @@ impl Nearest {
             center_doubled(bin & (BINS - 1)),
         ];
 
-        let mut best = None;
-        for (color, index) in &self.candidates {
-            let distance: i32 = (0..3).map(|c| (center[c] - color[c]).pow(2)).sum();
-            if best.is_none_or(|(shortest, _)| distance < shortest) {
-                best = Some((distance, *index));
+        assert!(!self.candidates.is_empty(), "写す先の候補が無い");
+        let split = self
+            .candidates
+            .partition_point(|(color, _)| color[0] < center[0]);
+        // 中心色から赤の軸を離れる順に見る。赤の差だけで最短を超えたら、
+        // その向きの先はどれも届かない
+        let mut best = (i32::MAX, u8::MAX);
+        for &(color, index) in &self.candidates[split..] {
+            let axis = color[0] - center[0];
+            if axis * axis > best.0 {
+                break;
             }
+            best = best.min((distance(center, color), index));
         }
-        best.expect("写す先の候補が無い").1
+        for &(color, index) in self.candidates[..split].iter().rev() {
+            let axis = center[0] - color[0];
+            if axis * axis > best.0 {
+                break;
+            }
+            best = best.min((distance(center, color), index));
+        }
+        best.1
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::noise;
 
     /// 色を1画素ぶん積む
     fn observe_color(histogram: &mut Histogram, color: [u8; 3], count: u64) {
@@ -695,6 +716,66 @@ mod tests {
     fn the_transparent_entry_is_never_a_target() {
         let mut nearest = Nearest::new(&[TRANSPARENT, 0xFF80_8080]);
         assert_eq!(nearest.index_of(0xFF01_0101), 1);
+    }
+
+    /// 総当たりで求めた最近傍。等距離なら添字の小さい方
+    fn brute_force(entries: &[u32], bin: usize) -> u8 {
+        let center = [
+            center_doubled(bin >> 12),
+            center_doubled(bin >> 6 & (BINS - 1)),
+            center_doubled(bin & (BINS - 1)),
+        ];
+        entries
+            .iter()
+            .enumerate()
+            .filter(|&(_, &color)| color != TRANSPARENT)
+            .map(|(index, &color)| {
+                let [r, g, b, _] = color.to_le_bytes();
+                let doubled = [i32::from(r) * 2, i32::from(g) * 2, i32::from(b) * 2];
+                let squared: i32 = (0..3)
+                    .map(|axis| (center[axis] - doubled[axis]).pow(2))
+                    .sum();
+                (squared, index as u8)
+            })
+            .min()
+            .expect("写す先の候補が無い")
+            .1
+    }
+
+    /// 赤の軸で枝刈りしても、総当たりと同じ添字を返す
+    ///
+    /// 候補の各軸を粗くして同値を作り、赤の並びと添字の並びが食い違う等距離を
+    /// 踏ませる。決着が距離だけで着くならここで添字が動く。
+    #[test]
+    fn the_pruned_search_agrees_with_brute_force() {
+        for seed in 1..=8u32 {
+            let entries: Vec<u32> = noise(64 * 3, seed)
+                .chunks_exact(3)
+                .map(|c| u32::from_le_bytes([c[0] & 0xE0, c[1] & 0xE0, c[2] & 0xE0, u8::MAX]))
+                .collect();
+            let mut nearest = Nearest::new(&entries);
+
+            let bins: Vec<usize> = noise(512 * 3, seed ^ 0x5A5A)
+                .chunks_exact(3)
+                .map(|c| {
+                    ((c[0] >> 2) as usize * BINS + (c[1] >> 2) as usize) * BINS
+                        + (c[2] >> 2) as usize
+                })
+                .collect();
+            for &bin in &bins {
+                let color = u32::from_le_bytes([
+                    (bin >> 12) as u8 * 4,
+                    (bin >> 6 & (BINS - 1)) as u8 * 4,
+                    (bin & (BINS - 1)) as u8 * 4,
+                    u8::MAX,
+                ]);
+                assert_eq!(
+                    nearest.index_of(color),
+                    brute_force(&entries, bin),
+                    "seed={seed} bin={bin}"
+                );
+            }
+        }
     }
 
     fn layout() -> Layout {
