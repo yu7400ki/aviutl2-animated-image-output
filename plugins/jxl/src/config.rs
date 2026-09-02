@@ -126,6 +126,14 @@ mod tests {
         assert_eq!(config.max_threads, default.max_threads);
     }
 
+    /// 既定の均衡は、掃引で選んだ値そのもの
+    ///
+    /// 出力サイズも SSIM もこの値で最も良くなる。動かすには測り直しが要る。
+    #[test]
+    fn the_default_effort_is_the_one_the_sweep_chose() {
+        assert_eq!(Config::default().effort, 7);
+    }
+
     /// 保存と読み戻しは、どの項目も既定と違う値で突き合わせる
     ///
     /// 既定と同じ値を通すと、その項目の書き出しが丸ごと落ちても読み戻しが揃う。
