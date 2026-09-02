@@ -25,6 +25,46 @@ fn reduce_color_field(checkbox: &CheckBox) -> FlexLayout {
         .with_widget(Label::new(REDUCE_COLOR_NOTE))
 }
 
+fn new_repeat_input(repeat: u32) -> Number {
+    Number::new().value(repeat as i32).range(0, i32::MAX)
+}
+
+fn new_compression_input(level: u32) -> Number {
+    Number::new().value(level as i32).range(
+        *COMPRESSION_LEVELS.start() as i32,
+        *COMPRESSION_LEVELS.end() as i32,
+    )
+}
+
+/// 入力欄の値を設定へ組む
+///
+/// # Errors
+/// 読めない欄か値域の外の欄があるとき、画面へ出す文言。
+fn collect_config(
+    repeat_input: &Number,
+    color_combobox: &ComboBox,
+    compression_input: &Number,
+    reduce_color_checkbox: &CheckBox,
+) -> Result<Config, String> {
+    let repeat = repeat_input
+        .validate()
+        .map_err(|_| "ループ回数の値が無効です。0以上の数値を入力してください。".to_string())?;
+    let compression_level = compression_input
+        .validate()
+        .map_err(|_| compression_error_message())?;
+
+    Ok(Config {
+        repeat: repeat as u32,
+        color_format: match color_combobox.selected_index() {
+            0 => ColorFormat::Rgb24,
+            1 => ColorFormat::Rgba32,
+            _ => Default::default(),
+        },
+        compression_level: compression_level as u32,
+        reduce_color: reduce_color_checkbox.is_checked(),
+    })
+}
+
 /// 設定項目を縦へ並べる
 fn settings_layout(
     repeat_input: &Number,
@@ -46,9 +86,7 @@ pub fn show_config_dialog(
     parent_hwnd: HWND,
     default_config: Config,
 ) -> std::result::Result<Option<Config>, ()> {
-    let repeat_input = Number::new()
-        .value(default_config.repeat as i32)
-        .range(0, i32::MAX);
+    let repeat_input = new_repeat_input(default_config.repeat);
 
     let color_options = vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()];
     let color_combobox = ComboBox::new(color_options).selected(match default_config.color_format {
@@ -56,12 +94,7 @@ pub fn show_config_dialog(
         ColorFormat::Rgba32 => 1,
     });
 
-    let compression_input = Number::new()
-        .value(default_config.compression_level as i32)
-        .range(
-            *COMPRESSION_LEVELS.start() as i32,
-            *COMPRESSION_LEVELS.end() as i32,
-        );
+    let compression_input = new_compression_input(default_config.compression_level);
 
     let reduce_color_checkbox =
         CheckBox::new(REDUCE_COLOR_LABEL).checked(default_config.reduce_color);
@@ -73,25 +106,17 @@ pub fn show_config_dialog(
     let ok_button = Button::primary("OK").on_click({
         let handle = handle.clone();
         let repeat_input = repeat_input.clone();
+        let color_combobox = color_combobox.clone();
         let compression_input = compression_input.clone();
-        move || {
-            let owner = handle.hwnd();
-            if repeat_input.get_value::<u32>().is_err() {
-                MessageBox::error(
-                    owner,
-                    "ループ回数の値が無効です。正しい数値を入力してください。",
-                    "エラー",
-                );
-                return;
-            }
-            if !compression_input
-                .get_value::<u32>()
-                .is_ok_and(|level| COMPRESSION_LEVELS.contains(&level))
-            {
-                MessageBox::error(owner, &compression_error_message(), "エラー");
-                return;
-            }
-            handle.accept();
+        let reduce_color_checkbox = reduce_color_checkbox.clone();
+        move || match collect_config(
+            &repeat_input,
+            &color_combobox,
+            &compression_input,
+            &reduce_color_checkbox,
+        ) {
+            Ok(_) => handle.accept(),
+            Err(message) => MessageBox::error(handle.hwnd(), &message, "エラー"),
         }
     });
 
@@ -123,17 +148,14 @@ pub fn show_config_dialog(
         return Ok(None);
     }
 
-    // acceptはOKハンドラの検証を通過した場合のみ呼ばれるため、ここでのパースは成功する
-    Ok(Some(Config {
-        repeat: repeat_input.get_value().map_err(|_| ())?,
-        color_format: match color_combobox.selected_index() {
-            0 => ColorFormat::Rgb24,
-            1 => ColorFormat::Rgba32,
-            _ => Default::default(),
-        },
-        compression_level: compression_input.get_value().map_err(|_| ())?,
-        reduce_color: reduce_color_checkbox.is_checked(),
-    }))
+    collect_config(
+        &repeat_input,
+        &color_combobox,
+        &compression_input,
+        &reduce_color_checkbox,
+    )
+    .map(Some)
+    .map_err(|_| ())
 }
 
 fn compression_label() -> String {
@@ -163,5 +185,75 @@ mod tests {
     fn the_reduce_color_note_says_what_can_go_wrong() {
         assert!(REDUCE_COLOR_NOTE.contains("256色"), "{REDUCE_COLOR_NOTE}");
         assert!(REDUCE_COLOR_NOTE.contains("失敗"), "{REDUCE_COLOR_NOTE}");
+    }
+
+    fn color_combobox() -> ComboBox {
+        ComboBox::new(vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()])
+    }
+
+    fn reduce_color_checkbox() -> CheckBox {
+        CheckBox::new(REDUCE_COLOR_LABEL)
+    }
+
+    /// 値域の内側の入力は、そのまま設定になる
+    #[test]
+    fn values_inside_the_range_become_the_config() {
+        let repeat = new_repeat_input(0);
+        let color = color_combobox();
+        let compression = new_compression_input(6);
+        let reduce_color = reduce_color_checkbox();
+
+        repeat.set_value(3);
+        color.set_selected_index(1);
+        compression.set_value(*COMPRESSION_LEVELS.end());
+        reduce_color.set_checked(true);
+
+        let config = collect_config(&repeat, &color, &compression, &reduce_color)
+            .expect("値域の内側なので組める");
+
+        assert_eq!(config.repeat, 3);
+        assert!(config.color_format == ColorFormat::Rgba32);
+        assert_eq!(config.compression_level, *COMPRESSION_LEVELS.end());
+        assert!(config.reduce_color);
+    }
+
+    /// 値域の外の圧縮レベルは、値域を名乗る文言で弾かれる
+    #[test]
+    fn an_out_of_range_compression_level_is_refused() {
+        let repeat = new_repeat_input(0);
+        let color = color_combobox();
+        let compression = new_compression_input(6);
+        let reduce_color = reduce_color_checkbox();
+
+        for level in [
+            *COMPRESSION_LEVELS.start() as i32 - 1,
+            *COMPRESSION_LEVELS.end() as i32 + 1,
+        ] {
+            compression.set_value(level);
+            let Err(message) = collect_config(&repeat, &color, &compression, &reduce_color) else {
+                panic!("圧縮レベル{level}は値域の外なので弾かれる");
+            };
+            assert_eq!(message, compression_error_message());
+        }
+    }
+
+    /// 読めないループ回数も、0より小さいループ回数も、受け付ける値を名乗る文言で弾かれる
+    #[test]
+    fn an_invalid_repeat_count_is_refused() {
+        let repeat = new_repeat_input(0);
+        let color = color_combobox();
+        let compression = new_compression_input(6);
+        let reduce_color = reduce_color_checkbox();
+
+        for text in ["abc", "", "2147483648", "-1"] {
+            repeat.set_text(text);
+            let Err(message) = collect_config(&repeat, &color, &compression, &reduce_color) else {
+                panic!("ループ回数{text:?}は弾かれる");
+            };
+            assert_eq!(
+                message,
+                "ループ回数の値が無効です。0以上の数値を入力してください。"
+            );
+        }
     }
 }
