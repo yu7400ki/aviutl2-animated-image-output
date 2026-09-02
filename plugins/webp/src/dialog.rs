@@ -18,25 +18,51 @@ fn method_range() -> RangeInclusive<i32> {
     i32::from(*METHOD_RANGE.start())..=i32::from(*METHOD_RANGE.end())
 }
 
-/// 値域を添えた項目名
-fn ranged_label(name: &str, range: &RangeInclusive<i32>) -> String {
-    format!("{name} ({}-{})", range.start(), range.end())
-}
-
-/// 値域の外を弾いたことを伝える文言
-fn range_error(name: &str, range: &RangeInclusive<i32>) -> String {
-    format!(
-        "{name}の値が無効です。{}-{}の値を入力してください。",
-        range.start(),
-        range.end()
-    )
-}
-
-/// 値域の内側に収まっている値だけを読む
+/// 値域を検める入力欄。
 ///
-/// 上下ボタンの値域は打ち込みを縛らないので、読む側で値域まで検める。
-fn read_in_range(input: &Number, range: &RangeInclusive<i32>) -> Option<i32> {
-    input.get_value::<i32>().ok().filter(|n| range.contains(n))
+/// 画面へ出す項目名も、弾いたときの文言も、読む値の判定も、
+/// ここが持つ名前と値域から決まる。
+#[derive(Clone)]
+struct RangedInput {
+    name: &'static str,
+    range: RangeInclusive<i32>,
+    input: Number,
+}
+
+impl RangedInput {
+    fn new(name: &'static str, range: RangeInclusive<i32>, value: i32) -> Self {
+        let input = Number::new()
+            .value(value)
+            .range(*range.start(), *range.end());
+        RangedInput { name, range, input }
+    }
+
+    /// 名乗る値域
+    fn span(&self) -> String {
+        format!("{}-{}", self.range.start(), self.range.end())
+    }
+
+    /// 値域を添えた項目名
+    fn label(&self) -> String {
+        format!("{} ({})", self.name, self.span())
+    }
+
+    /// 値域の外を弾いたことを伝える文言
+    fn error(&self) -> String {
+        format!(
+            "{}の値が無効です。{}の値を入力してください。",
+            self.name,
+            self.span()
+        )
+    }
+
+    /// 入力欄の値を読む
+    ///
+    /// # Errors
+    /// 読めない値か値域の外の値のとき、画面へ出す文言。
+    fn read(&self) -> Result<i32, String> {
+        self.input.validate().map_err(|_| self.error())
+    }
 }
 
 /// ダイアログの入力欄
@@ -45,17 +71,13 @@ struct Inputs {
     repeat: Number,
     color: ComboBox,
     lossless: CheckBox,
-    quality: Number,
-    method: Number,
-    workers: Number,
-    /// ワーカー数の値域。上限は走らせる機械の並列度で決まる
-    workers_range: RangeInclusive<i32>,
+    quality: RangedInput,
+    method: RangedInput,
+    workers: RangedInput,
 }
 
 impl Inputs {
     fn new(default_config: &Config) -> Self {
-        let workers_range = 1..=max_workers() as i32;
-
         Inputs {
             repeat: Number::new()
                 .value(default_config.repeat)
@@ -66,16 +88,14 @@ impl Inputs {
                     ColorFormat::Rgba32 => 1,
                 }),
             lossless: CheckBox::new("ロスレス圧縮").checked(default_config.lossless),
-            quality: Number::new()
-                .value(default_config.quality as i32)
-                .range(*quality_range().start(), *quality_range().end()),
-            method: Number::new()
-                .value(default_config.method as i32)
-                .range(*method_range().start(), *method_range().end()),
-            workers: Number::new()
-                .value(default_config.workers as i32)
-                .range(*workers_range.start(), *workers_range.end()),
-            workers_range,
+            quality: RangedInput::new("品質", quality_range(), default_config.quality as i32),
+            method: RangedInput::new("メソッド", method_range(), default_config.method as i32),
+            workers: RangedInput::new(
+                "ワーカー数",
+                // 上限は走らせる機械の並列度で決まる
+                1..=max_workers() as i32,
+                default_config.workers as i32,
+            ),
         }
     }
 
@@ -88,18 +108,9 @@ impl Inputs {
             .with_layout(labeled("ループ回数 (0=無限ループ)", self.repeat.clone()))
             .with_layout(labeled("カラーフォーマット", self.color.clone()))
             .with_widget(self.lossless.clone())
-            .with_layout(labeled(
-                &ranged_label("品質", &quality_range()),
-                self.quality.clone(),
-            ))
-            .with_layout(labeled(
-                &ranged_label("メソッド", &method_range()),
-                self.method.clone(),
-            ))
-            .with_layout(labeled(
-                &ranged_label("ワーカー数", &self.workers_range),
-                self.workers.clone(),
-            ))
+            .with_layout(labeled(&self.quality.label(), self.quality.input.clone()))
+            .with_layout(labeled(&self.method.label(), self.method.input.clone()))
+            .with_layout(labeled(&self.workers.label(), self.workers.input.clone()))
     }
 
     /// 入力欄の値を設定へ組む
@@ -111,12 +122,9 @@ impl Inputs {
             .repeat
             .get_value::<i32>()
             .map_err(|_| "ループ回数の値が無効です。正しい数値を入力してください。".to_string())?;
-        let workers = read_in_range(&self.workers, &self.workers_range)
-            .ok_or_else(|| range_error("ワーカー数", &self.workers_range))?;
-        let quality = read_in_range(&self.quality, &quality_range())
-            .ok_or_else(|| range_error("品質", &quality_range()))?;
-        let method = read_in_range(&self.method, &method_range())
-            .ok_or_else(|| range_error("メソッド", &method_range()))?;
+        let workers = self.workers.read()?;
+        let quality = self.quality.read()?;
+        let method = self.method.read()?;
 
         Ok(Config {
             repeat,
@@ -185,16 +193,12 @@ mod tests {
         Inputs::new(&Config::default())
     }
 
-    /// 値域を検める3つの入力欄と、その名前
-    fn ranged_inputs(inputs: &Inputs) -> [(&'static str, RangeInclusive<i32>, Number); 3] {
+    /// 値域を検める3つの入力欄
+    fn ranged_inputs(inputs: &Inputs) -> [RangedInput; 3] {
         [
-            ("品質", quality_range(), inputs.quality.clone()),
-            ("メソッド", method_range(), inputs.method.clone()),
-            (
-                "ワーカー数",
-                inputs.workers_range.clone(),
-                inputs.workers.clone(),
-            ),
+            inputs.quality.clone(),
+            inputs.method.clone(),
+            inputs.workers.clone(),
         ]
     }
 
@@ -205,8 +209,8 @@ mod tests {
     fn lossless_keeps_the_quality_and_method_shown_on_the_dialog() {
         let inputs = inputs();
         inputs.lossless.set_checked(true);
-        inputs.quality.set_value(40);
-        inputs.method.set_value(2);
+        inputs.quality.input.set_value(40);
+        inputs.method.input.set_value(2);
 
         let config = inputs.collect().expect("値域の内側なので組める");
 
@@ -221,15 +225,15 @@ mod tests {
         let inputs = inputs();
         inputs.lossless.set_checked(true);
 
-        inputs.quality.set_text("high");
+        inputs.quality.input.set_text("high");
         assert!(inputs.collect().is_err(), "読めない品質");
-        inputs.quality.set_value(*quality_range().end() + 1);
+        inputs.quality.input.set_value(*quality_range().end() + 1);
         assert!(inputs.collect().is_err(), "値域の外の品質");
-        inputs.quality.set_value(*quality_range().end());
+        inputs.quality.input.set_value(*quality_range().end());
 
-        inputs.method.set_value(*method_range().end() + 1);
+        inputs.method.input.set_value(*method_range().end() + 1);
         assert!(inputs.collect().is_err(), "値域の外のメソッド");
-        inputs.method.set_value(*method_range().end());
+        inputs.method.input.set_value(*method_range().end());
 
         assert!(inputs.collect().is_ok(), "値域へ戻せば組める");
     }
@@ -238,31 +242,37 @@ mod tests {
     #[test]
     fn an_out_of_range_worker_count_is_refused() {
         let inputs = inputs();
-        let range = inputs.workers_range.clone();
+        let range = inputs.workers.range.clone();
 
-        inputs.workers.set_value(*range.start() - 1);
+        inputs.workers.input.set_value(*range.start() - 1);
         assert!(inputs.collect().is_err(), "下限より下");
-        inputs.workers.set_value(*range.end() + 1);
+        inputs.workers.input.set_value(*range.end() + 1);
         assert!(inputs.collect().is_err(), "上限より上");
-        inputs.workers.set_value(*range.end());
+        inputs.workers.input.set_value(*range.end());
         assert!(inputs.collect().is_ok(), "上限そのもの");
     }
 
-    /// 値域の外を弾いたときの文言は、検める値域をそのまま名乗る
+    /// 項目名も、値域の外を弾いたときの文言も、検める値域をそのまま名乗る
     #[test]
-    fn every_message_names_the_range_that_is_checked() {
+    fn every_field_names_the_range_that_is_checked() {
         for name in ["品質", "メソッド", "ワーカー数"] {
             let inputs = inputs();
-            let (_, range, slot) = ranged_inputs(&inputs)
+            let field = ranged_inputs(&inputs)
                 .into_iter()
-                .find(|(other, _, _)| *other == name)
+                .find(|field| field.name == name)
                 .expect("名前の一致する欄がある");
-            slot.set_value(*range.end() + 1);
+            // 画面へ出す文字列を、入力欄が実際に検める値域と突き合わせる
+            let (min, max) = field.input.range_bounds().expect("値域を持つ入力欄");
+            assert_eq!(field.label(), format!("{name} ({min}-{max})"));
 
+            field.input.set_value(max + 1);
             let Err(message) = inputs.collect() else {
                 panic!("{name}: 値域の外なので弾かれる");
             };
-            assert_eq!(message, range_error(name, &range));
+            assert_eq!(
+                message,
+                format!("{name}の値が無効です。{min}-{max}の値を入力してください。")
+            );
         }
     }
 }
