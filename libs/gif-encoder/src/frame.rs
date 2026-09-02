@@ -536,11 +536,14 @@ mod tests {
     }
 
     /// フレーム列の色を見つけた順に受け入れて閉じたテーブル
-    fn palette_of(frames: &[&[u8]], bpp: usize) -> Palette {
+    fn palette_of(frames: &[&[u8]], color_type: ColorType) -> Palette {
         let mut palette = Palette::new();
         let mut previous: &[u8] = &[];
         for frame in frames {
-            assert!(palette.admit(bpp, previous, frame), "色が上限に収まらない");
+            assert!(
+                palette.admit(color_type, previous, frame),
+                "色が上限に収まらない"
+            );
             previous = frame;
         }
         palette.settle(&[]);
@@ -735,7 +738,7 @@ mod tests {
         next[0] = 0x7F;
         next[(WIDTH * HEIGHT - 1) as usize * 4] = 0x7E;
 
-        let mut palette = palette_of(&[&first, &next], 4);
+        let mut palette = palette_of(&[&first, &next], ColorType::Rgba8);
         let transparent = palette.transparent().expect("透過インデックスが無い");
 
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
@@ -760,7 +763,7 @@ mod tests {
     #[test]
     fn the_first_frame_maps_every_pixel_through_the_table() {
         let mut frame = opaque(0x10);
-        let mut palette = palette_of(&[&frame], 4);
+        let mut palette = palette_of(&[&frame], ColorType::Rgba8);
         let transparent = palette.transparent().expect("透過インデックスが無い");
 
         let canvas = Canvas::new(layout(ColorType::Rgba8));
@@ -783,7 +786,7 @@ mod tests {
         let full: Vec<u8> = (0..256)
             .flat_map(|i| [i as u8, (i >> 8) as u8, 0])
             .collect();
-        let mut palette = palette_of(&[&full], 3);
+        let mut palette = palette_of(&[&full], ColorType::Rgb8);
         assert_eq!(palette.transparent(), None);
 
         let mut canvas = Canvas::new(layout(ColorType::Rgb8));
@@ -802,7 +805,7 @@ mod tests {
         let mut first = opaque(0x10);
         first[..4].fill(0);
 
-        let mut palette = palette_of(&[&first], 4);
+        let mut palette = palette_of(&[&first], ColorType::Rgba8);
         let transparent = palette.transparent().expect("透過インデックスが無い");
 
         let canvas = Canvas::new(layout(ColorType::Rgba8));
@@ -825,7 +828,7 @@ mod tests {
         let mut second = opaque(0x10);
         second[0] = 0x7F;
 
-        let mut palette = palette_of(&[&first, &second], 4);
+        let mut palette = palette_of(&[&first, &second], ColorType::Rgba8);
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
         canvas.render(&[], &first, &mut palette, STRAY_FLOOR, &mut rendered);
@@ -846,7 +849,7 @@ mod tests {
         let mut second = opaque(0x10);
         second[..4].fill(0);
 
-        let mut palette = palette_of(&[&first], 4);
+        let mut palette = palette_of(&[&first], ColorType::Rgba8);
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
         canvas.render(&[], &first, &mut palette, STRAY_FLOOR, &mut rendered);
@@ -875,14 +878,14 @@ mod tests {
         canvas.render(
             &[],
             &first,
-            &mut palette_of(&[&first], 4),
+            &mut palette_of(&[&first], ColorType::Rgba8),
             STRAY_FLOOR,
             &mut rendered,
         );
         start(&mut canvas, &rendered);
 
         // 入力が変わらない画素は、色表が入れ替わっても持ち越される
-        let mut palette = palette_of(&[&SETTLED[..]], 4);
+        let mut palette = palette_of(&[&SETTLED[..]], ColorType::Rgba8);
         canvas.render(&first, &first, &mut palette, STRAY_FLOOR, &mut rendered);
         assert_eq!(rendered, first, "持ち越しがテーブルを通っている");
 
@@ -919,13 +922,13 @@ mod tests {
         canvas.render(
             &[],
             &first,
-            &mut palette_of(&[&first], 4),
+            &mut palette_of(&[&first], ColorType::Rgba8),
             STRAY_FLOOR,
             &mut rendered,
         );
         start(&mut canvas, &rendered);
 
-        let mut palette = palette_of(&[&SETTLED[..]], 4);
+        let mut palette = palette_of(&[&SETTLED[..]], ColorType::Rgba8);
         canvas.render(&first, &first, &mut palette, STRAY_FLOOR, &mut rendered);
 
         let rect = layout(ColorType::Rgba8).whole();
@@ -972,7 +975,7 @@ mod tests {
     fn a_mean_error_equal_to_the_floor_does_not_exceed_it() {
         let pixels = u64::from(WIDTH * HEIGHT);
         let frame: Vec<u8> = OFF_BY.repeat(pixels as usize);
-        let mut palette = palette_of(&[&SETTLED[..]], 4);
+        let mut palette = palette_of(&[&SETTLED[..]], ColorType::Rgba8);
         let canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
 
@@ -1002,7 +1005,7 @@ mod tests {
         frame[..4].copy_from_slice(&OFF_BY);
         frame[4..8].copy_from_slice(&[0, 0, 0, 0]);
 
-        let mut palette = palette_of(&[&SETTLED[..]], 4);
+        let mut palette = palette_of(&[&SETTLED[..]], ColorType::Rgba8);
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
         canvas.start(&previous);
         let mut rendered = Vec::new();
@@ -1025,7 +1028,7 @@ mod tests {
         let transparent = vec![0u8; pixels * 4];
         let frame: Vec<u8> = SETTLED.repeat(pixels);
 
-        let mut palette = palette_of(&[&transparent], 4);
+        let mut palette = palette_of(&[&transparent], ColorType::Rgba8);
         let canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
 
@@ -1044,7 +1047,7 @@ mod tests {
     fn a_frame_that_maps_nothing_never_exceeds_the_floor() {
         let pixels = (WIDTH * HEIGHT) as usize;
         let previous: Vec<u8> = SETTLED.repeat(pixels);
-        let mut palette = palette_of(&[&SETTLED[..]], 4);
+        let mut palette = palette_of(&[&SETTLED[..]], ColorType::Rgba8);
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
         canvas.start(&previous);
         let mut rendered = Vec::new();
@@ -1069,7 +1072,7 @@ mod tests {
     fn an_error_equal_to_the_stray_floor_is_not_a_stray() {
         let pixels = u64::from(WIDTH * HEIGHT);
         let frame: Vec<u8> = OFF_BY.repeat(pixels as usize);
-        let mut palette = palette_of(&[&SETTLED[..]], 4);
+        let mut palette = palette_of(&[&SETTLED[..]], ColorType::Rgba8);
         let canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
 
@@ -1093,7 +1096,7 @@ mod tests {
         let mut frame: Vec<u8> = SETTLED.repeat(pixels);
         frame[..4].copy_from_slice(&BEYOND);
 
-        let mut palette = palette_of(&[&SETTLED[..]], 4);
+        let mut palette = palette_of(&[&SETTLED[..]], ColorType::Rgba8);
         let canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
 
@@ -1118,7 +1121,7 @@ mod tests {
         let pixels = (WIDTH * HEIGHT) as usize;
         let frame: Vec<u8> = BEYOND.repeat(pixels);
 
-        let mut palette = palette_of(&[&SETTLED[..]], 4);
+        let mut palette = palette_of(&[&SETTLED[..]], ColorType::Rgba8);
         let canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
 
@@ -1131,7 +1134,7 @@ mod tests {
     #[test]
     fn a_partial_width_rect_is_cropped_row_by_row() {
         let mut frame = opaque(0x10);
-        let mut palette = palette_of(&[&frame], 4);
+        let mut palette = palette_of(&[&frame], ColorType::Rgba8);
 
         let canvas = Canvas::new(layout(ColorType::Rgba8));
         let rect = Rect {

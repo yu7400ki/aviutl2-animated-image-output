@@ -2,7 +2,7 @@
 
 use crate::normalize::{TRANSPARENT, pack};
 use crate::quantize::Nearest;
-use anim_core::{Colors, MAX_COLORS};
+use anim_core::{ColorType, Colors, MAX_COLORS, unchanged_run};
 
 /// 写す先が1つも残らないテーブルへ足す色
 ///
@@ -173,17 +173,29 @@ impl Palette {
     ///
     /// # Panics
     /// 閉じたテーブルのとき。
-    pub(crate) fn admit(&mut self, bpp: usize, previous: &[u8], frame: &[u8]) -> bool {
+    pub(crate) fn admit(&mut self, color_type: ColorType, previous: &[u8], frame: &[u8]) -> bool {
+        match color_type {
+            ColorType::Rgb8 => self.admit_bpp::<3>(previous, frame),
+            ColorType::Rgba8 => self.admit_bpp::<4>(previous, frame),
+        }
+    }
+
+    fn admit_bpp<const BPP: usize>(&mut self, previous: &[u8], frame: &[u8]) -> bool {
         assert!(self.is_open(), "閉じたテーブルへ色を足そうとしている");
 
         let mut fresh = Colors::new();
-        for (at, pixel) in frame.chunks_exact(bpp).enumerate() {
-            let at = at * bpp;
-            if !previous.is_empty() && previous[at..at + bpp] == *pixel {
-                continue;
+        let mut at = 0;
+        while at + BPP <= frame.len() {
+            if !previous.is_empty() {
+                let run = unchanged_run::<BPP>(previous, frame, at);
+                if run > at {
+                    at = run;
+                    continue;
+                }
             }
 
-            let color = pack(pixel, bpp);
+            let color = pack(&frame[at..at + BPP], BPP);
+            at += BPP;
             if color == TRANSPARENT {
                 self.transparent_seen = true;
                 continue;
@@ -381,9 +393,12 @@ mod tests {
     }
 
     /// 画素列を1フレームとして受け入れた、開いたテーブル
-    fn opened(pixels: &[u8], bpp: usize) -> Palette {
+    fn opened(pixels: &[u8], color_type: ColorType) -> Palette {
         let mut palette = Palette::new();
-        assert!(palette.admit(bpp, &[], pixels), "1フレーム目が入らない");
+        assert!(
+            palette.admit(color_type, &[], pixels),
+            "1フレーム目が入らない"
+        );
         palette
     }
 
@@ -441,7 +456,7 @@ mod tests {
     /// 添字は色を見つけた順に振る
     #[test]
     fn indices_follow_the_order_the_colors_were_found() {
-        let palette = opened(&[1u8, 2, 3, 4, 5, 6, 1, 2, 3], 3);
+        let palette = opened(&[1u8, 2, 3, 4, 5, 6, 1, 2, 3], ColorType::Rgb8);
 
         assert_eq!(palette.colors(), 2);
         assert_eq!(palette.color_at(0), 0xFF03_0201);
@@ -454,8 +469,8 @@ mod tests {
         let first = [1u8, 2, 3, 4, 5, 6];
         let second = [1u8, 2, 3, 7, 8, 9];
 
-        let mut palette = opened(&first, 3);
-        assert!(palette.admit(3, &first, &second));
+        let mut palette = opened(&first, ColorType::Rgb8);
+        assert!(palette.admit(ColorType::Rgb8, &first, &second));
         assert_eq!(palette.colors(), 3);
         assert_eq!(palette.color_at(2), 0xFF09_0807);
     }
@@ -463,7 +478,7 @@ mod tests {
     /// 透過標識は添字を占めない
     #[test]
     fn the_marker_takes_no_entry() {
-        let palette = opened(&[0u8, 0, 0, 0, 1, 2, 3, 0xFF], 4);
+        let palette = opened(&[0u8, 0, 0, 0, 1, 2, 3, 0xFF], ColorType::Rgba8);
 
         assert_eq!(palette.colors(), 1);
         assert_eq!(palette.transparent(), Some(1));
@@ -473,10 +488,10 @@ mod tests {
     #[test]
     fn the_transparent_index_follows_the_colors_allocated_so_far() {
         let first = [1u8, 2, 3];
-        let mut palette = opened(&first, 3);
+        let mut palette = opened(&first, ColorType::Rgb8);
         assert_eq!(palette.transparent(), Some(1));
 
-        assert!(palette.admit(3, &first, &[4, 5, 6]));
+        assert!(palette.admit(ColorType::Rgb8, &first, &[4, 5, 6]));
         assert_eq!(palette.transparent(), Some(2));
     }
 
@@ -488,11 +503,11 @@ mod tests {
         let full: Vec<u8> = (0..MAX_COLORS)
             .flat_map(|i| [i as u8, (i >> 8) as u8, 0])
             .collect();
-        let mut palette = opened(&full, 3);
+        let mut palette = opened(&full, ColorType::Rgb8);
         assert_eq!(palette.colors(), MAX_COLORS as u16);
         assert_eq!(palette.transparent(), None, "色で埋まっても透過添字がある");
 
-        assert!(!palette.admit(3, &full, &[0xFF, 0xFF, 0xFF]));
+        assert!(!palette.admit(ColorType::Rgb8, &full, &[0xFF, 0xFF, 0xFF]));
         assert_eq!(palette.colors(), MAX_COLORS as u16, "色を足している");
     }
 
@@ -504,17 +519,17 @@ mod tests {
             .collect();
         pixels.extend_from_slice(&[0, 0, 0, 0]);
 
-        let mut palette = opened(&pixels, 4);
+        let mut palette = opened(&pixels, ColorType::Rgba8);
         assert_eq!(palette.colors(), (MAX_COLORS - 1) as u16);
         assert_eq!(palette.transparent(), Some((MAX_COLORS - 1) as u8));
 
-        assert!(!palette.admit(4, &[], &[0xFF, 0xFF, 0xFF, 0xFF]));
+        assert!(!palette.admit(ColorType::Rgba8, &[], &[0xFF, 0xFF, 0xFF, 0xFF]));
     }
 
     /// 閉じたテーブルは、割り当て済みの色をそのままの添字で残す
     #[test]
     fn settling_keeps_the_indices_that_were_already_handed_out() {
-        let mut palette = opened(&[1u8, 2, 3, 4, 5, 6], 3);
+        let mut palette = opened(&[1u8, 2, 3, 4, 5, 6], ColorType::Rgb8);
         palette.settle(&[0xFF80_8080, 0xFF03_0201]);
 
         assert_eq!(palette.color_at(0), 0xFF03_0201);
@@ -526,7 +541,7 @@ mod tests {
     /// 閉じたテーブルに無い色は最近傍へ写る
     #[test]
     fn a_color_outside_a_settled_table_is_approximated() {
-        let mut palette = opened(&[0u8, 0, 0], 3);
+        let mut palette = opened(&[0u8, 0, 0], ColorType::Rgb8);
         palette.settle(&[]);
 
         let mapped = palette.map(&[1, 0, 0], 3);
@@ -537,7 +552,7 @@ mod tests {
     /// 透過標識は透過添字への完全一致になる
     #[test]
     fn the_marker_maps_to_the_transparent_index() {
-        let mut palette = opened(&[1u8, 2, 3, 0xFF], 4);
+        let mut palette = opened(&[1u8, 2, 3, 0xFF], ColorType::Rgba8);
         let mapped = palette.map(&[0, 0, 0, 0], 4);
 
         assert_eq!(mapped.index, 1);
@@ -547,7 +562,7 @@ mod tests {
     /// 写す先が1つも残らないテーブルへ足す埋め草は、不透明な黒
     #[test]
     fn the_padding_that_becomes_a_target_is_opaque_black() {
-        let mut palette = opened(&[0u8, 0, 0, 0], 4);
+        let mut palette = opened(&[0u8, 0, 0, 0], ColorType::Rgba8);
         assert_eq!(palette.colors(), 0);
 
         palette.settle(&[]);

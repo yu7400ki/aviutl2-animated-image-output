@@ -704,7 +704,7 @@ impl<W: Write + Seek> Parts<'_, W> {
         if palettes.global.is_open()
             && !palettes
                 .global
-                .admit(self.layout.bytes_per_pixel, previous, pixels)
+                .admit(self.layout.color_type, previous, pixels)
         {
             self.settle(&mut palettes.global, ring, pixels)?;
         }
@@ -1019,7 +1019,7 @@ mod tests {
     /// 1色だけの閉じたテーブル
     fn table_of(pixel: &[u8; 3]) -> Palette {
         let mut palette = Palette::new();
-        palette.admit(3, &[], pixel);
+        palette.admit(ColorType::Rgb8, &[], pixel);
         palette.settle(&[]);
         palette
     }
