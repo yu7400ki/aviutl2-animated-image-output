@@ -120,8 +120,8 @@ impl Inputs {
     fn collect(&self) -> Result<Config, String> {
         let repeat = self
             .repeat
-            .get_value::<i32>()
-            .map_err(|_| "ループ回数の値が無効です。正しい数値を入力してください。".to_string())?;
+            .validate()
+            .map_err(|_| "ループ回数の値が無効です。0以上の数値を入力してください。".to_string())?;
         let workers = self.workers.read()?;
         let quality = self.quality.read()?;
         let method = self.method.read()?;
@@ -202,6 +202,16 @@ mod tests {
         ]
     }
 
+    /// 数値を打ち込む4つの入力欄
+    fn number_inputs(inputs: &Inputs) -> [(&'static str, Number); 4] {
+        [
+            ("ループ回数", inputs.repeat.clone()),
+            ("品質", inputs.quality.input.clone()),
+            ("メソッド", inputs.method.input.clone()),
+            ("ワーカー数", inputs.workers.input.clone()),
+        ]
+    }
+
     /// ロスレスでも、品質とメソッドは画面に出ている値がそのまま設定になる
     ///
     /// どちらもロスレスでは画素を動かさず、ファイルサイズと時間を決める。
@@ -274,5 +284,37 @@ mod tests {
                 format!("{name}の値が無効です。{min}-{max}の値を入力してください。")
             );
         }
+    }
+
+    /// どの数値欄も、前後に空白のある入力を等しく受け取る
+    #[test]
+    fn every_number_field_accepts_surrounding_whitespace() {
+        for name in ["ループ回数", "品質", "メソッド", "ワーカー数"] {
+            let inputs = inputs();
+            let (_, input) = number_inputs(&inputs)
+                .into_iter()
+                .find(|(field, _)| *field == name)
+                .expect("名前の一致する欄がある");
+
+            let (min, _) = input.range_bounds().expect("値域を持つ入力欄");
+            input.set_text(&format!(" {min} "));
+
+            assert!(inputs.collect().is_ok(), "{name}: 前後の空白");
+        }
+    }
+
+    /// ループ回数は0以上を受け取り、弾いたときの文言もそれを名乗る
+    #[test]
+    fn a_negative_repeat_is_refused() {
+        let inputs = inputs();
+        inputs.repeat.set_value(-1);
+
+        let Err(message) = inputs.collect() else {
+            panic!("0より小さいループ回数は弾かれる");
+        };
+        assert_eq!(
+            message,
+            "ループ回数の値が無効です。0以上の数値を入力してください。"
+        );
     }
 }
