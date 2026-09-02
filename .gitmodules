@@ -1,5 +1,5 @@
-[submodule "libs/webp-sys/vendor"]
-	path = libs/webp-sys/vendor
+[submodule "libs/webp-sys/vendor/libwebp"]
+	path = libs/webp-sys/vendor/libwebp
 	url = https://github.com/webmproject/libwebp.git
 [submodule "libs/avif-sys/vendor/libavif"]
 	path = libs/avif-sys/vendor/libavif

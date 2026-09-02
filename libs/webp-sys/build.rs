@@ -4,17 +4,17 @@ use std::env;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-/// コンパイルする翻訳単位を集める、vendor 直下のディレクトリ
+/// コンパイルする翻訳単位を集める、libwebp 直下のディレクトリ
 const SOURCE_DIRS: [&str; 4] = ["src/enc", "src/dsp", "src/utils", "sharpyuv"];
 
 fn main() {
     let manifest_dir =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let vendor = manifest_dir.join("vendor");
+    let libwebp = manifest_dir.join("vendor/libwebp");
     assert!(
-        vendor.join("src/enc").is_dir(),
+        libwebp.join("src/enc").is_dir(),
         "libwebp のソースが無い。`git submodule update --init` で {} を取得すること",
-        vendor.display()
+        libwebp.display()
     );
 
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
@@ -24,16 +24,16 @@ fn main() {
         "webp-sys の対象は MSVC x64 のみ ({arch}, {abi})"
     );
 
-    let (baseline, avx2) = collect_sources(&vendor);
+    let (baseline, avx2) = collect_sources(&libwebp);
 
-    build(&vendor)
+    build(&libwebp)
         .files(baseline)
         .file(manifest_dir.join("src/layout.c"))
         .compile("webp");
 
     // AVX2 の翻訳単位だけ命令セットを引き上げる。実行時にどれを呼ぶかは
     // libwebp が CPU を見て決めるため、他の翻訳単位は既定のままにする
-    build(&vendor)
+    build(&libwebp)
         .flag("/arch:AVX2")
         .files(avx2)
         .compile("webp_avx2");
@@ -43,11 +43,11 @@ fn main() {
 }
 
 /// `SOURCE_DIRS` の `.c` を、既定の命令セットで組むものと AVX2 のものへ分ける
-fn collect_sources(vendor: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+fn collect_sources(libwebp: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut baseline = Vec::new();
     let mut avx2 = Vec::new();
     for dir in SOURCE_DIRS {
-        let dir = vendor.join(dir);
+        let dir = libwebp.join(dir);
         let entries =
             std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{} を読めない: {e}", dir.display()));
         for entry in entries {
@@ -68,9 +68,9 @@ fn collect_sources(vendor: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     (baseline, avx2)
 }
 
-fn build(vendor: &Path) -> cc::Build {
+fn build(libwebp: &Path) -> cc::Build {
     let mut build = cc::Build::new();
-    build.include(vendor);
+    build.include(libwebp);
     build.define("_CRT_SECURE_NO_WARNINGS", None);
     if env::var("PROFILE").as_deref() == Ok("release") {
         build.define("NDEBUG", None);
