@@ -14,7 +14,7 @@ pub enum Error {
     InvalidDimensions { width: u32, height: u32 },
     /// フレーム数が0
     InvalidFrameCount,
-    /// 1秒あたりのtick数の分子または分母が0
+    /// 1秒あたりのtick数が0を含むか、約した比が書ける値域の外
     InvalidTps { numerator: u32, denominator: u32 },
     /// フレームの表示時間が0
     InvalidDuration,
@@ -101,7 +101,10 @@ impl fmt::Display for Error {
             Error::InvalidTps {
                 numerator,
                 denominator,
-            } => write!(f, "1秒あたりのtick数が不正です: {numerator}/{denominator}"),
+            } => write!(
+                f,
+                "1秒あたりのtick数を書けません: {numerator}/{denominator} (約分した分子が1〜1073741824、分母が1〜1024に収まる必要があります)"
+            ),
             Error::InvalidDuration => write!(f, "表示時間は1以上である必要があります"),
             Error::InvalidQuality { quality } => {
                 write!(f, "品質は0.0以上100.0以下である必要があります: {quality}")

@@ -165,6 +165,26 @@ fn an_animation_carries_its_timing_and_loop_count() {
     );
 }
 
+/// 約した比が書かれる。そのままの比はヘッダの値域から外れて書けない
+#[test]
+fn a_reducible_tps_is_written_in_its_reduced_form() {
+    let config = Config {
+        tps_numerator: TPS_NUMERATOR * 2,
+        tps_denominator: TPS_DENOMINATOR * 2,
+        ..config(ColorType::Rgb8)
+    };
+    let decoded = decode(&encode(config, &DURATIONS), ColorType::Rgb8);
+
+    let animation = decoded
+        .info
+        .animation
+        .expect("アニメーションになっていない");
+    assert_eq!(animation.tps_numerator, TPS_NUMERATOR);
+    assert_eq!(animation.tps_denominator, TPS_DENOMINATOR);
+    let ticks: Vec<u32> = decoded.frames.iter().map(|f| f.duration_ticks).collect();
+    assert_eq!(ticks, DURATIONS, "約分が表示時間の意味を動かしている");
+}
+
 /// 最後のフレームで閉じた完全なストリームの主張
 #[test]
 fn the_last_frame_closes_the_stream() {

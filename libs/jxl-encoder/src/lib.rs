@@ -37,6 +37,9 @@ pub struct Config {
     /// アニメーションの再生回数 (0で無限ループ)
     pub num_plays: u32,
     /// 1秒あたりのtick数の分子
+    ///
+    /// 分母との比は最大公約数で約されてから書かれる。約した分子は1以上
+    /// 1073741824以下、分母は1以上1024以下に収まる必要がある。
     pub tps_numerator: u32,
     /// 1秒あたりのtick数の分母
     pub tps_denominator: u32,

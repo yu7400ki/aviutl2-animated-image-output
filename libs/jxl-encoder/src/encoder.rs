@@ -18,10 +18,17 @@ use jxl_sys::{
 use std::ffi::{c_int, c_void};
 use std::io::Write;
 use std::mem::MaybeUninit;
+use std::ops::RangeInclusive;
 use std::ptr;
 
 /// 1度の排水で受け取るバイト数
 const OUTPUT_CHUNK: usize = 64 * 1024;
+
+/// `JxlAnimationHeader::tps_numerator` が採れる値
+const TPS_NUMERATOR_RANGE: RangeInclusive<u32> = 1..=(1 << 30);
+
+/// `JxlAnimationHeader::tps_denominator` が採れる値
+const TPS_DENOMINATOR_RANGE: RangeInclusive<u32> = 1..=1024;
 
 /// `JXL_BOOL` へ写す
 fn jxl_bool(value: bool) -> c_int {
@@ -31,6 +38,54 @@ fn jxl_bool(value: bool) -> c_int {
 /// 確保に失敗したときのエラー
 fn allocation_failed() -> Error {
     Error::Encode(EncodingError::new(JXL_ENC_ERROR, JXL_ENC_ERR_OOM))
+}
+
+/// 最大公約数
+fn gcd(a: u32, b: u32) -> u32 {
+    let (mut a, mut b) = (a, b);
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// アニメーションヘッダへ書ける1秒あたりのtick数
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Tps {
+    numerator: u32,
+    denominator: u32,
+}
+
+impl Tps {
+    /// 最大公約数で約した比を作る
+    ///
+    /// 約分は比を変えないので、1 tick の長さも表示時間の意味も動かない。
+    ///
+    /// # Errors
+    /// 0を含むか、約した比がヘッダの値域に収まらないとき [`Error::InvalidTps`]。
+    fn new(numerator: u32, denominator: u32) -> Result<Self, Error> {
+        let invalid = || Error::InvalidTps {
+            numerator,
+            denominator,
+        };
+        if numerator == 0 || denominator == 0 {
+            return Err(invalid());
+        }
+
+        let divisor = gcd(numerator, denominator);
+        let tps = Tps {
+            numerator: numerator / divisor,
+            denominator: denominator / divisor,
+        };
+
+        if !TPS_NUMERATOR_RANGE.contains(&tps.numerator) {
+            return Err(invalid());
+        }
+        if !TPS_DENOMINATOR_RANGE.contains(&tps.denominator) {
+            return Err(invalid());
+        }
+        Ok(tps)
+    }
 }
 
 impl Config {
@@ -116,8 +171,9 @@ impl<W: Write> Encoder<W> {
     /// `width` x `height` の `num_frames` フレームを `writer` へ書き出す
     ///
     /// # Errors
-    /// フレーム数が0のとき [`Error::InvalidFrameCount`]。1秒あたりのtick数の
-    /// 分子または分母が0のとき [`Error::InvalidTps`]。品質が [`QUALITY_RANGE`]
+    /// フレーム数が0のとき [`Error::InvalidFrameCount`]。1秒あたりのtick数が
+    /// 0を含むか、約した比がヘッダの値域に収まらないとき
+    /// [`Error::InvalidTps`]。品質が [`QUALITY_RANGE`]
     /// の外のとき [`Error::InvalidQuality`]。均衡が [`EFFORT_RANGE`] の外のとき
     /// [`Error::InvalidEffort`]。寸法が0のとき [`Error::InvalidDimensions`]。
     /// 符号化器を組み立てられないとき [`Error::Encode`]。
@@ -131,12 +187,7 @@ impl<W: Write> Encoder<W> {
         if num_frames == 0 {
             return Err(Error::InvalidFrameCount);
         }
-        if config.tps_numerator == 0 || config.tps_denominator == 0 {
-            return Err(Error::InvalidTps {
-                numerator: config.tps_numerator,
-                denominator: config.tps_denominator,
-            });
-        }
+        let tps = Tps::new(config.tps_numerator, config.tps_denominator)?;
         if !QUALITY_RANGE.contains(&config.quality) {
             return Err(Error::InvalidQuality {
                 quality: config.quality,
@@ -167,8 +218,8 @@ impl<W: Write> Encoder<W> {
         }
         if num_frames > 1 {
             info.have_animation = JXL_TRUE;
-            info.animation.tps_numerator = config.tps_numerator;
-            info.animation.tps_denominator = config.tps_denominator;
+            info.animation.tps_numerator = tps.numerator;
+            info.animation.tps_denominator = tps.denominator;
             info.animation.num_loops = config.num_plays;
             info.animation.have_timecodes = JXL_FALSE;
         }
@@ -403,6 +454,69 @@ mod tests {
                 "{numerator}/{denominator}"
             );
         }
+    }
+
+    /// 分母の値域には、NTSCの分母1001が収まる
+    #[test]
+    fn the_writable_tps_denominators_are_accepted() {
+        for denominator in [1, 2, 1000, 1001, 1002, 1024] {
+            assert!(Tps::new(1, denominator).is_ok(), "1/{denominator}");
+        }
+    }
+
+    #[test]
+    fn a_tps_denominator_outside_the_writable_values_is_rejected() {
+        for denominator in [1025, 1026, 2002, u32::MAX] {
+            assert!(
+                matches!(Tps::new(1, denominator), Err(Error::InvalidTps { .. })),
+                "1/{denominator}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_tps_numerator_stops_at_the_writable_bound() {
+        assert!(Tps::new(1 << 30, 1).is_ok());
+        assert!(matches!(
+            Tps::new((1 << 30) + 1, 1),
+            Err(Error::InvalidTps { .. })
+        ));
+    }
+
+    /// 値域を見るのは約した後の比
+    #[test]
+    fn the_writable_values_are_checked_after_the_reduction() {
+        assert_eq!(
+            Tps::new(60000, 2002).unwrap(),
+            Tps {
+                numerator: 30000,
+                denominator: 1001
+            }
+        );
+        assert_eq!(
+            Tps::new(2048, 2048).unwrap(),
+            Tps {
+                numerator: 1,
+                denominator: 1
+            }
+        );
+        // 約しても 1/1025 にしかならず、値域の外に残る
+        assert!(matches!(Tps::new(2, 2050), Err(Error::InvalidTps { .. })));
+    }
+
+    /// 約した比が渡るので、そのままなら書けない比でも投入まで通る
+    #[test]
+    fn a_reducible_tps_reaches_the_encoder() {
+        let mut encoder = encoder(
+            2,
+            Config {
+                tps_numerator: 60000,
+                tps_denominator: 2002,
+                ..config()
+            },
+        )
+        .unwrap();
+        encoder.add_frame(&[0; 16 * 16 * 3], 1).unwrap();
     }
 
     #[test]
