@@ -2,6 +2,7 @@
 
 use crate::layout::Layout;
 use crate::normalize::{TRANSPARENT, pack};
+use anim_core::ColorType;
 
 /// 1軸あたりのビン数 (6bit)
 const BINS: usize = 64;
@@ -44,11 +45,17 @@ impl Moment for u128 {
 /// 透過標識は色を持たないため積まない。`window` は書き出し位置から順に
 /// 並んだフレーム。
 pub(crate) fn material<'a>(layout: &Layout, window: impl Iterator<Item = &'a [u8]>) -> Histogram {
-    let bpp = layout.bytes_per_pixel;
+    match layout.color_type {
+        ColorType::Rgb8 => material_bpp::<3>(window),
+        ColorType::Rgba8 => material_bpp::<4>(window),
+    }
+}
+
+fn material_bpp<'a, const BPP: usize>(window: impl Iterator<Item = &'a [u8]>) -> Histogram {
     let mut histogram = Histogram::new();
     for frame in window {
-        for pixel in frame.chunks_exact(bpp) {
-            let color = pack(pixel, bpp);
+        for pixel in frame.chunks_exact(BPP) {
+            let color = pack(pixel, BPP);
             if color == TRANSPARENT {
                 continue;
             }
