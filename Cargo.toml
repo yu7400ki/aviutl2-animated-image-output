@@ -7,6 +7,7 @@ resolver = "3"
 windows = { version = "0.62" }
 widestring = { version = "1.2" }
 rust-ini = { version = "0.21" }
+win32-ui = { git = "https://github.com/yu7400ki/win32-ui", rev = "fbadbaf" }
 
 [profile.release]
 opt-level = 3

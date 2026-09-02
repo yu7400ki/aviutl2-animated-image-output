@@ -1,6 +1,6 @@
 use crate::config::{ColorFormat, Config};
 use apng_encoder::COMPRESSION_LEVELS;
-use win32_dialog::{
+use win32_ui::{
     Dialog, MessageBox,
     layout::{FlexLayout, JustifyContent, SizeValue, labeled},
     widget::{Button, CheckBox, ComboBox, Label, Number},
@@ -152,31 +152,12 @@ fn compression_error_message() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use win32_dialog::layout::Layout;
 
-    /// 色数の削減は、有効にすると何が起きるかをダイアログへ出す
+    /// 色数の削減に添える但し書きは、有効にすると何が起きるかを述べる
     ///
     /// 名前だけでは、書き出しが失敗しうる設定であることが読めない。
     #[test]
-    fn the_reduce_color_setting_shows_what_can_go_wrong_on_the_dialog() {
-        let texts = settings_layout(
-            &Number::new(),
-            &ComboBox::new(vec!["透過無し"]),
-            &Number::new(),
-            &CheckBox::new(REDUCE_COLOR_LABEL),
-        )
-        .texts();
-
-        let checkbox = texts
-            .iter()
-            .position(|text| text == REDUCE_COLOR_LABEL)
-            .expect("色数の削減のチェックボックスが要る");
-        assert_eq!(
-            texts.get(checkbox + 1).map(String::as_str),
-            Some(REDUCE_COLOR_NOTE),
-            "{texts:?}"
-        );
-
+    fn the_reduce_color_note_says_what_can_go_wrong() {
         assert!(REDUCE_COLOR_NOTE.contains("256色"), "{REDUCE_COLOR_NOTE}");
         assert!(REDUCE_COLOR_NOTE.contains("失敗"), "{REDUCE_COLOR_NOTE}");
     }

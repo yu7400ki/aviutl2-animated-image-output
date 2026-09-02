@@ -1,5 +1,5 @@
 use crate::config::{ColorFormat, Config};
-use win32_dialog::{
+use win32_ui::{
     Dialog, MessageBox,
     layout::{FlexLayout, JustifyContent, SizeValue, labeled},
     widget::{Button, ComboBox, Number},

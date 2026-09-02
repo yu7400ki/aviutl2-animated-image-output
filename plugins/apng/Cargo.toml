@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 [dependencies]
 apng_encoder = { path = "../../libs/apng-encoder" }
 aviutl2 = { path = "../../libs/aviutl2" }
-win32_dialog = { path = "../../libs/dialog" }
+win32-ui = { workspace = true }
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",

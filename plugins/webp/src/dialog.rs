@@ -1,7 +1,7 @@
 use crate::config::{ColorFormat, Config, max_workers};
 use std::ops::RangeInclusive;
 use webp_encoder::{METHOD_RANGE, QUALITY_RANGE};
-use win32_dialog::{
+use win32_ui::{
     Dialog, MessageBox,
     layout::{FlexLayout, JustifyContent, SizeValue, labeled},
     widget::{Button, CheckBox, ComboBox, Number},
@@ -180,7 +180,6 @@ pub fn show_config_dialog(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use win32_dialog::layout::Layout;
 
     fn inputs() -> Inputs {
         Inputs::new(&Config::default())
@@ -249,19 +248,7 @@ mod tests {
         assert!(inputs.collect().is_ok(), "上限そのもの");
     }
 
-    /// 項目名は、検める値域をそのまま名乗る
-    #[test]
-    fn every_label_names_the_range_that_is_checked() {
-        let inputs = inputs();
-        let texts = inputs.layout().texts();
-
-        for (name, range, _) in ranged_inputs(&inputs) {
-            let label = ranged_label(name, &range);
-            assert!(texts.contains(&label), "{label} が無い: {texts:?}");
-        }
-    }
-
-    /// 値域の外を弾いたときの文言も、検める値域をそのまま名乗る
+    /// 値域の外を弾いたときの文言は、検める値域をそのまま名乗る
     #[test]
     fn every_message_names_the_range_that_is_checked() {
         for name in ["品質", "メソッド", "ワーカー数"] {

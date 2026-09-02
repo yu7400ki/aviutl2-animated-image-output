@@ -10,7 +10,7 @@ use dialog::show_config_dialog;
 use std::io::BufWriter;
 use std::num::NonZeroUsize;
 use webp_encoder::{ColorType, Config as EncoderConfig, Encoder, FrameDelay, Report};
-use win32_dialog::MessageBox;
+use win32_ui::MessageBox;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
 
 /// 負の値をエンコーダへ渡さないためのi32からu32への変換
