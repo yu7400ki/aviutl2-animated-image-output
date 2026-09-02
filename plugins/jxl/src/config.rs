@@ -4,6 +4,11 @@ use aviutl2::ini::{Ini, Properties};
 use jxl_encoder::{EFFORT_RANGE, QUALITY_RANGE};
 use std::thread::available_parallelism;
 
+/// 設定が採れるループ回数の上限
+///
+/// ダイアログの数値欄が扱える上限。
+pub const MAX_NUM_PLAYS: u32 = i32::MAX as u32;
+
 /// 設定が採れるスレッド数の上限
 ///
 /// この機械の論理CPU数。読めなければ1を返す。
@@ -43,7 +48,8 @@ impl IniConfig for Config {
         let num_plays = section
             .and_then(|s| s.get("num_plays"))
             .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(default.num_plays);
+            .unwrap_or(default.num_plays)
+            .min(MAX_NUM_PLAYS);
 
         let color_format = section
             .and_then(|s| s.get("color_type"))
@@ -174,6 +180,18 @@ effort=3
         let under = load(&[("quality", "-1"), ("effort", "0")]);
         assert_eq!(under.quality, *QUALITY_RANGE.start());
         assert_eq!(under.effort, *EFFORT_RANGE.start());
+    }
+
+    /// 入力欄が扱えないループ回数は、扱える上限へ収まる
+    ///
+    /// i32へ折り返す値をそのまま持つと、ダイアログの初期値が負になる。
+    #[test]
+    fn out_of_range_num_plays_are_clamped() {
+        assert_eq!(
+            load(&[("num_plays", "3000000000")]).num_plays,
+            MAX_NUM_PLAYS
+        );
+        assert_eq!(load(&[("num_plays", "3")]).num_plays, 3);
     }
 
     /// 値域の外のスレッド数は、走らせる機械の並列度の内側へ収まる

@@ -1,4 +1,4 @@
-use crate::config::{ColorFormat, Config, available_threads};
+use crate::config::{ColorFormat, Config, MAX_NUM_PLAYS, available_threads};
 use jxl_encoder::{EFFORT_RANGE, QUALITY_RANGE};
 use std::ops::RangeInclusive;
 use win32_ui::{
@@ -81,7 +81,7 @@ impl Inputs {
         Inputs {
             num_plays: Number::new()
                 .value(default_config.num_plays as i32)
-                .range(0, i32::MAX),
+                .range(0, MAX_NUM_PLAYS as i32),
             color: ComboBox::new(vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()])
                 .selected(match default_config.color_format {
                     ColorFormat::Rgb24 => 0,
@@ -185,6 +185,8 @@ pub fn show_config_dialog(parent_hwnd: HWND, default_config: Config) -> Result<O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aviutl2::IniConfig;
+    use aviutl2::ini::Ini;
 
     fn inputs() -> Inputs {
         Inputs::new(&Config::default())
@@ -311,6 +313,21 @@ mod tests {
         assert!(config.lossless);
         assert_eq!(config.quality, 40.0);
         assert_eq!(config.effort, 2);
+    }
+
+    /// i32へ折り返す回数を持つiniを読み直しても、ダイアログはその値のまま開ける
+    #[test]
+    fn a_number_of_plays_read_from_the_ini_fits_the_input() {
+        let mut ini = Ini::new();
+        ini.with_section(Some(Config::SECTION))
+            .set("num_plays", "3000000000");
+        let config = Config::load_from(ini.section(Some(Config::SECTION)));
+
+        let collected = Inputs::new(&config)
+            .collect()
+            .expect("入力欄が扱える値になっている");
+
+        assert_eq!(collected.num_plays, config.num_plays);
     }
 
     /// ループ回数は0以上を受け取り、弾いたときの文言もそれを名乗る
