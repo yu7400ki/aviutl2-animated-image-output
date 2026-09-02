@@ -238,6 +238,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "jxl-sys"
+version = "0.1.0"
+
+[[package]]
 name = "libc"
 version = "0.2.174"
 source = "registry+https://github.com/rust-lang/crates.io-index"

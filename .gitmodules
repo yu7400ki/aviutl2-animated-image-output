@@ -10,3 +10,6 @@
 [submodule "libs/avif-sys/vendor/libyuv"]
 	path = libs/avif-sys/vendor/libyuv
 	url = https://chromium.googlesource.com/libyuv/libyuv
+[submodule "libs/jxl-sys/vendor/libjxl"]
+	path = libs/jxl-sys/vendor/libjxl
+	url = https://github.com/libjxl/libjxl.git
