@@ -1,0 +1,13 @@
+name: Fetch vendored sources
+description: -sys クレートが同梱するライブラリのソースを取得する
+
+runs:
+  using: composite
+  steps:
+    # libjxl は入れ子の submodule を持ち、CMake が置き換えを許さない 3 本だけが要る。
+    # --recursive は testdata と libjpeg-turbo まで引き込む
+    - shell: bash
+      run: |
+        git submodule update --init
+        git -C libs/jxl-sys/vendor/libjxl submodule update --init \
+          third_party/highway third_party/brotli third_party/skcms

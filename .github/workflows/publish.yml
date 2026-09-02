@@ -25,6 +25,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Fetch vendored sources
+        uses: ./.github/actions/vendor
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
