@@ -92,41 +92,63 @@ impl Screen<'_> {
         palette: &mut Palette,
         out: &mut Vec<u8>,
     ) -> Written {
+        match self.layout.color_type {
+            ColorType::Rgb8 => self.append_indices_bpp::<3>(frame, rect, palette, out),
+            ColorType::Rgba8 => self.append_indices_bpp::<4>(frame, rect, palette, out),
+        }
+    }
+
+    fn append_indices_bpp<const BPP: usize>(
+        &self,
+        frame: &mut [u8],
+        rect: Rect,
+        palette: &mut Palette,
+        out: &mut Vec<u8>,
+    ) -> Written {
         let stride = self.layout.stride;
-        let bpp = self.layout.bytes_per_pixel;
-        let transparent = palette.transparent();
         let mut approximated = 0;
         let mut substituted = 0;
 
-        out.reserve(rect.area() as usize);
-        for y in 0..rect.height as usize {
-            let row = (rect.y as usize + y) * stride + rect.x as usize * bpp;
-            for x in 0..rect.width as usize {
-                let at = row + x * bpp;
-                let mut pixel = [0u8; 4];
-                pixel[..bpp].copy_from_slice(&frame[at..at + bpp]);
+        let base = out.len();
+        out.resize(base + rect.area() as usize, 0);
+        // 画面と一致する画素を潰せるのは、透過添字と描かれた画面が揃うときだけ
+        let collapsible = palette.transparent().zip(self.pixels);
 
-                let index = match (transparent, self.pixels) {
-                    (Some(transparent), Some(screen)) if screen[at..at + bpp] == pixel[..bpp] => {
-                        transparent
-                    }
-                    _ => {
-                        let mapped = palette.map(&pixel[..bpp], bpp);
-                        let counter = match mapped.fit {
-                            Fit::Exact => None,
-                            Fit::Approximated { .. } => Some(&mut approximated),
-                            Fit::Substituted { .. } => Some(&mut substituted),
-                        };
-                        if let Some(counter) = counter {
-                            *counter += 1;
-                            let color = palette.color_at(mapped.index).to_le_bytes();
-                            frame[at..at + bpp].copy_from_slice(&color[..bpp]);
+        let mut wrote = base;
+        for y in 0..rect.height as usize {
+            let row = (rect.y as usize + y) * stride + rect.x as usize * BPP;
+            let end = row + rect.width as usize * BPP;
+            let mut at = row;
+            while at < end {
+                if let Some((transparent, screen)) = collapsible {
+                    let stop = unchanged_run::<BPP>(&screen[..end], &frame[..end], at);
+                    if stop > at {
+                        let run = (stop - at) / BPP;
+                        out[wrote..wrote + run].fill(transparent);
+                        palette.mark_used(transparent);
+                        wrote += run;
+                        at = stop;
+                        if at == end {
+                            break;
                         }
-                        mapped.index
                     }
+                }
+                let pixel: [u8; BPP] = frame[at..at + BPP].try_into().expect("1画素");
+                let mapped = palette.map(&pixel, BPP);
+                let counter = match mapped.fit {
+                    Fit::Exact => None,
+                    Fit::Approximated { .. } => Some(&mut approximated),
+                    Fit::Substituted { .. } => Some(&mut substituted),
                 };
-                palette.mark_used(index);
-                out.push(index);
+                if let Some(counter) = counter {
+                    *counter += 1;
+                    let color = palette.color_at(mapped.index).to_le_bytes();
+                    frame[at..at + BPP].copy_from_slice(&color[..BPP]);
+                }
+                palette.mark_used(mapped.index);
+                out[wrote] = mapped.index;
+                wrote += 1;
+                at += BPP;
             }
         }
         Written {
