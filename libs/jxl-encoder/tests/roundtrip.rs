@@ -13,8 +13,22 @@ const TPS_DENOMINATOR: u32 = 1001;
 /// アニメーションの再生回数。±1の混入が値に出るよう1から離す
 const NUM_PLAYS: u32 = 5;
 
-/// 各フレームの表示時間。並びの取り違えが総和と個別の両方に出るよう互いに違える
+/// 各フレームの表示時間。並びの取り違えが出るよう互いに違える
 const DURATIONS: [u32; 3] = [3, 5, 7];
+
+/// 出力が排水の受け皿を超える大きさのキャンバスの一辺
+const LARGE_SIDE: u32 = 256;
+
+/// 位置から決まる雑音。圧縮が効かないので出力が大きくなる
+fn noise_rgba(width: u32, height: u32) -> Vec<u8> {
+    let mut state = 0x1234_5678u32;
+    (0..(width as usize * height as usize * 4))
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 24) as u8
+        })
+        .collect()
+}
 
 /// 横方向と縦方向で滑らかに変わる不透明なRGB。`phase` は絵をずらす
 fn gradient_rgb(phase: u32) -> Vec<u8> {
@@ -63,23 +77,33 @@ fn config(color_type: ColorType) -> Config {
     }
 }
 
-/// `durations` と同じ数のフレームを符号化する
-fn encode(config: Config, durations: &[u32]) -> Vec<u8> {
-    let frames: Vec<Vec<u8>> = (0..durations.len())
-        .map(|index| frame(config.color_type, index as u32 * 5))
-        .collect();
-
-    let mut encoder =
-        Encoder::new(Vec::new(), WIDTH, HEIGHT, durations.len() as u32, config).unwrap();
+/// `width` x `height` の `frames` を符号化する
+fn encode_frames(
+    config: Config,
+    width: u32,
+    height: u32,
+    frames: &[Vec<u8>],
+    durations: &[u32],
+) -> Vec<u8> {
+    let mut encoder = Encoder::new(Vec::new(), width, height, frames.len() as u32, config).unwrap();
     for (frame, duration) in frames.iter().zip(durations) {
         encoder.add_frame(frame, *duration).unwrap();
     }
     encoder.finish().unwrap()
 }
 
+/// `durations` と同じ数の勾配のフレームを符号化する
+fn encode(config: Config, durations: &[u32]) -> Vec<u8> {
+    let frames: Vec<Vec<u8>> = (0..durations.len())
+        .map(|index| frame(config.color_type, index as u32 * 5))
+        .collect();
+    encode_frames(config, WIDTH, HEIGHT, &frames, durations)
+}
+
 /// 読み戻した画像の全体
 struct Decoded {
     info: api::JxlBasicInfo,
+    profile: api::JxlColorProfile,
     frames: Vec<api::VisibleFrameInfo>,
     pixels: Vec<Vec<u8>>,
 }
@@ -104,26 +128,23 @@ fn decode(encoded: &[u8], color_type: ColorType) -> Decoded {
     );
 
     let info = decoder.basic_info().clone();
-    let extra_channels = info.extra_channels.len();
+    let profile = decoder.embedded_color_profile().clone();
+    let (width, height) = info.size;
     decoder.set_pixel_format(match color_type {
-        ColorType::Rgb8 => api::JxlPixelFormat::rgb8(extra_channels),
-        ColorType::Rgba8 => api::JxlPixelFormat::rgba8(extra_channels),
+        ColorType::Rgb8 => api::JxlPixelFormat::rgb8(info.extra_channels.len()),
+        ColorType::Rgba8 => api::JxlPixelFormat::rgba8(info.extra_channels.len()),
     });
 
-    let bytes_per_row = WIDTH as usize * color_type.bytes_per_pixel();
+    let bytes_per_row = width * color_type.bytes_per_pixel();
     let mut pixels = Vec::new();
     while decoder.has_more_frames() {
         let with_frame = complete(
             decoder.process(&mut input, None).unwrap(),
             "フレーム情報の読み出し",
         );
-        let mut frame = vec![0u8; bytes_per_row * HEIGHT as usize];
+        let mut frame = vec![0u8; bytes_per_row * height];
         decoder = {
-            let mut buffers = [api::JxlOutputBuffer::new(
-                &mut frame,
-                HEIGHT as usize,
-                bytes_per_row,
-            )];
+            let mut buffers = [api::JxlOutputBuffer::new(&mut frame, height, bytes_per_row)];
             complete(
                 with_frame.process(&mut input, &mut buffers, None).unwrap(),
                 "画素の読み出し",
@@ -135,11 +156,11 @@ fn decode(encoded: &[u8], color_type: ColorType) -> Decoded {
     Decoded {
         frames: decoder.scanned_frames().to_vec(),
         info,
+        profile,
         pixels,
     }
 }
 
-/// 表示時間は個別と総和の両方で読み戻す
 #[test]
 fn an_animation_carries_its_timing_and_loop_count() {
     let decoded = decode(
@@ -158,11 +179,6 @@ fn an_animation_carries_its_timing_and_loop_count() {
     assert_eq!(decoded.frames.len(), DURATIONS.len());
     let ticks: Vec<u32> = decoded.frames.iter().map(|f| f.duration_ticks).collect();
     assert_eq!(ticks, DURATIONS);
-    assert_eq!(
-        ticks.iter().sum::<u32>(),
-        DURATIONS.iter().sum::<u32>(),
-        "1周の総表示時間が一致しない"
-    );
 }
 
 /// 約した比が書かれる。そのままの比はヘッダの値域から外れて書けない
@@ -245,9 +261,84 @@ fn a_lossy_encoding_decodes_at_the_declared_size() {
     assert_eq!(decoded.info.size, (WIDTH as usize, HEIGHT as usize));
     assert!(!decoded.info.uses_original_profile);
     assert_eq!(decoded.pixels.len(), DURATIONS.len());
-    for pixels in &decoded.pixels {
-        assert_eq!(pixels.len(), (WIDTH * HEIGHT * 4) as usize);
-    }
+}
+
+/// 品質は出力の大きさに現れる
+#[test]
+fn the_quality_reaches_the_output() {
+    let at = |quality| {
+        encode(
+            Config {
+                lossless: false,
+                quality,
+                ..config(ColorType::Rgb8)
+            },
+            &DURATIONS,
+        )
+        .len()
+    };
+    let (low, high) = (at(10.0), at(95.0));
+    assert!(low < high, "品質10で{low}バイト、品質95で{high}バイト");
+}
+
+/// 均衡は出力の中身に現れる
+///
+/// 大きさは均衡に対して単調でないので、バイト列の違いで見る。
+#[test]
+fn the_effort_reaches_the_output() {
+    let at = |effort| {
+        encode(
+            Config {
+                effort,
+                ..config(ColorType::Rgb8)
+            },
+            &DURATIONS,
+        )
+    };
+    assert_ne!(at(1), at(9));
+}
+
+/// 暗黙の既定に依らず、書いた色の解釈とビット深度が読み戻せる
+#[test]
+fn the_color_encoding_and_the_bit_depth_are_read_back() {
+    let decoded = decode(
+        &encode(config(ColorType::Rgb8), &DURATIONS),
+        ColorType::Rgb8,
+    );
+
+    assert_eq!(
+        decoded.info.bit_depth,
+        api::JxlBitDepth::Int { bits_per_sample: 8 }
+    );
+    assert!(
+        decoded.profile == api::JxlColorProfile::Simple(api::JxlColorEncoding::srgb(false)),
+        "sRGBが書かれていない"
+    );
+}
+
+/// 排水の受け皿を何周も回して書いた出力が、欠けずに読み戻せる
+#[test]
+fn a_large_frame_round_trips_across_several_drains() {
+    let config = Config {
+        color_type: ColorType::Rgba8,
+        lossless: true,
+        ..config(ColorType::Rgba8)
+    };
+    let source = noise_rgba(LARGE_SIDE, LARGE_SIDE);
+    let encoded = encode_frames(
+        config,
+        LARGE_SIDE,
+        LARGE_SIDE,
+        std::slice::from_ref(&source),
+        &[1],
+    );
+
+    let decoded = decode(&encoded, ColorType::Rgba8);
+    assert_eq!(
+        decoded.info.size,
+        (LARGE_SIDE as usize, LARGE_SIDE as usize)
+    );
+    assert_eq!(decoded.pixels[0], source);
 }
 
 /// 単葉はアニメーションを持たない静止画になる

@@ -374,6 +374,69 @@ mod tests {
         Encoder::new(Cursor::new(Vec::new()), 16, 16, num_frames, config)
     }
 
+    /// 渡された長さと `flush` の回数を控える writer
+    #[derive(Default)]
+    struct Recorder {
+        writes: Vec<usize>,
+        flushes: u32,
+    }
+
+    impl Write for Recorder {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes.push(buf.len());
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    /// 位置から決まる雑音。圧縮が効かないので出力が受け皿を超える
+    fn noise_rgba(width: u32, height: u32) -> Vec<u8> {
+        let mut state = 0x1234_5678u32;
+        (0..(width as usize * height as usize * 4))
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    /// 受け皿に収まらない出力は、埋まるたびに渡して何周も排水する
+    #[test]
+    fn a_large_frame_drains_in_several_rounds() {
+        let side = 256;
+        let config = Config {
+            color_type: ColorType::Rgba8,
+            lossless: true,
+            ..config()
+        };
+        let mut encoder = Encoder::new(Recorder::default(), side, side, 1, config).unwrap();
+        encoder.add_frame(&noise_rgba(side, side), 1).unwrap();
+
+        let filled = encoder
+            .writer
+            .writes
+            .iter()
+            .filter(|len| **len == OUTPUT_CHUNK)
+            .count();
+        assert!(
+            filled >= 2,
+            "受け皿が埋まったのは {filled} 回だけ: {:?}",
+            encoder.writer.writes
+        );
+    }
+
+    #[test]
+    fn finishing_flushes_the_writer() {
+        let mut encoder = Encoder::new(Recorder::default(), 16, 16, 1, config()).unwrap();
+        encoder.add_frame(&[0; 16 * 16 * 3], 1).unwrap();
+        assert_eq!(encoder.writer.flushes, 0, "投入の途中で flush している");
+        assert_eq!(encoder.finish().unwrap().flushes, 1);
+    }
+
     /// 符号化を作業スレッドへ渡せる
     #[test]
     fn the_encoder_moves_across_threads() {
