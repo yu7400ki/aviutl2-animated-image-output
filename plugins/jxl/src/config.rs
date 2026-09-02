@@ -126,6 +126,9 @@ mod tests {
         assert_eq!(config.max_threads, default.max_threads);
     }
 
+    /// 保存と読み戻しは、どの項目も既定と違う値で突き合わせる
+    ///
+    /// 既定と同じ値を通すと、その項目の書き出しが丸ごと落ちても読み戻しが揃う。
     #[test]
     fn a_saved_config_loads_back_unchanged() {
         let saved = Config {
@@ -134,7 +137,8 @@ mod tests {
             lossless: true,
             quality: 100.0,
             effort: 9,
-            max_threads: available_threads(),
+            // 既定は論理CPU数そのものなので、1つ下を採る
+            max_threads: available_threads().saturating_sub(1).max(1),
         };
 
         let mut ini = Ini::new();

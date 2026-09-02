@@ -174,6 +174,7 @@ register_logger!();
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jxl::api::{self, states::Initialized};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -201,13 +202,17 @@ mod tests {
             .collect()
     }
 
+    /// 書き出しを通す素材の刻み。分子と分母の取り違えが値に出るよう互いに離す
+    const RATE: i32 = 30000;
+    const SCALE: i32 = 1001;
+
     /// フレームを `declared` 枚宣言し、`frames` 枚だけ投入して閉じる
     fn write_animation(path: &Path, declared: u32, frames: u32) -> Result<(), String> {
         let config = Config {
             color_format: ColorFormat::Rgba32,
             ..Config::default()
         };
-        let sequence = Sequence::new(declared as i32, 30, 1).unwrap();
+        let sequence = Sequence::new(declared as i32, RATE, SCALE).unwrap();
 
         write_frames(
             path,
@@ -328,9 +333,38 @@ mod tests {
         assert_eq!(lossless.max_threads, 1);
     }
 
-    /// 書き出しはJPEG XLのcodestreamの印から始まる
+    /// 段を1つ進める。入力を使い切らずに止まったら書き出しが不完全
+    fn complete<T, U>(result: api::ProcessingResult<T, U>) -> T {
+        match result {
+            api::ProcessingResult::Complete { result } => result,
+            api::ProcessingResult::NeedsMoreInput { size_hint, .. } => {
+                panic!("読み出しが入力不足で止まった (あと {size_hint} バイト)")
+            }
+        }
+    }
+
+    /// 書き出した `.jxl` から、アニメーションの設定とフレームの並びを読み出す
+    fn decode(bytes: &[u8]) -> (api::JxlAnimation, Vec<api::VisibleFrameInfo>) {
+        let mut input = bytes;
+        let decoder = api::JxlDecoder::<Initialized>::new(api::JxlDecoderOptions::default());
+        let mut decoder = complete(decoder.process(&mut input, None).unwrap());
+        let animation = decoder
+            .basic_info()
+            .animation
+            .clone()
+            .expect("アニメーションになっていない");
+
+        while decoder.has_more_frames() {
+            let with_frame = complete(decoder.process(&mut input, None).unwrap());
+            decoder = complete(with_frame.skip_frame(&mut input).unwrap());
+        }
+
+        (animation, decoder.scanned_frames().to_vec())
+    }
+
+    /// 書き出しはJPEG XLのcodestreamの印から始まり、素材の刻みと全フレームを持つ
     #[test]
-    fn a_written_file_starts_with_the_jpeg_xl_signature() {
+    fn a_written_file_carries_every_frame_of_the_material() {
         let path = temp_path();
 
         write_animation(&path, 4, 4).unwrap();
@@ -339,6 +373,13 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
 
         assert_eq!(&bytes[..2], &[0xFF, 0x0A]);
+
+        let (animation, frames) = decode(&bytes);
+        assert_eq!(animation.tps_numerator, RATE as u32);
+        assert_eq!(animation.tps_denominator, SCALE as u32);
+        assert_eq!(frames.len(), 4);
+        let ticks: Vec<u32> = frames.iter().map(|frame| frame.duration_ticks).collect();
+        assert_eq!(ticks, [1, 1, 1, 1]);
     }
 
     /// 失敗した書き出しは、書きかけのファイルを残さない

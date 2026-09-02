@@ -15,3 +15,6 @@ windows = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_UI_WindowsAndMessaging",
 ] }
+
+[dev-dependencies]
+jxl = "=0.6.0"

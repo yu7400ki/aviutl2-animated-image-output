@@ -298,21 +298,30 @@ mod tests {
         }
     }
 
-    /// ロスレスでも、品質と均衡は画面に出ている値がそのまま設定になる
+    /// 画面に出ている値は、どの欄もそのまま設定になる
     ///
-    /// 品質はロスレスでは画素を動かさず、均衡はどちらでも時間と大きさを決める。
+    /// ロスレスでも品質と均衡は画素を動かさないまま設定として残り、
+    /// 時間と大きさを決める。
     #[test]
-    fn lossless_keeps_the_quality_and_effort_shown_on_the_dialog() {
+    fn every_field_reaches_the_config() {
+        // 既定は論理CPU数そのものなので、1つ下を採る
+        let threads = available_threads().saturating_sub(1).max(1);
         let inputs = inputs();
+        inputs.num_plays.set_value(7);
+        inputs.color.set_selected_index(1);
         inputs.lossless.set_checked(true);
         inputs.quality.input.set_value(40);
         inputs.effort.input.set_value(2);
+        inputs.threads.input.set_value(threads as i32);
 
         let config = inputs.collect().expect("値域の内側なので組める");
 
+        assert_eq!(config.num_plays, 7);
+        assert!(config.color_format == ColorFormat::Rgba32);
         assert!(config.lossless);
         assert_eq!(config.quality, 40.0);
         assert_eq!(config.effort, 2);
+        assert_eq!(config.max_threads, threads);
     }
 
     /// i32へ折り返す回数を持つiniを読み直しても、ダイアログはその値のまま開ける
