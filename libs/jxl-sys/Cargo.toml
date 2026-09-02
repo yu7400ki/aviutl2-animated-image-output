@@ -7,3 +7,6 @@ links = "jxl"
 [build-dependencies]
 cc = "1"
 cmake = "0.1"
+
+[dev-dependencies]
+jxl = "=0.6.0"
