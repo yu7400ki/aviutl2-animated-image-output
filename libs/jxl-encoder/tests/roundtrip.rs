@@ -263,6 +263,45 @@ fn a_lossy_encoding_decodes_at_the_declared_size() {
     assert_eq!(decoded.pixels.len(), DURATIONS.len());
 }
 
+/// インターリーブされた画素からαだけを取り出す
+fn alpha_channel(rgba: &[u8]) -> Vec<u8> {
+    rgba.chunks_exact(4).map(|pixel| pixel[3]).collect()
+}
+
+/// インターリーブされた画素から色だけを取り出す
+fn color_channels(rgba: &[u8]) -> Vec<u8> {
+    rgba.chunks_exact(4)
+        .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
+        .collect()
+}
+
+/// 色が動く設定でも、αだけは入力のまま残る
+#[test]
+fn a_lossy_encoding_keeps_the_alpha_exact() {
+    let config = Config {
+        lossless: false,
+        quality: 40.0,
+        ..config(ColorType::Rgba8)
+    };
+    let decoded = decode(&encode(config, &DURATIONS), ColorType::Rgba8);
+
+    assert_eq!(decoded.pixels.len(), DURATIONS.len());
+    for (index, pixels) in decoded.pixels.iter().enumerate() {
+        let source = frame(ColorType::Rgba8, index as u32 * 5);
+        assert_eq!(
+            alpha_channel(pixels),
+            alpha_channel(&source),
+            "{} 枚目のαが動いている",
+            index + 1
+        );
+        assert!(
+            color_channels(pixels) != color_channels(&source),
+            "{} 枚目の色が入力と一致していて、非可逆になっていない",
+            index + 1
+        );
+    }
+}
+
 /// 品質は出力の大きさに現れる
 #[test]
 fn the_quality_reaches_the_output() {
