@@ -4,7 +4,7 @@ use crate::block::{DISPOSAL_DO_NOT_DISPOSE, DISPOSAL_RESTORE_TO_BACKGROUND};
 use crate::layout::Layout;
 use crate::normalize::TRANSPARENT;
 use crate::table::{Fit, Palette};
-use anim_core::{ColorType, Rect, dirty_rect};
+use anim_core::{ColorType, Rect, dirty_rect, unchanged_run};
 
 /// 差分の無いフレームが書く矩形
 ///
@@ -350,9 +350,28 @@ impl Canvas {
         stray_floor: u64,
         out: &mut Vec<u8>,
     ) -> Rendered {
-        let bpp = self.layout.bytes_per_pixel;
-        out.clear();
-        out.reserve(self.layout.frame_len);
+        match self.layout.color_type {
+            ColorType::Rgb8 => self.render_bpp::<3>(previous, frame, palette, stray_floor, out),
+            ColorType::Rgba8 => self.render_bpp::<4>(previous, frame, palette, stray_floor, out),
+        }
+    }
+
+    fn render_bpp<const BPP: usize>(
+        &self,
+        previous: &[u8],
+        frame: &[u8],
+        palette: &mut Palette,
+        stray_floor: u64,
+        out: &mut Vec<u8>,
+    ) -> Rendered {
+        let len = self.layout.frame_len;
+        // 全画素を書き直すので、長さが揃っていれば中身は問わない
+        if out.len() != len {
+            out.clear();
+            out.resize(len, 0);
+        }
+        let dst = &mut out[..len];
+        let frame = &frame[..len];
 
         let mut rendered = Rendered {
             approximated: 0,
@@ -363,21 +382,27 @@ impl Canvas {
         };
         // 先頭フレームには前が無く、持ち越せる色も無い
         let carried = self.drawn.then_some((previous, self.after.as_slice()));
-        for (at, pixel) in frame.chunks_exact(bpp).enumerate() {
-            let at = at * bpp;
-            if let Some((previous, drawn)) = carried
-                && previous[at..at + bpp] == *pixel
-            {
-                out.extend_from_slice(&drawn[at..at + bpp]);
-                continue;
+        let mut at = 0;
+        while at + BPP <= len {
+            if let Some((previous, drawn)) = carried {
+                let run = unchanged_run::<BPP>(&previous[..len], frame, at);
+                if run > at {
+                    dst[at..run].copy_from_slice(&drawn[at..run]);
+                    at = run;
+                    if at + BPP > len {
+                        break;
+                    }
+                }
             }
+            let pixel: &[u8; BPP] = frame[at..at + BPP].try_into().expect("1画素");
             // 透過標識は色として写さない。2値透過に中間が無いため、標識のまま
             // 残して廃棄方法の判定へ渡す
-            if bpp == 4 && is_transparent(pixel) {
-                out.extend_from_slice(pixel);
+            if BPP == 4 && is_transparent(pixel) {
+                dst[at..at + BPP].copy_from_slice(pixel);
+                at += BPP;
                 continue;
             }
-            let mapped = palette.map(pixel, bpp);
+            let mapped = palette.map(pixel, BPP);
             rendered.mapped += 1;
             let error = match mapped.fit {
                 Fit::Exact => 0,
@@ -394,7 +419,8 @@ impl Canvas {
             if error > stray_floor {
                 rendered.strayed += 1;
             }
-            out.extend_from_slice(&palette.color_at(mapped.index).to_le_bytes()[..bpp]);
+            dst[at..at + BPP].copy_from_slice(&palette.color_at(mapped.index).to_le_bytes()[..BPP]);
+            at += BPP;
         }
         rendered
     }
