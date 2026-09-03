@@ -54,10 +54,10 @@ fn encoder_config(config: &Config, sequence: Sequence) -> EncoderConfig {
         },
         quality: config.quality,
         effort: config.effort,
-        num_plays: config.num_plays,
+        num_plays: config.repeat,
         tps_numerator: sequence.tps_numerator,
         tps_denominator: sequence.tps_denominator,
-        max_threads: config.max_threads,
+        max_threads: config.threads,
     }
 }
 
@@ -301,8 +301,8 @@ mod tests {
             &Config {
                 quality: 80.0,
                 effort: 3,
-                num_plays: 5,
-                max_threads: 4,
+                repeat: 5,
+                threads: 4,
                 ..Config::default()
             },
             sequence,
@@ -316,8 +316,8 @@ mod tests {
             &Config {
                 quality: 100.0,
                 effort: 9,
-                num_plays: 0,
-                max_threads: 1,
+                repeat: 0,
+                threads: 1,
                 ..Config::default()
             },
             sequence,

@@ -1,4 +1,4 @@
-use crate::config::{ColorFormat, Config, MAX_NUM_PLAYS, available_threads};
+use crate::config::{ColorFormat, Config, MAX_REPEAT, max_threads};
 use jxl_encoder::{EFFORT_RANGE, QUALITY_RANGE};
 use std::ops::RangeInclusive;
 use win32_ui::{
@@ -68,7 +68,7 @@ impl RangedInput {
 /// ダイアログの入力欄
 #[derive(Clone)]
 struct Inputs {
-    num_plays: Number,
+    repeat: Number,
     color: ComboBox,
     quality: RangedInput,
     effort: RangedInput,
@@ -78,9 +78,9 @@ struct Inputs {
 impl Inputs {
     fn new(default_config: &Config) -> Self {
         Inputs {
-            num_plays: Number::new()
-                .value(default_config.num_plays as i32)
-                .range(0, MAX_NUM_PLAYS as i32),
+            repeat: Number::new()
+                .value(default_config.repeat as i32)
+                .range(0, MAX_REPEAT as i32),
             color: ComboBox::new(vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()])
                 .selected(match default_config.color_format {
                     ColorFormat::Rgb24 => 0,
@@ -91,8 +91,8 @@ impl Inputs {
             threads: RangedInput::new(
                 "スレッド数",
                 // 上限は走らせる機械の並列度で決まる
-                1..=available_threads() as i32,
-                default_config.max_threads as i32,
+                1..=max_threads() as i32,
+                default_config.threads as i32,
             ),
         }
     }
@@ -103,7 +103,7 @@ impl Inputs {
             .with_width(SizeValue::Points(300.0))
             .with_padding(15.0)
             .with_gap(10.0)
-            .with_layout(labeled("ループ回数 (0=無限ループ)", self.num_plays.clone()))
+            .with_layout(labeled("ループ回数 (0=無限ループ)", self.repeat.clone()))
             .with_layout(labeled("カラーフォーマット", self.color.clone()))
             .with_layout(labeled(&self.quality.label(), self.quality.input.clone()))
             .with_layout(labeled(&self.effort.label(), self.effort.input.clone()))
@@ -115,8 +115,8 @@ impl Inputs {
     /// # Errors
     /// 読めない欄か値域の外の欄があるとき、画面へ出す文言。
     fn collect(&self) -> Result<Config, String> {
-        let num_plays = self
-            .num_plays
+        let repeat = self
+            .repeat
             .validate()
             .map_err(|_| "ループ回数の値が無効です。0以上の数値を入力してください。".to_string())?;
         let quality = self.quality.read()?;
@@ -124,7 +124,7 @@ impl Inputs {
         let threads = self.threads.read()?;
 
         Ok(Config {
-            num_plays: num_plays as u32,
+            repeat: repeat as u32,
             color_format: match self.color.selected_index() {
                 0 => ColorFormat::Rgb24,
                 1 => ColorFormat::Rgba32,
@@ -132,7 +132,7 @@ impl Inputs {
             },
             quality: quality as f32,
             effort: effort as u8,
-            max_threads: threads as u32,
+            threads: threads as u32,
         })
     }
 }
@@ -200,7 +200,7 @@ mod tests {
     /// 数値を打ち込む4つの入力欄
     fn number_inputs(inputs: &Inputs) -> [(&'static str, Number); 4] {
         [
-            ("ループ回数", inputs.num_plays.clone()),
+            ("ループ回数", inputs.repeat.clone()),
             ("品質", inputs.quality.input.clone()),
             ("均衡", inputs.effort.input.clone()),
             ("スレッド数", inputs.threads.input.clone()),
@@ -298,9 +298,9 @@ mod tests {
     #[test]
     fn every_field_reaches_the_config() {
         // 既定は論理CPU数の半分なので、値域の上端を採る
-        let threads = available_threads();
+        let threads = max_threads();
         let inputs = inputs();
-        inputs.num_plays.set_value(7);
+        inputs.repeat.set_value(7);
         inputs.color.set_selected_index(1);
         inputs.quality.input.set_value(40);
         inputs.effort.input.set_value(2);
@@ -308,11 +308,11 @@ mod tests {
 
         let config = inputs.collect().expect("値域の内側なので組める");
 
-        assert_eq!(config.num_plays, 7);
+        assert_eq!(config.repeat, 7);
         assert!(config.color_format == ColorFormat::Rgba32);
         assert_eq!(config.quality, 40.0);
         assert_eq!(config.effort, 2);
-        assert_eq!(config.max_threads, threads);
+        assert_eq!(config.threads, threads);
     }
 
     /// i32へ折り返す回数を持つiniを読み直しても、ダイアログはその値のまま開ける
@@ -320,21 +320,21 @@ mod tests {
     fn a_number_of_plays_read_from_the_ini_fits_the_input() {
         let mut ini = Ini::new();
         ini.with_section(Some(Config::SECTION))
-            .set("num_plays", "3000000000");
+            .set("repeat", "3000000000");
         let config = Config::load_from(ini.section(Some(Config::SECTION)));
 
         let collected = Inputs::new(&config)
             .collect()
             .expect("入力欄が扱える値になっている");
 
-        assert_eq!(collected.num_plays, config.num_plays);
+        assert_eq!(collected.repeat, config.repeat);
     }
 
     /// ループ回数は0以上を受け取り、弾いたときの文言もそれを名乗る
     #[test]
     fn a_negative_number_of_plays_is_refused() {
         let inputs = inputs();
-        inputs.num_plays.set_value(-1);
+        inputs.repeat.set_value(-1);
 
         let Err(message) = inputs.collect() else {
             panic!("0より小さいループ回数は弾かれる");

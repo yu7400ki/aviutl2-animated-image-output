@@ -1,4 +1,4 @@
-use crate::config::{ColorFormat, Config, max_workers};
+use crate::config::{ColorFormat, Config, max_threads};
 use std::ops::RangeInclusive;
 use webp_encoder::{METHOD_RANGE, QUALITY_RANGE};
 use win32_ui::{
@@ -73,7 +73,7 @@ struct Inputs {
     lossless: CheckBox,
     quality: RangedInput,
     method: RangedInput,
-    workers: RangedInput,
+    threads: RangedInput,
 }
 
 impl Inputs {
@@ -90,11 +90,11 @@ impl Inputs {
             lossless: CheckBox::new("ロスレス圧縮").checked(default_config.lossless),
             quality: RangedInput::new("品質", quality_range(), default_config.quality as i32),
             method: RangedInput::new("メソッド", method_range(), default_config.method as i32),
-            workers: RangedInput::new(
-                "ワーカー数",
+            threads: RangedInput::new(
+                "スレッド数",
                 // 上限は走らせる機械の並列度で決まる
-                1..=max_workers() as i32,
-                default_config.workers as i32,
+                1..=max_threads() as i32,
+                default_config.threads as i32,
             ),
         }
     }
@@ -110,7 +110,7 @@ impl Inputs {
             .with_widget(self.lossless.clone())
             .with_layout(labeled(&self.quality.label(), self.quality.input.clone()))
             .with_layout(labeled(&self.method.label(), self.method.input.clone()))
-            .with_layout(labeled(&self.workers.label(), self.workers.input.clone()))
+            .with_layout(labeled(&self.threads.label(), self.threads.input.clone()))
     }
 
     /// 入力欄の値を設定へ組む
@@ -122,7 +122,7 @@ impl Inputs {
             .repeat
             .validate()
             .map_err(|_| "ループ回数の値が無効です。0以上の数値を入力してください。".to_string())?;
-        let workers = self.workers.read()?;
+        let threads = self.threads.read()?;
         let quality = self.quality.read()?;
         let method = self.method.read()?;
 
@@ -136,7 +136,7 @@ impl Inputs {
             lossless: self.lossless.is_checked(),
             quality: quality as f32,
             method: method as u8,
-            workers: workers as usize,
+            threads: threads as usize,
         })
     }
 }
@@ -198,7 +198,7 @@ mod tests {
         [
             inputs.quality.clone(),
             inputs.method.clone(),
-            inputs.workers.clone(),
+            inputs.threads.clone(),
         ]
     }
 
@@ -208,7 +208,7 @@ mod tests {
             ("ループ回数", inputs.repeat.clone()),
             ("品質", inputs.quality.input.clone()),
             ("メソッド", inputs.method.input.clone()),
-            ("ワーカー数", inputs.workers.input.clone()),
+            ("スレッド数", inputs.threads.input.clone()),
         ]
     }
 
@@ -248,24 +248,24 @@ mod tests {
         assert!(inputs.collect().is_ok(), "値域へ戻せば組める");
     }
 
-    /// ワーカー数の値域も、打ち込みに対して効く
+    /// スレッド数の値域も、打ち込みに対して効く
     #[test]
     fn an_out_of_range_worker_count_is_refused() {
         let inputs = inputs();
-        let range = inputs.workers.range.clone();
+        let range = inputs.threads.range.clone();
 
-        inputs.workers.input.set_value(*range.start() - 1);
+        inputs.threads.input.set_value(*range.start() - 1);
         assert!(inputs.collect().is_err(), "下限より下");
-        inputs.workers.input.set_value(*range.end() + 1);
+        inputs.threads.input.set_value(*range.end() + 1);
         assert!(inputs.collect().is_err(), "上限より上");
-        inputs.workers.input.set_value(*range.end());
+        inputs.threads.input.set_value(*range.end());
         assert!(inputs.collect().is_ok(), "上限そのもの");
     }
 
     /// 項目名も、値域の外を弾いたときの文言も、検める値域をそのまま名乗る
     #[test]
     fn every_field_names_the_range_that_is_checked() {
-        for name in ["品質", "メソッド", "ワーカー数"] {
+        for name in ["品質", "メソッド", "スレッド数"] {
             let inputs = inputs();
             let field = ranged_inputs(&inputs)
                 .into_iter()
@@ -289,7 +289,7 @@ mod tests {
     /// どの数値欄も、前後に空白のある入力を等しく受け取る
     #[test]
     fn every_number_field_accepts_surrounding_whitespace() {
-        for name in ["ループ回数", "品質", "メソッド", "ワーカー数"] {
+        for name in ["ループ回数", "品質", "メソッド", "スレッド数"] {
             let inputs = inputs();
             let (_, input) = number_inputs(&inputs)
                 .into_iter()

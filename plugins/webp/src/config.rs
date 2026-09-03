@@ -5,10 +5,10 @@ use std::num::NonZeroUsize;
 use std::thread::available_parallelism;
 use webp_encoder::{METHOD_RANGE, QUALITY_RANGE};
 
-/// 設定が採れるワーカー数の上限
+/// 設定が採れるスレッド数の上限
 ///
 /// この機械の論理CPU数。読めなければ1を返す。
-pub fn max_workers() -> usize {
+pub fn max_threads() -> usize {
     available_parallelism().map_or(1, NonZeroUsize::get)
 }
 
@@ -19,7 +19,7 @@ pub struct Config {
     pub lossless: bool,
     pub quality: f32,
     pub method: u8,
-    pub workers: usize,
+    pub threads: usize,
 }
 
 impl Default for Config {
@@ -30,7 +30,7 @@ impl Default for Config {
             lossless: false,
             quality: 75.0,
             method: 4,
-            workers: (max_workers() / 2).max(1),
+            threads: (max_threads() / 2).max(1),
         }
     }
 }
@@ -68,11 +68,11 @@ impl IniConfig for Config {
             .unwrap_or(default.method)
             .clamp(*METHOD_RANGE.start(), *METHOD_RANGE.end());
 
-        let workers = section
-            .and_then(|s| s.get("workers"))
+        let threads = section
+            .and_then(|s| s.get("threads"))
             .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(default.workers)
-            .clamp(1, max_workers());
+            .unwrap_or(default.threads)
+            .clamp(1, max_threads());
 
         Self {
             repeat,
@@ -80,7 +80,7 @@ impl IniConfig for Config {
             lossless,
             quality,
             method,
-            workers,
+            threads,
         }
     }
 
@@ -91,7 +91,7 @@ impl IniConfig for Config {
             .set("lossless", self.lossless.to_string())
             .set("quality", self.quality.to_string())
             .set("method", self.method.to_string())
-            .set("workers", self.workers.to_string());
+            .set("threads", self.threads.to_string());
     }
 }
 
@@ -118,7 +118,7 @@ mod tests {
         assert_eq!(config.lossless, default.lossless);
         assert_eq!(config.quality, default.quality);
         assert_eq!(config.method, default.method);
-        assert_eq!(config.workers, default.workers);
+        assert_eq!(config.threads, default.threads);
     }
 
     #[test]
@@ -129,7 +129,7 @@ mod tests {
             lossless: true,
             quality: 100.0,
             method: 6,
-            workers: max_workers(),
+            threads: max_threads(),
         };
 
         let mut ini = Ini::new();
@@ -141,7 +141,7 @@ mod tests {
         assert_eq!(loaded.lossless, saved.lossless);
         assert_eq!(loaded.quality, saved.quality);
         assert_eq!(loaded.method, saved.method);
-        assert_eq!(loaded.workers, saved.workers);
+        assert_eq!(loaded.threads, saved.threads);
     }
 
     /// 設定ファイルの中身をそのまま読み、セクション名と項目名まで含めて確かめる
@@ -174,25 +174,25 @@ method=3
         assert_eq!(config.method, *METHOD_RANGE.end());
     }
 
-    /// 値域の外のワーカー数は、走らせる機械の並列度の内側へ収まる
+    /// 値域の外のスレッド数は、走らせる機械の並列度の内側へ収まる
     ///
     /// 別の機械で書いた ini をそのまま読んでも、この機械で意味のある数になる。
     #[test]
-    fn out_of_range_workers_are_clamped() {
-        let over = (max_workers() + 1).to_string();
+    fn out_of_range_threads_are_clamped() {
+        let over = (max_threads() + 1).to_string();
 
-        assert_eq!(load(&[("workers", "0")]).workers, 1);
-        assert_eq!(load(&[("workers", &over)]).workers, max_workers());
+        assert_eq!(load(&[("threads", "0")]).threads, 1);
+        assert_eq!(load(&[("threads", &over)]).threads, max_threads());
     }
 
-    /// 既定のワーカー数は上限の内側で控えめに採る
+    /// 既定のスレッド数は上限の内側で控えめに採る
     ///
     /// 上限をそのまま採ると、書き出しが機械を独り占めする。上限が1の機械では
     /// 1つしか採れないので、そこだけ上限と一致する。
     #[test]
-    fn the_default_workers_stay_inside_the_ceiling() {
-        let default = Config::default().workers;
-        let ceiling = max_workers();
+    fn the_default_threads_stay_inside_the_ceiling() {
+        let default = Config::default().threads;
+        let ceiling = max_threads();
 
         assert!(default >= 1, "{default}");
         assert!(default <= ceiling, "{default} / {ceiling}");

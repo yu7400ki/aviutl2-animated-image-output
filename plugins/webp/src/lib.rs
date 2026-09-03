@@ -33,9 +33,9 @@ fn encoder_config(config: &Config) -> EncoderConfig {
     }
 }
 
-/// 設定のワーカー数をエンコーダへ渡す形にする
+/// 設定のスレッド数をエンコーダのワーカー数へ渡す形にする
 fn encoder_workers(config: &Config) -> NonZeroUsize {
-    NonZeroUsize::new(config.workers).unwrap_or(NonZeroUsize::MIN)
+    NonZeroUsize::new(config.threads).unwrap_or(NonZeroUsize::MIN)
 }
 
 /// ログの深刻さ
@@ -338,15 +338,15 @@ mod tests {
     }
 
     #[test]
-    fn workers_are_passed_through_as_the_number_to_wake() {
-        for workers in [1, 2, 7] {
+    fn threads_are_passed_through_as_the_number_to_wake() {
+        for threads in [1, 2, 7] {
             assert_eq!(
                 encoder_workers(&Config {
-                    workers,
+                    threads,
                     ..Config::default()
                 })
                 .get(),
-                workers
+                threads
             );
         }
     }
@@ -356,7 +356,7 @@ mod tests {
     fn a_zero_worker_count_becomes_one() {
         assert_eq!(
             encoder_workers(&Config {
-                workers: 0,
+                threads: 0,
                 ..Config::default()
             })
             .get(),
