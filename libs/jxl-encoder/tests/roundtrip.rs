@@ -3,7 +3,7 @@
 use jxl::api::{self, states::Initialized};
 use jxl::bit_reader::BitReader;
 use jxl::headers::encodings::UnconditionalCoder;
-use jxl::headers::frame_header::FrameHeader;
+use jxl::headers::frame_header::{BlendingMode, FrameHeader};
 use jxl::headers::{FileHeader, JxlHeader};
 use jxl_encoder::{ColorType, Config, Encoder, QUALITY_RANGE};
 
@@ -543,4 +543,75 @@ fn the_first_frame_covers_the_canvas() {
 
     assert_eq!(rects(&decoded.headers), [WHOLE, DOT]);
     assert_eq!(decoded.pixels, input);
+}
+
+/// 部分フレームは、直前のフレームが合成後を置いたスロットを土台にする
+#[test]
+fn a_partial_frame_chains_through_a_reference_slot() {
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        let decoded = decode(&encode_blocks(config(color_type)), color_type);
+        let headers = &decoded.headers;
+        assert_eq!(headers.len(), BLOCK_DURATIONS.len(), "{color_type:?}");
+
+        for (index, header) in headers.iter().enumerate() {
+            let at = format!("{color_type:?} の {} 枚目", index + 1);
+            assert_eq!(header.blending_info.mode, BlendingMode::Replace, "{at}");
+
+            // 全面REPLACEでは土台の欄が、最終フレームでは置き先の欄が書かれない
+            if index > 0 {
+                assert_eq!(
+                    header.blending_info.source,
+                    headers[index - 1].save_as_reference,
+                    "{at} の土台が、直前のフレームの置き先と違う"
+                );
+                assert_ne!(header.blending_info.source, 0, "{at} の土台が空のスロット");
+                if !header.is_last {
+                    assert_eq!(
+                        header.save_as_reference, header.blending_info.source,
+                        "{at}"
+                    );
+                }
+            }
+
+            if color_type == ColorType::Rgba8 {
+                assert_eq!(header.ec_blending_info.len(), 1, "{at}");
+                assert_eq!(
+                    header.ec_blending_info[0].mode,
+                    BlendingMode::Replace,
+                    "{at} のαの重ね方が色と違う"
+                );
+                assert_eq!(
+                    header.ec_blending_info[0].source, header.blending_info.source,
+                    "{at} のαの土台が色と違う"
+                );
+            }
+        }
+    }
+}
+
+/// 色が動く設定でも、部分フレームの矩形の内と外でαが入力のまま残る
+#[test]
+fn a_lossy_partial_frame_keeps_the_alpha_exact() {
+    let color_type = ColorType::Rgba8;
+    let config = Config {
+        quality: 40.0,
+        ..config(color_type)
+    };
+    let frames = block_frames(color_type);
+    let decoded = decode(&encode_blocks(config), color_type);
+
+    assert_eq!(decoded.pixels.len(), frames.len());
+    for (index, (pixels, source)) in decoded.pixels.iter().zip(&frames).enumerate() {
+        assert_eq!(
+            alpha_channel(pixels),
+            alpha_channel(source),
+            "{} 枚目のαが動いている",
+            index + 1
+        );
+        assert!(
+            color_channels(pixels) != color_channels(source),
+            "{} 枚目の色が入力と一致していて、非可逆になっていない",
+            index + 1
+        );
+    }
 }
