@@ -615,3 +615,64 @@ fn a_lossy_partial_frame_keeps_the_alpha_exact() {
         );
     }
 }
+
+/// 各フレームのtick数
+fn ticks(decoded: &Decoded) -> Vec<u32> {
+    decoded
+        .frames
+        .iter()
+        .map(|frame| frame.duration_ticks)
+        .collect()
+}
+
+/// 差分の無いフレームは、書き出しを待っているフレームの表示時間へ畳まれる
+///
+/// 畳みは列の中間でも末尾でも起きる。
+#[test]
+fn identical_frames_fold_into_the_pending_duration() {
+    let color_type = ColorType::Rgba8;
+    let frames = block_frames(color_type);
+    let input = [
+        frames[0].clone(),
+        frames[1].clone(),
+        frames[1].clone(),
+        frames[2].clone(),
+        frames[2].clone(),
+    ];
+    let durations = [3, 5, 7, 11, 13];
+
+    let encoded = encode_frames(config(color_type), WIDTH, HEIGHT, &input, &durations);
+    let decoded = decode(&encoded, color_type);
+
+    assert!(
+        decoded.frames.len() < input.len(),
+        "{} 枚が畳まれずに残っている",
+        decoded.frames.len()
+    );
+    assert_eq!(ticks(&decoded), [3, 12, 24]);
+    assert_eq!(
+        ticks(&decoded).iter().sum::<u32>(),
+        durations.iter().sum::<u32>(),
+        "1周の総表示時間が動いている"
+    );
+    assert_eq!(rects(&decoded.headers), [WHOLE, BLOCKS[0], BLOCKS[1]]);
+    assert_eq!(
+        decoded.pixels,
+        [frames[0].clone(), frames[1].clone(), frames[2].clone()]
+    );
+}
+
+/// `u32` に収まらない表示時間は、そこでフレームを分けて持つ
+#[test]
+fn a_duration_beyond_the_writable_range_splits_the_frame() {
+    let color_type = ColorType::Rgb8;
+    let source = frame(color_type, 0);
+    let durations = [u32::MAX, 5];
+
+    let input = [source.clone(), source];
+    let encoded = encode_frames(config(color_type), WIDTH, HEIGHT, &input, &durations);
+    let decoded = decode(&encoded, color_type);
+
+    assert_eq!(ticks(&decoded), durations);
+    assert_eq!(decoded.pixels, input);
+}
