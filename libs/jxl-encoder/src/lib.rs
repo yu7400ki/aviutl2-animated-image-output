@@ -1,5 +1,6 @@
 //! JPEG XLエンコーダ
 
+mod delta;
 mod encoder;
 mod error;
 mod layout;

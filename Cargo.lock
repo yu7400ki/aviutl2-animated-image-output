@@ -284,6 +284,7 @@ dependencies = [
 name = "jxl_encoder"
 version = "0.1.0"
 dependencies = [
+ "anim_core",
  "jxl",
  "jxl-sys",
 ]

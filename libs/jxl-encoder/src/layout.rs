@@ -44,6 +44,10 @@ pub(crate) struct Layout {
     pub(crate) height: u32,
     /// 入力の色種別
     pub(crate) color_type: ColorType,
+    /// 入力の1画素あたりのバイト数
+    pub(crate) bytes_per_pixel: usize,
+    /// 入力の1行のバイト数
+    pub(crate) stride: usize,
     /// 入力の1フレームのバイト数
     pub(crate) frame_len: usize,
 }
@@ -60,11 +64,15 @@ impl Layout {
             return Err(Error::InvalidDimensions { width, height });
         }
 
+        let bytes_per_pixel = color_type.bytes_per_pixel();
+        let stride = width as usize * bytes_per_pixel;
         Ok(Layout {
             width,
             height,
             color_type,
-            frame_len: width as usize * height as usize * color_type.bytes_per_pixel(),
+            bytes_per_pixel,
+            stride,
+            frame_len: stride * height as usize,
         })
     }
 
@@ -115,6 +123,7 @@ mod tests {
     #[test]
     fn a_large_canvas_keeps_its_length_in_usize() {
         let layout = Layout::new(100_000, 100_000, ColorType::Rgba8).unwrap();
+        assert_eq!(layout.stride, 400_000);
         assert_eq!(layout.frame_len, 40_000_000_000);
     }
 

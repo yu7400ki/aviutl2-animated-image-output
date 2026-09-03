@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anim_core = { path = "../anim-core" }
 jxl-sys = { path = "../jxl-sys" }
 
 [dev-dependencies]

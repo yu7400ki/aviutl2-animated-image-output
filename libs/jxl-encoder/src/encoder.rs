@@ -1,5 +1,6 @@
 //! `JxlEncoder` と並列実行器のRAII、および全体の駆動
 
+use crate::delta::{Delta, Pending, Region};
 use crate::error::{EncodingError, Error};
 use crate::layout::Layout;
 use crate::{Config, EFFORT_RANGE, QUALITY_RANGE};
@@ -23,6 +24,9 @@ use std::ptr;
 
 /// 1度の排水で受け取るバイト数
 const OUTPUT_CHUNK: usize = 64 * 1024;
+
+/// フレームが土台にし、合成後のキャンバスを置く参照スロット
+const REFERENCE_SLOT: u32 = 1;
 
 /// `JxlAnimationHeader::tps_numerator` が採れる値
 const TPS_NUMERATOR_RANGE: RangeInclusive<u32> = 1..=(1 << 30);
@@ -148,7 +152,9 @@ impl Drop for Raw {
 /// フレームを投入し、[`Encoder::finish`] で閉じる。
 ///
 /// フレーム数が2以上ならアニメーションになり、1なら静止画になる。
-/// 符号化した内容は [`Encoder::add_frame`] ごとに `writer` へ流れる。
+/// `writer` への書き出しは1フレーム遅れる。
+///
+/// キャンバス2面ぶんまでの画素を抱える (1920x1080のRGBA8で約16.6MB)。
 pub struct Encoder<W: Write> {
     writer: W,
     raw: Raw,
@@ -156,6 +162,8 @@ pub struct Encoder<W: Write> {
     settings: *mut JxlEncoderFrameSettings,
     format: JxlPixelFormat,
     layout: Layout,
+    /// 書き出しを待っているフレームとキャンバスの追跡
+    delta: Delta,
     num_frames: u32,
     /// [`Self::add_frame`] が受け付けたフレーム数
     frames_accepted: u32,
@@ -257,24 +265,32 @@ impl<W: Write> Encoder<W> {
                 align: 0,
             },
             layout,
+            delta: Delta::new(),
             num_frames,
             frames_accepted: 0,
             chunk: vec![0; OUTPUT_CHUNK],
         })
     }
 
-    /// フレームを1つ投入し、書き出せる分を `writer` へ流す
+    /// フレームを1つ投入する
     ///
     /// `data` は [`Config::color_type`] の画素が左上から右下へ隙間なく並んで
     /// いること。`duration` は [`Config::tps_numerator`] と
     /// [`Config::tps_denominator`] が決める tick 数の表示時間で、静止画では
     /// 書かれない。
     ///
+    /// 投入されたフレームはその場では書き出さず、書き直す範囲が決まる次の
+    /// 呼び出し、または [`Encoder::finish`] で書き出す。直前に投入されたフレームと
+    /// 一致する内容は、そちらの表示時間へ畳まれる。
+    ///
     /// # Errors
     /// 宣言したフレーム数を超えたとき [`Error::FrameCountMismatch`]。表示時間が
     /// 0のとき [`Error::InvalidDuration`]。バイト数が寸法と色種別から決まる長さと
     /// 違うとき [`Error::FrameSizeMismatch`]。符号化に失敗したとき
     /// [`Error::Encode`]。書き出しに失敗したとき [`Error::Io`]。
+    ///
+    /// 符号化と書き出しの失敗は1つ前に投入されたフレームのものになる。最後に
+    /// 投入したフレームの書き出しは [`Encoder::finish`] で報告される。
     pub fn add_frame(&mut self, data: &[u8], duration: u32) -> Result<(), Error> {
         if self.frames_accepted == self.num_frames {
             return Err(Error::FrameCountMismatch {
@@ -287,25 +303,45 @@ impl<W: Write> Encoder<W> {
         }
         self.layout.check_frame(data)?;
 
+        self.frames_accepted += 1;
+        if let Some(pending) = self.delta.advance(&self.layout, data, duration) {
+            self.write(pending, false)?;
+        }
+        Ok(())
+    }
+
+    /// 取り出したフレームを符号化し、書き出せる分を `writer` へ流す
+    ///
+    /// `last` はこれがストリームの最後のフレームであることを表す。
+    fn write(&mut self, pending: Pending, last: bool) -> Result<(), Error> {
         let mut header = MaybeUninit::<JxlFrameHeader>::zeroed();
         unsafe { JxlEncoderInitFrameHeader(header.as_mut_ptr()) };
         let mut header = unsafe { header.assume_init() };
-        header.duration = duration;
+        header.duration = pending.duration;
+        header.layer_info.blend_info.source = REFERENCE_SLOT;
+        header.layer_info.save_as_reference = REFERENCE_SLOT;
+        if let Region::Part(rect) = pending.region {
+            header.layer_info.have_crop = JXL_TRUE;
+            header.layer_info.crop_x0 = rect.x as i32;
+            header.layer_info.crop_y0 = rect.y as i32;
+            header.layer_info.xsize = rect.width;
+            header.layer_info.ysize = rect.height;
+        }
         self.raw
             .check(unsafe { JxlEncoderSetFrameHeader(self.settings, &header) })?;
 
+        let pixels = self.delta.pixels();
         self.raw.check(unsafe {
             JxlEncoderAddImageFrame(
                 self.settings,
                 &self.format,
-                data.as_ptr().cast::<c_void>(),
-                data.len(),
+                pixels.as_ptr().cast::<c_void>(),
+                pixels.len(),
             )
         })?;
-        self.frames_accepted += 1;
 
         // 最後のフレームかどうかは排水した時点の状態で焼き込まれる
-        if self.frames_accepted == self.num_frames {
+        if last {
             unsafe { JxlEncoderCloseInput(self.raw.enc) };
         }
         self.drain()
@@ -329,20 +365,25 @@ impl<W: Write> Encoder<W> {
         }
     }
 
-    /// 残りを書き切って `writer` を返す
+    /// 最後に投入されたフレームを書き出し、`writer` を返す
     ///
     /// # Errors
     /// 投入されたフレーム数が宣言したフレーム数に満たないとき
-    /// [`Error::FrameCountMismatch`]。符号化に失敗したとき [`Error::Encode`]。
-    /// 書き出しに失敗したとき [`Error::Io`]。
+    /// [`Error::FrameCountMismatch`]。このとき、投入されたフレームがあれば
+    /// 書き出してストリームを閉じてから返す。符号化に失敗したとき
+    /// [`Error::Encode`]。書き出しに失敗したとき [`Error::Io`]。
     pub fn finish(mut self) -> Result<W, Error> {
-        if self.frames_accepted != self.num_frames {
-            return Err(Error::FrameCountMismatch {
+        let mismatch =
+            (self.frames_accepted != self.num_frames).then_some(Error::FrameCountMismatch {
                 expected: self.num_frames,
                 actual: self.frames_accepted,
             });
+        if let Some(pending) = self.delta.take(&self.layout) {
+            self.write(pending, true)?;
         }
-        self.drain()?;
+        if let Some(mismatch) = mismatch {
+            return Err(mismatch);
+        }
 
         let Encoder { mut writer, .. } = self;
         writer.flush()?;
@@ -371,6 +412,16 @@ mod tests {
 
     fn encoder(num_frames: u32, config: Config) -> Result<Encoder<Cursor<Vec<u8>>>, Error> {
         Encoder::new(Cursor::new(Vec::new()), 16, 16, num_frames, config)
+    }
+
+    /// `index` 番目の画素だけが白いRGB8のフレーム
+    ///
+    /// 隣り合う `index` どうしの差分の外接矩形はキャンバスの一部に収まる。
+    fn dot(index: usize) -> Vec<u8> {
+        let mut frame = vec![0u8; 16 * 16 * 3];
+        let at = (index % (16 * 16)) * 3;
+        frame[at..at + 3].fill(0xFF);
+        frame
     }
 
     /// 渡された長さと `flush` の回数を控える writer
@@ -414,9 +465,9 @@ mod tests {
         };
         let mut encoder = Encoder::new(Recorder::default(), side, side, 1, config).unwrap();
         encoder.add_frame(&noise_rgba(side, side), 1).unwrap();
+        let recorder = encoder.finish().unwrap();
 
-        let filled = encoder
-            .writer
+        let filled = recorder
             .writes
             .iter()
             .filter(|len| **len == OUTPUT_CHUNK)
@@ -424,7 +475,7 @@ mod tests {
         assert!(
             filled >= 2,
             "受け皿が埋まったのは {filled} 回だけ: {:?}",
-            encoder.writer.writes
+            recorder.writes
         );
     }
 
@@ -556,7 +607,7 @@ mod tests {
         assert!(matches!(Tps::new(2, 2050), Err(Error::InvalidTps { .. })));
     }
 
-    /// 約した比が渡るので、そのままなら書けない比でも投入まで通る
+    /// 約した比が渡るので、そのままなら書けない比でも符号化まで通る
     #[test]
     fn a_reducible_tps_reaches_the_encoder() {
         let mut encoder = encoder(
@@ -568,7 +619,9 @@ mod tests {
             },
         )
         .unwrap();
-        encoder.add_frame(&[0; 16 * 16 * 3], 1).unwrap();
+        encoder.add_frame(&dot(0), 1).unwrap();
+        encoder.add_frame(&dot(1), 1).unwrap();
+        encoder.finish().unwrap();
     }
 
     #[test]
@@ -652,18 +705,18 @@ mod tests {
         ));
     }
 
-    /// フレームごとに writer へ流れ、ファイル全体が溜まらない
+    /// フレームは1枚遅れて writer へ流れ、ファイル全体が溜まらない
     #[test]
-    fn each_frame_reaches_the_writer_as_it_is_added() {
+    fn each_frame_reaches_the_writer_one_frame_behind() {
         let mut encoder = encoder(3, config()).unwrap();
         let mut written = Vec::new();
-        for _ in 0..3 {
-            encoder.add_frame(&[0; 16 * 16 * 3], 1).unwrap();
+        for index in 0..3 {
+            encoder.add_frame(&dot(index), 1).unwrap();
             written.push(encoder.writer.position());
         }
-        assert!(written[0] > 0, "1枚目の時点で何も書かれていない");
-        assert!(written[1] > written[0], "2枚目が溜め込まれている");
-        assert!(written[2] > written[1], "3枚目が溜め込まれている");
+        assert_eq!(written[0], 0, "1枚目が投入と同時に書き出されている");
+        assert!(written[1] > 0, "1枚目が2枚目の投入で流れていない");
+        assert!(written[2] > written[1], "2枚目が溜め込まれている");
     }
 
     #[test]
