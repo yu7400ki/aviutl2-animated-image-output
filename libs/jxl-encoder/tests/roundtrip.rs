@@ -1,7 +1,7 @@
 //! 符号化した .jxl を jxl-rs で読み直し、入力と設定に照らす
 
 use jxl::api::{self, states::Initialized};
-use jxl_encoder::{ColorType, Config, Encoder};
+use jxl_encoder::{ColorType, Config, Encoder, QUALITY_RANGE};
 
 const WIDTH: u32 = 48;
 const HEIGHT: u32 = 32;
@@ -67,8 +67,7 @@ fn frame(color_type: ColorType, phase: u32) -> Vec<u8> {
 fn config(color_type: ColorType) -> Config {
     Config {
         color_type,
-        lossless: true,
-        quality: 90.0,
+        quality: *QUALITY_RANGE.end(),
         effort: 3,
         num_plays: NUM_PLAYS,
         tps_numerator: TPS_NUMERATOR,
@@ -220,6 +219,7 @@ fn the_last_frame_closes_the_stream() {
 fn a_lossless_animation_round_trips_byte_for_byte() {
     for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
         let decoded = decode(&encode(config(color_type), &DURATIONS), color_type);
+        assert!(decoded.info.uses_original_profile, "{color_type:?}");
         assert_eq!(decoded.pixels.len(), DURATIONS.len());
         for (index, pixels) in decoded.pixels.iter().enumerate() {
             assert_eq!(
@@ -252,7 +252,6 @@ fn the_alpha_channel_follows_the_color_type() {
 #[test]
 fn a_lossy_encoding_decodes_at_the_declared_size() {
     let config = Config {
-        lossless: false,
         quality: 80.0,
         ..config(ColorType::Rgba8)
     };
@@ -279,7 +278,6 @@ fn color_channels(rgba: &[u8]) -> Vec<u8> {
 #[test]
 fn a_lossy_encoding_keeps_the_alpha_exact() {
     let config = Config {
-        lossless: false,
         quality: 40.0,
         ..config(ColorType::Rgba8)
     };
@@ -308,7 +306,6 @@ fn the_quality_reaches_the_output() {
     let at = |quality| {
         encode(
             Config {
-                lossless: false,
                 quality,
                 ..config(ColorType::Rgb8)
             },
@@ -360,7 +357,6 @@ fn the_color_encoding_and_the_bit_depth_are_read_back() {
 fn a_large_frame_round_trips_across_several_drains() {
     let config = Config {
         color_type: ColorType::Rgba8,
-        lossless: true,
         ..config(ColorType::Rgba8)
     };
     let source = noise_rgba(LARGE_SIDE, LARGE_SIDE);
@@ -390,31 +386,4 @@ fn a_single_leaf_is_a_still_image() {
     assert_eq!(decoded.frames.len(), 1);
     assert!(decoded.frames[0].is_last);
     assert_eq!(decoded.pixels[0], gradient_rgb(0));
-}
-
-/// 品質の上限は可逆の指定と同じ出力経路を通る
-#[test]
-fn the_top_quality_takes_the_lossless_path() {
-    let by_quality = Config {
-        lossless: false,
-        quality: 100.0,
-        ..config(ColorType::Rgba8)
-    };
-    let by_flag = Config {
-        lossless: true,
-        quality: 0.0,
-        ..config(ColorType::Rgba8)
-    };
-
-    let decoded = decode(&encode(by_quality, &DURATIONS), ColorType::Rgba8);
-    assert!(decoded.info.uses_original_profile);
-    for (index, pixels) in decoded.pixels.iter().enumerate() {
-        assert_eq!(pixels, &gradient_rgba(index as u32 * 5));
-    }
-
-    assert_eq!(
-        encode(by_quality, &DURATIONS),
-        encode(by_flag, &DURATIONS),
-        "品質の上限が可逆と違うストリームを書いている"
-    );
 }

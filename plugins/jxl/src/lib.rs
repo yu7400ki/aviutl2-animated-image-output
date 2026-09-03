@@ -52,7 +52,6 @@ fn encoder_config(config: &Config, sequence: Sequence) -> EncoderConfig {
             ColorFormat::Rgb24 => ColorType::Rgb8,
             ColorFormat::Rgba32 => ColorType::Rgba8,
         },
-        lossless: config.lossless,
         quality: config.quality,
         effort: config.effort,
         num_plays: config.num_plays,
@@ -300,7 +299,6 @@ mod tests {
 
         let lossy = encoder_config(
             &Config {
-                lossless: false,
                 quality: 80.0,
                 effort: 3,
                 num_plays: 5,
@@ -309,15 +307,13 @@ mod tests {
             },
             sequence,
         );
-        assert!(!lossy.lossless);
         assert_eq!(lossy.quality, 80.0);
         assert_eq!(lossy.effort, 3);
         assert_eq!(lossy.num_plays, 5);
         assert_eq!(lossy.max_threads, 4);
 
-        let lossless = encoder_config(
+        let top_quality = encoder_config(
             &Config {
-                lossless: true,
                 quality: 100.0,
                 effort: 9,
                 num_plays: 0,
@@ -326,11 +322,10 @@ mod tests {
             },
             sequence,
         );
-        assert!(lossless.lossless);
-        assert_eq!(lossless.quality, 100.0);
-        assert_eq!(lossless.effort, 9);
-        assert_eq!(lossless.num_plays, 0);
-        assert_eq!(lossless.max_threads, 1);
+        assert_eq!(top_quality.quality, 100.0);
+        assert_eq!(top_quality.effort, 9);
+        assert_eq!(top_quality.num_plays, 0);
+        assert_eq!(top_quality.max_threads, 1);
     }
 
     /// 段を1つ進める。入力を使い切らずに止まったら書き出しが不完全

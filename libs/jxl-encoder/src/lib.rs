@@ -24,15 +24,13 @@ pub struct Config {
     /// [`Encoder::add_frame`] に渡すバイト列の解釈を決める。αを持つ色種別を
     /// 選ぶと、画像にαのチャネルが付く。
     pub color_type: ColorType,
-    /// 可逆で符号化するか
-    pub lossless: bool,
     /// 品質 ([`QUALITY_RANGE`] の範囲)
     ///
-    /// 上限は可逆と同義になる。αは常に可逆。
+    /// 上限で可逆になる。αは常に可逆。
     pub quality: f32,
     /// 速度と圧縮率の均衡 ([`EFFORT_RANGE`] の範囲)
     ///
-    /// 大きいほど遅く小さくなる。
+    /// 大きいほど時間がかかる。縮む量は素材によって変わる。
     pub effort: u8,
     /// アニメーションの再生回数 (0で無限ループ)
     pub num_plays: u32,

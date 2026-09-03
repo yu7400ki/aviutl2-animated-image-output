@@ -4,7 +4,7 @@ use std::ops::RangeInclusive;
 use win32_ui::{
     Dialog, MessageBox,
     layout::{FlexLayout, JustifyContent, SizeValue, labeled},
-    widget::{Button, CheckBox, ComboBox, Number},
+    widget::{Button, ComboBox, Number},
 };
 use windows::Win32::Foundation::HWND;
 
@@ -70,7 +70,6 @@ impl RangedInput {
 struct Inputs {
     num_plays: Number,
     color: ComboBox,
-    lossless: CheckBox,
     quality: RangedInput,
     effort: RangedInput,
     threads: RangedInput,
@@ -87,7 +86,6 @@ impl Inputs {
                     ColorFormat::Rgb24 => 0,
                     ColorFormat::Rgba32 => 1,
                 }),
-            lossless: CheckBox::new("ロスレス圧縮").checked(default_config.lossless),
             quality: RangedInput::new("品質", quality_range(), default_config.quality as i32),
             effort: RangedInput::new("均衡", effort_range(), i32::from(default_config.effort)),
             threads: RangedInput::new(
@@ -107,7 +105,6 @@ impl Inputs {
             .with_gap(10.0)
             .with_layout(labeled("ループ回数 (0=無限ループ)", self.num_plays.clone()))
             .with_layout(labeled("カラーフォーマット", self.color.clone()))
-            .with_widget(self.lossless.clone())
             .with_layout(labeled(&self.quality.label(), self.quality.input.clone()))
             .with_layout(labeled(&self.effort.label(), self.effort.input.clone()))
             .with_layout(labeled(&self.threads.label(), self.threads.input.clone()))
@@ -133,7 +130,6 @@ impl Inputs {
                 1 => ColorFormat::Rgba32,
                 _ => Default::default(),
             },
-            lossless: self.lossless.is_checked(),
             quality: quality as f32,
             effort: effort as u8,
             max_threads: threads as u32,
@@ -299,9 +295,6 @@ mod tests {
     }
 
     /// 画面に出ている値は、どの欄もそのまま設定になる
-    ///
-    /// ロスレスでも品質と均衡は画素を動かさないまま設定として残り、
-    /// 時間と大きさを決める。
     #[test]
     fn every_field_reaches_the_config() {
         // 既定は論理CPU数そのものなので、1つ下を採る
@@ -309,7 +302,6 @@ mod tests {
         let inputs = inputs();
         inputs.num_plays.set_value(7);
         inputs.color.set_selected_index(1);
-        inputs.lossless.set_checked(true);
         inputs.quality.input.set_value(40);
         inputs.effort.input.set_value(2);
         inputs.threads.input.set_value(threads as i32);
@@ -318,7 +310,6 @@ mod tests {
 
         assert_eq!(config.num_plays, 7);
         assert!(config.color_format == ColorFormat::Rgba32);
-        assert!(config.lossless);
         assert_eq!(config.quality, 40.0);
         assert_eq!(config.effort, 2);
         assert_eq!(config.max_threads, threads);

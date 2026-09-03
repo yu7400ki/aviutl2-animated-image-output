@@ -20,7 +20,6 @@ pub fn available_threads() -> u32 {
 pub struct Config {
     pub num_plays: u32,
     pub color_format: ColorFormat,
-    pub lossless: bool,
     pub quality: f32,
     pub effort: u8,
     pub max_threads: u32,
@@ -31,7 +30,6 @@ impl Default for Config {
         Self {
             num_plays: 0,
             color_format: ColorFormat::default(),
-            lossless: false,
             quality: 90.0,
             effort: 7,
             max_threads: available_threads(),
@@ -56,11 +54,6 @@ impl IniConfig for Config {
             .and_then(|s| s.parse::<ColorFormat>().ok())
             .unwrap_or_default();
 
-        let lossless = section
-            .and_then(|s| s.get("lossless"))
-            .and_then(|s| s.parse::<bool>().ok())
-            .unwrap_or(default.lossless);
-
         let quality = section
             .and_then(|s| s.get("quality"))
             .and_then(|s| s.parse::<f32>().ok())
@@ -82,7 +75,6 @@ impl IniConfig for Config {
         Self {
             num_plays,
             color_format,
-            lossless,
             quality,
             effort,
             max_threads: threads,
@@ -93,7 +85,6 @@ impl IniConfig for Config {
         ini.with_section(Some(Self::SECTION))
             .set("num_plays", self.num_plays.to_string())
             .set("color_type", self.color_format.to_index().to_string())
-            .set("lossless", self.lossless.to_string())
             .set("quality", self.quality.to_string())
             .set("effort", self.effort.to_string())
             .set("max_threads", self.max_threads.to_string());
@@ -120,7 +111,6 @@ mod tests {
 
         assert_eq!(config.num_plays, default.num_plays);
         assert!(config.color_format == default.color_format);
-        assert_eq!(config.lossless, default.lossless);
         assert_eq!(config.quality, default.quality);
         assert_eq!(config.effort, default.effort);
         assert_eq!(config.max_threads, default.max_threads);
@@ -142,7 +132,6 @@ mod tests {
         let saved = Config {
             num_plays: 3,
             color_format: ColorFormat::Rgba32,
-            lossless: true,
             quality: 100.0,
             effort: 9,
             // 既定は論理CPU数そのものなので、1つ下を採る
@@ -155,7 +144,6 @@ mod tests {
 
         assert_eq!(loaded.num_plays, saved.num_plays);
         assert!(loaded.color_format == saved.color_format);
-        assert_eq!(loaded.lossless, saved.lossless);
         assert_eq!(loaded.quality, saved.quality);
         assert_eq!(loaded.effort, saved.effort);
         assert_eq!(loaded.max_threads, saved.max_threads);
@@ -168,7 +156,6 @@ mod tests {
 [Config]
 num_plays=5
 color_type=1
-lossless=true
 quality=80
 effort=3
 ";
@@ -177,7 +164,6 @@ effort=3
 
         assert_eq!(config.num_plays, 5);
         assert!(config.color_format == ColorFormat::Rgba32);
-        assert!(config.lossless);
         assert_eq!(config.quality, 80.0);
         assert_eq!(config.effort, 3);
     }
@@ -239,7 +225,6 @@ effort=3
         let default = Config::default();
 
         assert_eq!(config.num_plays, default.num_plays);
-        assert_eq!(config.lossless, default.lossless);
         assert_eq!(config.quality, default.quality);
         assert_eq!(config.effort, default.effort);
     }

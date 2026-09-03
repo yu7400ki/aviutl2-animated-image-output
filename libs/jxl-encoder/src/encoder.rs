@@ -89,11 +89,11 @@ impl Tps {
 }
 
 impl Config {
-    /// 実効の可逆
+    /// 可逆で符号化するか
     ///
     /// 品質の上限は距離0に写り、libjxlが可逆へ倒す。
     pub(crate) fn is_lossless(&self) -> bool {
-        self.lossless || self.quality >= *QUALITY_RANGE.end()
+        self.quality >= *QUALITY_RANGE.end()
     }
 }
 
@@ -360,7 +360,6 @@ mod tests {
     fn config() -> Config {
         Config {
             color_type: ColorType::Rgb8,
-            lossless: false,
             quality: 90.0,
             effort: 3,
             num_plays: 3,
@@ -410,7 +409,7 @@ mod tests {
         let side = 256;
         let config = Config {
             color_type: ColorType::Rgba8,
-            lossless: true,
+            quality: *QUALITY_RANGE.end(),
             ..config()
         };
         let mut encoder = Encoder::new(Recorder::default(), side, side, 1, config).unwrap();
@@ -462,28 +461,18 @@ mod tests {
         const { assert!(<Probe<u32>>::IS_SYNC, "Sync な型を Sync と見抜けていない") };
     }
 
-    /// 品質の上限は可逆の指定と同じところへ落ちる
+    /// 可逆になるのは品質の上限だけ
     #[test]
-    fn the_top_of_the_quality_range_is_lossless() {
+    fn only_the_top_of_the_quality_range_is_lossless() {
         assert!(
             Config {
-                lossless: false,
-                quality: 100.0,
-                ..config()
-            }
-            .is_lossless()
-        );
-        assert!(
-            Config {
-                lossless: true,
-                quality: 0.0,
+                quality: *QUALITY_RANGE.end(),
                 ..config()
             }
             .is_lossless()
         );
         assert!(
             !Config {
-                lossless: false,
                 quality: 99.9,
                 ..config()
             }
