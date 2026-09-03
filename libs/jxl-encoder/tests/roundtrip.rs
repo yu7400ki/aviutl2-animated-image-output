@@ -1,6 +1,10 @@
 //! 符号化した .jxl を jxl-rs で読み直し、入力と設定に照らす
 
 use jxl::api::{self, states::Initialized};
+use jxl::bit_reader::BitReader;
+use jxl::headers::encodings::UnconditionalCoder;
+use jxl::headers::frame_header::FrameHeader;
+use jxl::headers::{FileHeader, JxlHeader};
 use jxl_encoder::{ColorType, Config, Encoder, QUALITY_RANGE};
 
 const WIDTH: u32 = 48;
@@ -104,7 +108,46 @@ struct Decoded {
     info: api::JxlBasicInfo,
     profile: api::JxlColorProfile,
     frames: Vec<api::VisibleFrameInfo>,
+    /// 合成前の各フレームが書かれたときのヘッダ
+    headers: Vec<FrameHeader>,
+    /// 合成後の各フレームのキャンバス全面
     pixels: Vec<Vec<u8>>,
+}
+
+/// 各フレームのヘッダを、記録された位置から読み出す
+///
+/// 位置が実際にヘッダを指していることを、可視フレームと重なる欄で検める。
+fn frame_headers(encoded: &[u8], frames: &[api::VisibleFrameInfo]) -> Vec<FrameHeader> {
+    let file_header =
+        FileHeader::read(&mut BitReader::new(encoded)).expect("ファイルヘッダの読み出し");
+    let nonserialized = file_header.frame_header_nonserialized();
+
+    frames
+        .iter()
+        .map(|frame| {
+            let mut reader = BitReader::new(&encoded[frame.file_offset as usize..]);
+            let header = FrameHeader::read_unconditional(&(), &mut reader, &nonserialized)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{} 枚目のフレームヘッダの読み出し: {error}",
+                        frame.index + 1
+                    )
+                });
+            assert_eq!(
+                header.duration,
+                frame.duration_ticks,
+                "{} 枚目のヘッダの位置がずれている",
+                frame.index + 1
+            );
+            assert_eq!(
+                header.is_last,
+                frame.is_last,
+                "{} 枚目のヘッダの位置がずれている",
+                frame.index + 1
+            );
+            header
+        })
+        .collect()
 }
 
 /// 段を1つ進める。入力を使い切らずに止まったら符号化が不完全
@@ -152,10 +195,12 @@ fn decode(encoded: &[u8], color_type: ColorType) -> Decoded {
         pixels.push(frame);
     }
 
+    let frames = decoder.scanned_frames().to_vec();
     Decoded {
-        frames: decoder.scanned_frames().to_vec(),
         info,
         profile,
+        headers: frame_headers(encoded, &frames),
+        frames,
         pixels,
     }
 }
@@ -386,4 +431,116 @@ fn a_single_leaf_is_a_still_image() {
     assert_eq!(decoded.frames.len(), 1);
     assert!(decoded.frames[0].is_last);
     assert_eq!(decoded.pixels[0], gradient_rgb(0));
+}
+
+/// キャンバス全体を指す矩形 (x, y, 幅, 高さ)
+const WHOLE: (u32, u32, u32, u32) = (0, 0, WIDTH, HEIGHT);
+
+/// フレームごとに書き加えるブロック (x, y, 幅, 高さ)
+///
+/// xとy、幅と高さの取り違えが値に出るよう互いに違え、重なりを持たせない。
+/// 取り違えた矩形もキャンバスに収まるので、値を見なければ食い違いが残る。
+const BLOCKS: [(u32, u32, u32, u32); 3] = [(3, 7, 5, 11), (20, 4, 13, 9), (9, 18, 6, 12)];
+
+/// `BLOCKS` を書き加えていくフレーム列の表示時間
+const BLOCK_DURATIONS: [u32; BLOCKS.len() + 1] = [3, 5, 7, 11];
+
+/// `block` の範囲を全チャネル反転した値で埋める
+///
+/// 反転した値は元の値と必ず違うので、範囲がそのまま差分の外接矩形になる。
+fn invert_block(frame: &mut [u8], color_type: ColorType, block: (u32, u32, u32, u32)) {
+    let (x, y, width, height) = block;
+    let bytes_per_pixel = color_type.bytes_per_pixel();
+    for row in 0..height as usize {
+        let start = ((y as usize + row) * WIDTH as usize + x as usize) * bytes_per_pixel;
+        for byte in &mut frame[start..start + width as usize * bytes_per_pixel] {
+            *byte = !*byte;
+        }
+    }
+}
+
+/// 先頭が勾配で、以降は `BLOCKS` を1つずつ書き加えたフレーム列
+///
+/// 隣り合うフレームはブロック1つ分しか違わないので、差分矩形は画面の一部になる。
+fn block_frames(color_type: ColorType) -> Vec<Vec<u8>> {
+    let mut frames = vec![frame(color_type, 0)];
+    for block in BLOCKS {
+        let mut next = frames.last().expect("先頭フレームが無い").clone();
+        invert_block(&mut next, color_type, block);
+        frames.push(next);
+    }
+    frames
+}
+
+/// `block_frames` の各フレームが書き直す矩形
+fn block_rects() -> Vec<(u32, u32, u32, u32)> {
+    std::iter::once(WHOLE).chain(BLOCKS).collect()
+}
+
+/// `block_frames` を符号化する
+fn encode_blocks(config: Config) -> Vec<u8> {
+    encode_frames(
+        config,
+        WIDTH,
+        HEIGHT,
+        &block_frames(config.color_type),
+        &BLOCK_DURATIONS,
+    )
+}
+
+/// 各フレームのヘッダが示す矩形 (x, y, 幅, 高さ)
+fn rects(headers: &[FrameHeader]) -> Vec<(u32, u32, u32, u32)> {
+    headers
+        .iter()
+        .map(|header| {
+            let (width, height) = header.size();
+            (
+                header.x0 as u32,
+                header.y0 as u32,
+                width as u32,
+                height as u32,
+            )
+        })
+        .collect()
+}
+
+/// 部分フレームを重ねた合成結果が、投入したフレームと一致する
+#[test]
+fn a_lossless_partial_frame_animation_round_trips_byte_for_byte() {
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        let frames = block_frames(color_type);
+        let decoded = decode(&encode_blocks(config(color_type)), color_type);
+
+        assert_eq!(decoded.pixels.len(), frames.len(), "{color_type:?}");
+        for (index, (pixels, source)) in decoded.pixels.iter().zip(&frames).enumerate() {
+            assert_eq!(pixels, source, "{color_type:?} の {} 枚目", index + 1);
+        }
+    }
+}
+
+/// 矩形は投入した変化の位置と大きさで決まる
+#[test]
+fn each_partial_frame_carries_its_own_rect() {
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        let decoded = decode(&encode_blocks(config(color_type)), color_type);
+        assert_eq!(rects(&decoded.headers), block_rects(), "{color_type:?}");
+    }
+}
+
+/// 先頭フレームは、続く変化がどれだけ小さくても全面で書かれる
+#[test]
+fn the_first_frame_covers_the_canvas() {
+    const DOT: (u32, u32, u32, u32) = (1, 2, 1, 1);
+
+    let color_type = ColorType::Rgb8;
+    let base = frame(color_type, 0);
+    let mut changed = base.clone();
+    invert_block(&mut changed, color_type, DOT);
+
+    let input = [base, changed];
+    let encoded = encode_frames(config(color_type), WIDTH, HEIGHT, &input, &[3, 5]);
+    let decoded = decode(&encoded, color_type);
+
+    assert_eq!(rects(&decoded.headers), [WHOLE, DOT]);
+    assert_eq!(decoded.pixels, input);
 }
