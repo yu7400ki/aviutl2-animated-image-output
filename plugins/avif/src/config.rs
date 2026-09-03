@@ -1,7 +1,16 @@
 pub use aviutl2::ColorFormat;
 use aviutl2::IniConfig;
 use aviutl2::ini::{Ini, Properties};
+use std::num::NonZeroUsize;
 use std::str::FromStr;
+use std::thread::available_parallelism;
+
+/// 設定が採れるスレッド数の上限
+///
+/// この機械の論理CPU数。読めなければ1を返す。
+pub fn max_threads() -> usize {
+    available_parallelism().map_or(1, NonZeroUsize::get)
+}
 
 #[derive(Copy, Clone, PartialEq, Default)]
 pub enum YuvFormat {
@@ -72,7 +81,7 @@ impl Default for Config {
             speed: 6,
             color_format: ColorFormat::default(),
             yuv_format: YuvFormat::default(),
-            threads: std::thread::available_parallelism().map_or(1, |p| p.get()),
+            threads: (max_threads() / 2).max(1),
         }
     }
 }
@@ -114,7 +123,7 @@ impl IniConfig for Config {
             .and_then(|s| s.get("threads"))
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(default.threads)
-            .max(1);
+            .clamp(1, max_threads());
 
         Self {
             repeat,
@@ -171,7 +180,8 @@ mod tests {
             speed: 9,
             color_format: ColorFormat::Rgba32,
             yuv_format: YuvFormat::Yuv444,
-            threads: 4,
+            // 既定は論理CPU数の半分なので、値域の上端を採る
+            threads: max_threads(),
         };
 
         let mut ini = Ini::new();
@@ -195,13 +205,16 @@ mod tests {
         assert_eq!(config.speed, 10);
     }
 
-    /// 0や未検査の値のスレッド数は、1以上へ寄る
+    /// 値域の外のスレッド数は、ダイアログが扱える範囲へ収まる
     ///
-    /// 符号化器はスレッド数を並列化の可否にしか使わず、0は無検査で
-    /// 渡すと並列化が効かないだけだが、意味のある下限として1を保つ。
+    /// 下限を割ると並列化が効かず、上限を超えるとダイアログが開いたときに弾かれる。
     #[test]
-    fn a_zero_thread_count_is_clamped_to_at_least_one() {
+    fn out_of_range_threads_are_clamped() {
         assert_eq!(load(&[("threads", "0")]).threads, 1);
+        assert_eq!(
+            load(&[("threads", &(max_threads() + 1).to_string())]).threads,
+            max_threads()
+        );
     }
 
     /// 読めない値の項目だけが既定値へ落ちる
