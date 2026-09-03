@@ -297,8 +297,8 @@ mod tests {
     /// 画面に出ている値は、どの欄もそのまま設定になる
     #[test]
     fn every_field_reaches_the_config() {
-        // 既定は論理CPU数そのものなので、1つ下を採る
-        let threads = available_threads().saturating_sub(1).max(1);
+        // 既定は論理CPU数の半分なので、値域の上端を採る
+        let threads = available_threads();
         let inputs = inputs();
         inputs.num_plays.set_value(7);
         inputs.color.set_selected_index(1);

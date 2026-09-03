@@ -32,7 +32,7 @@ impl Default for Config {
             color_format: ColorFormat::default(),
             quality: 90.0,
             effort: 7,
-            max_threads: available_threads(),
+            max_threads: (available_threads() / 2).max(1),
         }
     }
 }
@@ -134,8 +134,8 @@ mod tests {
             color_format: ColorFormat::Rgba32,
             quality: 100.0,
             effort: 9,
-            // 既定は論理CPU数そのものなので、1つ下を採る
-            max_threads: available_threads().saturating_sub(1).max(1),
+            // 既定は論理CPU数の半分なので、値域の上端を採る
+            max_threads: available_threads(),
         };
 
         let mut ini = Ini::new();
