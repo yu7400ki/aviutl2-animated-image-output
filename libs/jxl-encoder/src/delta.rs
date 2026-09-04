@@ -1,7 +1,7 @@
 //! 書き出しを待っているフレームと、直前のフレームから決まる差分矩形
 
 use crate::layout::Layout;
-use crate::split::{THRESHOLD, cut};
+use crate::split::{THRESHOLD, cut, exact_profile};
 use anim_core::{Rect, crop, dirty_rect};
 
 /// 差分が空のまま書き出すときの矩形
@@ -90,7 +90,9 @@ impl Shape {
     fn of(layout: &Layout, canvas: &[u8], frame: &[u8], base: Base, rect: Rect) -> Self {
         if rect.width == layout.width && rect.height == layout.height {
             Shape::Whole
-        } else if let Some((head, tail)) = cut(canvas, frame, layout, rect, THRESHOLD) {
+        } else if let Some((head, tail)) = cut(rect, THRESHOLD, || {
+            exact_profile(canvas, frame, layout, rect)
+        }) {
             Shape::Two(base, head, tail)
         } else {
             Shape::One(base, rect)

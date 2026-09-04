@@ -1,65 +1,87 @@
-//! 変化した画素を覆う矩形を、書かずに済む画素が固定費を上回るときに割る
+//! 書き直す画素を覆う矩形を、書かずに済む画素が固定費を上回るときに割る
 
 use crate::layout::{ColorType, Layout};
-use anim_core::{Rect, unchanged_run};
+use anim_core::{Profile, Rect, Span, unchanged_run};
 
 /// 矩形を割るのに要る、書かずに済む画素数の下限
 ///
 /// 増えるフレーム1枚の固定費を、書かずに済ませた画素1つが返すバイト数で割った値。
 pub(crate) const THRESHOLD: u64 = 512;
 
-/// `bounds` の中で変化した画素を、重ならない2つの矩形へ分けて覆う
+/// `bounds` の中で書き直す画素を、重ならない2つの矩形へ分けて覆う
 ///
 /// 書かずに済む画素が `threshold` に満たなければ `None`。返す2つは合わせて
-/// 変化した画素をすべて覆い、先の1枚が表示時間0の副フレームになる。
+/// 書き直す画素をすべて覆い、先の1枚が表示時間0の副フレームになる。
 ///
-/// `bounds` は `previous` と `frame` が食い違う画素の外接矩形であること。
+/// `profile` は `bounds` の中で書き直す画素の分布を引くもので、割る余地のある
+/// 面積のときだけ呼ばれる。
 pub(crate) fn cut(
-    previous: &[u8],
-    frame: &[u8],
-    layout: &Layout,
     bounds: Rect,
     threshold: u64,
+    profile: impl FnOnce() -> Profile,
 ) -> Option<(Rect, Rect)> {
     if bounds.area() <= threshold {
         return None;
     }
-    let profile = match layout.color_type {
-        ColorType::Rgb8 => Profile::of::<3>(previous, frame, layout, bounds),
-        ColorType::Rgba8 => Profile::of::<4>(previous, frame, layout, bounds),
-    };
-    let best = profile.best_cut(bounds)?;
+    let best = best_cut(&profile(), bounds)?;
     (best.removed >= threshold).then_some((best.head, best.tail))
 }
 
-/// 端を含む整数の範囲
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Span {
-    min: u32,
-    max: u32,
-}
-
-impl Span {
-    fn at(value: u32) -> Self {
-        Span {
-            min: value,
-            max: value,
-        }
-    }
-
-    fn union(self, other: Span) -> Self {
-        Span {
-            min: self.min.min(other.min),
-            max: self.max.max(other.max),
-        }
-    }
-
-    fn len(self) -> u32 {
-        self.max - self.min + 1
+/// `rect` の中で `previous` と `frame` が食い違う画素の分布
+pub(crate) fn exact_profile(previous: &[u8], frame: &[u8], layout: &Layout, rect: Rect) -> Profile {
+    match layout.color_type {
+        ColorType::Rgb8 => scan::<3>(previous, frame, layout, rect),
+        ColorType::Rgba8 => scan::<4>(previous, frame, layout, rect),
     }
 }
 
-/// 帯の並びと、そこで変化した画素が横断方向に占める範囲
+/// `value` だけを含む範囲
+fn at(value: u32) -> Span {
+    Span {
+        min: value,
+        max: value,
+    }
+}
+
+/// 両方を含むまで広げた範囲
+fn union(span: Option<Span>, other: Span) -> Span {
+    match span {
+        Some(span) => Span {
+            min: span.min.min(other.min),
+            max: span.max.max(other.max),
+        },
+        None => other,
+    }
+}
+
+fn scan<const BPP: usize>(previous: &[u8], frame: &[u8], layout: &Layout, rect: Rect) -> Profile {
+    let mut rows: Vec<Option<Span>> = vec![None; rect.height as usize];
+    let mut cols: Vec<Option<Span>> = vec![None; rect.width as usize];
+    let row_len = rect.width as usize * BPP;
+
+    for (row, span) in rows.iter_mut().enumerate() {
+        let start = (rect.y as usize + row) * layout.stride + rect.x as usize * BPP;
+        let previous = &previous[start..start + row_len];
+        let frame = &frame[start..start + row_len];
+        let y = at(row as u32);
+
+        let mut cursor = 0;
+        while cursor < row_len {
+            let differs = unchanged_run::<BPP>(previous, frame, cursor);
+            if differs + BPP > row_len {
+                break;
+            }
+            let column = differs / BPP;
+            *span = Some(union(*span, at(column as u32)));
+            cols[column] = Some(union(cols[column], y));
+            cursor = differs + BPP;
+        }
+    }
+
+    Profile { rows, cols }
+}
+
+/// 帯の並びと、そこで書き直す画素が横断方向に占める範囲
 #[derive(Debug, Clone, Copy)]
 struct Slab {
     lane: Span,
@@ -68,7 +90,7 @@ struct Slab {
 
 impl Slab {
     fn area(self) -> u64 {
-        u64::from(self.lane.len()) * u64::from(self.cross.len())
+        u64::from(self.lane.count()) * u64::from(self.cross.count())
     }
 
     /// `lane` の帯を足した範囲
@@ -76,16 +98,15 @@ impl Slab {
         let Some(cross) = cross else {
             return acc;
         };
-        let added = Slab {
-            lane: Span::at(lane),
-            cross,
-        };
         Some(match acc {
             Some(acc) => Slab {
-                lane: acc.lane.union(added.lane),
-                cross: acc.cross.union(cross),
+                lane: union(Some(acc.lane), at(lane)),
+                cross: union(Some(acc.cross), cross),
             },
-            None => added,
+            None => Slab {
+                lane: at(lane),
+                cross,
+            },
         })
     }
 }
@@ -99,72 +120,27 @@ struct Cut {
     removed: u64,
 }
 
-/// 矩形の中で変化した画素が、各行と各列で占める範囲
-struct Profile {
-    /// 行ごとの、変化した画素が占めるxの範囲
-    rows: Vec<Option<Span>>,
-    /// 列ごとの、変化した画素が占めるyの範囲
-    cols: Vec<Option<Span>>,
-}
+/// 最も多くの画素を書かずに済ませる割り方
+///
+/// どの位置で割っても書く画素が減らないときは `None`。
+fn best_cut(profile: &Profile, rect: Rect) -> Option<Cut> {
+    let total = rect.area();
+    let horizontal = best_lane_cut(&profile.rows, total).map(|cut| Cut {
+        head: rows_rect(rect, cut.head),
+        tail: rows_rect(rect, cut.tail),
+        removed: cut.removed,
+    });
+    let vertical = best_lane_cut(&profile.cols, total).map(|cut| Cut {
+        head: cols_rect(rect, cut.head),
+        tail: cols_rect(rect, cut.tail),
+        removed: cut.removed,
+    });
 
-impl Profile {
-    /// `rect` の中で `previous` と `frame` が食い違う画素の分布を採る
-    fn of<const BPP: usize>(previous: &[u8], frame: &[u8], layout: &Layout, rect: Rect) -> Profile {
-        let mut rows: Vec<Option<Span>> = vec![None; rect.height as usize];
-        let mut cols: Vec<Option<Span>> = vec![None; rect.width as usize];
-        let row_len = rect.width as usize * BPP;
-
-        for (row, span) in rows.iter_mut().enumerate() {
-            let start = (rect.y as usize + row) * layout.stride + rect.x as usize * BPP;
-            let previous = &previous[start..start + row_len];
-            let frame = &frame[start..start + row_len];
-            let y = Span::at(row as u32);
-
-            let mut at = 0;
-            while at < row_len {
-                let differs = unchanged_run::<BPP>(previous, frame, at);
-                if differs + BPP > row_len {
-                    break;
-                }
-                let x = Span::at((differs / BPP) as u32);
-                *span = Some(match *span {
-                    Some(span) => span.union(x),
-                    None => x,
-                });
-                let col = &mut cols[(differs / BPP) as usize];
-                *col = Some(match *col {
-                    Some(span) => span.union(y),
-                    None => y,
-                });
-                at = differs + BPP;
-            }
-        }
-
-        Profile { rows, cols }
-    }
-
-    /// 最も多くの画素を書かずに済ませる割り方
-    ///
-    /// どの位置で割っても書く画素が減らないときは `None`。
-    fn best_cut(&self, rect: Rect) -> Option<Cut> {
-        let total = rect.area();
-        let horizontal = best_lane_cut(&self.rows, total).map(|cut| Cut {
-            head: rows_rect(rect, cut.head),
-            tail: rows_rect(rect, cut.tail),
-            removed: cut.removed,
-        });
-        let vertical = best_lane_cut(&self.cols, total).map(|cut| Cut {
-            head: cols_rect(rect, cut.head),
-            tail: cols_rect(rect, cut.tail),
-            removed: cut.removed,
-        });
-
-        [horizontal, vertical]
-            .into_iter()
-            .flatten()
-            .filter(|cut| cut.removed > 0)
-            .max_by_key(|cut| cut.removed)
-    }
+    [horizontal, vertical]
+        .into_iter()
+        .flatten()
+        .filter(|cut| cut.removed > 0)
+        .max_by_key(|cut| cut.removed)
 }
 
 /// 帯の並びを1本の直線で割った結果
@@ -176,7 +152,7 @@ struct LaneCut {
 
 /// 帯の並びを1本の直線で割ったとき、最も多くの画素を書かずに済ませる割り方
 ///
-/// `lanes[i]` は帯 `i` で変化した画素が横断方向に占める範囲。`total` は
+/// `lanes[i]` は帯 `i` で書き直す画素が横断方向に占める範囲。`total` は
 /// 割る前の矩形の面積。
 fn best_lane_cut(lanes: &[Option<Span>], total: u64) -> Option<LaneCut> {
     let mut suffix = vec![None; lanes.len() + 1];
@@ -208,8 +184,8 @@ fn rows_rect(rect: Rect, slab: Slab) -> Rect {
     Rect {
         x: rect.x + slab.cross.min,
         y: rect.y + slab.lane.min,
-        width: slab.cross.len(),
-        height: slab.lane.len(),
+        width: slab.cross.count(),
+        height: slab.lane.count(),
     }
 }
 
@@ -218,8 +194,8 @@ fn cols_rect(rect: Rect, slab: Slab) -> Rect {
     Rect {
         x: rect.x + slab.lane.min,
         y: rect.y + slab.cross.min,
-        width: slab.lane.len(),
-        height: slab.cross.len(),
+        width: slab.lane.count(),
+        height: slab.cross.count(),
     }
 }
 
@@ -259,7 +235,10 @@ mod tests {
         let (previous, frame) = painted(color_type, blocks);
         let bounds = dirty_rect(&previous, &frame, layout.stride, layout.bytes_per_pixel)
             .expect("変化が無い");
-        (bounds, cut(&previous, &frame, &layout, bounds, threshold))
+        let cut = cut(bounds, threshold, || {
+            exact_profile(&previous, &frame, &layout, bounds)
+        });
+        (bounds, cut)
     }
 
     fn rect(x: u32, y: u32, width: u32, height: u32) -> Rect {
@@ -321,7 +300,7 @@ mod tests {
         );
     }
 
-    /// 割った矩形は重ならず、変化した画素をすべて覆う
+    /// 割った矩形は重ならず、書き直す画素をすべて覆う
     #[test]
     fn the_pieces_cover_every_changed_pixel_without_overlapping() {
         let color_type = ColorType::Rgba8;
