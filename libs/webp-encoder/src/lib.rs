@@ -10,10 +10,11 @@ mod normalize;
 mod picture;
 mod pipeline;
 mod riff;
+mod screen;
 
 pub use anim_core::{ColorType, FrameDelay};
 pub use encoder::Encoder;
-pub use error::{EncodingError, Error};
+pub use error::{DecodingError, EncodingError, Error};
 
 use std::ops::RangeInclusive;
 

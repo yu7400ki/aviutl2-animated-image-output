@@ -18,6 +18,8 @@ pub enum Error {
     FileTooLarge,
     /// libwebpの符号化が失敗した
     Encode(EncodingError),
+    /// 符号化された単葉の復号が失敗した
+    Decode(DecodingError),
     /// 符号化された単葉のチャンク構成を読み取れなかった
     MalformedOutput,
     /// 書き出し先のI/Oエラー
@@ -51,6 +53,21 @@ pub enum EncodingError {
     UserAbort,
     /// libwebpが上のいずれでもない値を置いた
     Unknown(c_int),
+}
+
+/// 単葉を復号したときの失敗の種別
+///
+/// 復号器は失敗の内訳を持たないので、返らなかったことと、返った寸法が
+/// 求めた矩形と違ったことを分ける。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodingError {
+    /// 復号器が画素を返さなかった
+    Refused,
+    /// 復号した寸法が求めた矩形と違う
+    SizeMismatch {
+        expected: (u32, u32),
+        actual: (u32, u32),
+    },
 }
 
 impl EncodingError {
@@ -93,6 +110,7 @@ impl fmt::Display for Error {
             }
             Error::FileTooLarge => write!(f, "ファイルサイズが4GiBを超えました"),
             Error::Encode(e) => write!(f, "符号化に失敗しました: {e}"),
+            Error::Decode(e) => write!(f, "復号に失敗しました: {e}"),
             Error::MalformedOutput => {
                 write!(f, "符号化された画像のチャンク構成を読み取れません")
             }
@@ -122,6 +140,19 @@ impl fmt::Display for EncodingError {
     }
 }
 
+impl fmt::Display for DecodingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DecodingError::Refused => write!(f, "画素を取り出せません"),
+            DecodingError::SizeMismatch { expected, actual } => write!(
+                f,
+                "復号した画像サイズが一致しません: {}x{} のはずが {}x{} です",
+                expected.0, expected.1, actual.0, actual.1
+            ),
+        }
+    }
+}
+
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -132,6 +163,8 @@ impl std::error::Error for Error {
 }
 
 impl std::error::Error for EncodingError {}
+
+impl std::error::Error for DecodingError {}
 
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
