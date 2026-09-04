@@ -90,9 +90,12 @@ impl Sheets<'_> {
 
 /// 自分の出力を復号した画面から、書き直す画素を採る
 struct Screen {
-    refresh: Refresh,
+    /// キャンバスの幅と高さ
+    size: (u32, u32),
     /// 画面が入力から離れてよい量
     tolerance: u8,
+    /// 書き直す画素を追う地図。先頭フレームを全面で書いたときに張る
+    refresh: Option<Refresh>,
 }
 
 /// 差分矩形を決めるとき比べる相手
@@ -107,7 +110,11 @@ impl Basis {
     /// 先頭フレームを全面で書いた後の状態へ進める
     fn start(&mut self, staged: &[u8]) {
         if let Basis::Screen(screen) = self {
-            screen.refresh.commit_whole(staged);
+            let (width, height) = screen.size;
+            screen
+                .refresh
+                .insert(Refresh::new(width, height, ColorType::Rgba8))
+                .commit_whole(staged);
         }
     }
 
@@ -142,7 +149,7 @@ impl Basis {
                     true => cleared.as_ref().expect("抜いた側の地図から採った矩形"),
                     false => &kept,
                 };
-                screen.refresh.commit(map, rect, sheets.staged);
+                screen.refresh().commit(map, rect, sheets.staged);
 
                 Some(Placement {
                     rect,
@@ -194,9 +201,18 @@ impl Basis {
 impl Screen {
     /// `against` の画面に対して書き直す画素の地図
     fn triggers(&self, staged: &[u8], against: &[u8]) -> Triggers {
-        self.refresh.triggers(staged, against, self.tolerance)
+        let refresh = self.refresh.as_ref().expect(EXPECT_STARTED);
+        refresh.triggers(staged, against, self.tolerance)
+    }
+
+    /// 張られた地図
+    fn refresh(&mut self) -> &mut Refresh {
+        self.refresh.as_mut().expect(EXPECT_STARTED)
     }
 }
+
+/// 地図を読むのが先頭フレームより後であることの控え
+const EXPECT_STARTED: &str = "先頭フレームを全面で書いてから地図を読む";
 
 /// 書く面積の小さい候補
 ///
@@ -238,8 +254,9 @@ impl Canvas {
             Basis::Inputs
         } else {
             Basis::Screen(Screen {
-                refresh: Refresh::new(layout.width, layout.height, ColorType::Rgba8),
+                size: (layout.width, layout.height),
                 tolerance: tolerance(config.quality),
+                refresh: None,
             })
         };
         Canvas {
