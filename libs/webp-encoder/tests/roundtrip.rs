@@ -1362,6 +1362,97 @@ fn a_lossy_animation_composes_near_the_input() {
     }
 }
 
+/// 決定的な擬似乱数で埋めた不透明なRGBA
+fn noisy_rgba(width: u32, height: u32) -> Vec<u8> {
+    let mut rgba = noise((width * height * 4) as usize, 0x5EED);
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel[3] = 255;
+    }
+    rgba
+}
+
+/// ひとつの値で埋めた不透明なRGBA
+fn flat_rgba(width: u32, height: u32, level: u8) -> Vec<u8> {
+    (0..width * height)
+        .flat_map(|_| [level, level, level, 255])
+        .collect()
+}
+
+/// 入力が変わらなくても、画面が許容量を超えて離れていれば書き直す
+///
+/// 4枚とも同じ入力で、離れているのは量子化の誤差を負った画面だけ。書き直しは
+/// 入力が変わらない限り1回で止まるので、3枚目からは表示時間へ畳まれる。
+#[test]
+fn an_unchanged_input_is_rewritten_once_while_the_screen_stays_apart() {
+    let (width, height) = (48, 32);
+    let frame = noisy_rgba(width, height);
+    let frames = vec![frame.clone(), frame.clone(), frame.clone(), frame];
+
+    let (bytes, report) = encode(width, height, lossy_config(ColorType::Rgba8), &frames).unwrap();
+
+    assert_eq!(placements(&bytes).len(), 2, "画面と比べていない");
+    assert_eq!(report.merged_frames, 2, "書き直しが1回で止まっていない");
+    assert_eq!(
+        decode_with_image_webp(&bytes, width, height).durations,
+        [20, 27 + 34 + 41],
+        "畳んだ表示時間"
+    );
+}
+
+/// 許容量に収まる変化は矩形を立てず、表示時間へ畳まれる
+///
+/// 許容量を超える刻みでは矩形が立つので、畳むのが「変化が無いこと」では
+/// ないと分かる。
+#[test]
+fn a_change_within_the_tolerance_folds_into_the_duration() {
+    /// 平らな面の高さ
+    const LEVEL: u8 = 0x60;
+
+    let (width, height) = (48, 32);
+    for (step, frames_written) in [(1u8, 1usize), (40, 2)] {
+        let frames = vec![
+            flat_rgba(width, height, LEVEL),
+            flat_rgba(width, height, LEVEL + step),
+        ];
+        let (bytes, report) =
+            encode(width, height, lossy_config(ColorType::Rgba8), &frames).unwrap();
+
+        assert_eq!(placements(&bytes).len(), frames_written, "刻み {step}");
+        assert_eq!(
+            report.merged_frames as usize,
+            frames.len() - frames_written,
+            "刻み {step}"
+        );
+        assert_eq!(
+            decode_with_image_webp(&bytes, width, height)
+                .durations
+                .iter()
+                .sum::<u32>(),
+            47,
+            "刻み {step} の総再生時間"
+        );
+    }
+}
+
+/// 先頭フレームは、書き直す画素がどれだけ少なくても全面で書く
+///
+/// 透過の面に不透明な四角を置いた素材は、まだ何も描いていないキャンバスとの
+/// 差が四角だけになる。
+#[test]
+fn the_first_lossy_frame_covers_the_whole_canvas() {
+    let (width, height) = (48, 32);
+    let frames = vec![
+        sprite_rgba(width, height, (2, 2)),
+        sprite_rgba(width, height, (20, 14)),
+    ];
+
+    let (bytes, _) = encode(width, height, lossy_config(ColorType::Rgba8), &frames).unwrap();
+
+    let placed = placements(&bytes);
+    assert_eq!(placed[0].rect, (0, 0, width, height));
+    assert!(!placed[0].blend, "先頭フレームが重ねる形になっている");
+}
+
 /// 半透明の背景に置いた四角の一辺の長さ
 const PANEL_BLOCK: u32 = 6;
 

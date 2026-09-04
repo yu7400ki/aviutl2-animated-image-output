@@ -621,4 +621,123 @@ mod tests {
         let (_, sprite) = encode(width, height, &sprite_material, 1, config(true));
         assert_eq!(sprite.merged_frames, 0, "動く四角が併合されている");
     }
+
+    /// 半透明の平らな背景に、離れた2つの不透明な四角を置いたRGBA
+    fn panel_frames(width: u32, height: u32, count: usize) -> Vec<Vec<u8>> {
+        let corners = [(2, 2), (width - SQUARE - 2, height - SQUARE - 2)];
+        (0..count)
+            .map(|index| {
+                let mut frame = Vec::with_capacity((width * height * 4) as usize);
+                for y in 0..height {
+                    for x in 0..width {
+                        let inside = corners.iter().any(|at: &(u32, u32)| {
+                            x.wrapping_sub(at.0) < SQUARE && y.wrapping_sub(at.1) < SQUARE
+                        });
+                        frame.extend_from_slice(&if inside {
+                            [(index * 32) as u8, 0x30, 0xF0, 0xFF]
+                        } else {
+                            [0x40, 0x80, 0xC0, 0x80]
+                        });
+                    }
+                }
+                frame
+            })
+            .collect()
+    }
+
+    /// フレームを1枚ずつ投入し、そのつどキャンバスを控える
+    fn encode_watching_the_canvas(
+        width: u32,
+        height: u32,
+        frames: &[Vec<u8>],
+        config: Config,
+    ) -> (Vec<u8>, Vec<Vec<u8>>) {
+        let mut encoder = Encoder::with_workers(
+            Cursor::new(Vec::new()),
+            width,
+            height,
+            frames.len() as u32,
+            config,
+            NonZeroUsize::MIN,
+        )
+        .unwrap();
+
+        let mut canvases = Vec::new();
+        for (index, frame) in frames.iter().enumerate() {
+            let delay = FrameDelay::new(index as u32 * 7 + 20, 1000).unwrap();
+            encoder.add_frame(frame, delay).unwrap();
+            canvases.push(encoder.canvas.base(false).to_vec());
+        }
+        let (writer, _) = encoder.finish().unwrap();
+        (writer.into_inner(), canvases)
+    }
+
+    /// αの並び
+    fn alpha_of(rgba: &[u8]) -> Vec<u8> {
+        rgba.iter().skip(3).step_by(4).copied().collect()
+    }
+
+    /// 非可逆でも、キャンバスのαは入力と一致する
+    ///
+    /// αは可逆で格納されるので、離れるとしたら合成の規則を取り違えたときになる。
+    /// 矩形の外にも及ぶので、抜いた跡と重ねる形の両方がここを通る。
+    #[test]
+    fn the_lossy_canvas_carries_the_alpha_of_the_input() {
+        let (width, height) = (48, 36);
+        for frames in [
+            skewed_frames(width, height, 8),
+            sprite_frames(width, height, 8),
+            panel_frames(width, height, 8),
+        ] {
+            let (_, canvases) = encode_watching_the_canvas(width, height, &frames, config(false));
+            for (index, (canvas, frame)) in canvases.iter().zip(&frames).enumerate() {
+                let mut expected = frame.clone();
+                crate::normalize::normalize(&mut expected);
+                assert_eq!(alpha_of(canvas), alpha_of(&expected), "フレーム{index}のα");
+            }
+        }
+    }
+
+    /// キャンバスは、独立したデコーダが合成した画面と揃う
+    ///
+    /// 素材は半透明の背景を上書きで載せるので、`image-webp` の重ねる合成の
+    /// 逸脱にも廃棄の逸脱にも当たらない。残るのはYUVからRGBへの変換の違いだけで、
+    /// 矩形・重ね方・廃棄方法のどれかを取り違えれば桁で外れる。
+    #[test]
+    fn the_lossy_canvas_matches_an_independent_decoder() {
+        /// 画素ごとの差の平均の上限。デコーダ間の変換の違いを見込む
+        const LIMIT: f64 = 3.0;
+
+        let (width, height) = (48, 36);
+        let frames = panel_frames(width, height, 8);
+        let (bytes, canvases) = encode_watching_the_canvas(width, height, &frames, config(false));
+
+        let mut decoder =
+            image_webp::WebPDecoder::new(Cursor::new(&bytes)).expect("image-webp が読めない");
+        decoder
+            .set_background_color([0, 0, 0, 0])
+            .expect("背景色を透明にする");
+        assert_eq!(
+            decoder.num_frames() as usize,
+            frames.len(),
+            "書いたフレーム数"
+        );
+
+        let size = decoder.output_buffer_size().expect("出力の大きさ");
+        for (index, canvas) in canvases.iter().enumerate() {
+            let mut composed = vec![0u8; size];
+            decoder
+                .read_frame(&mut composed)
+                .expect("image-webp のデコード");
+
+            assert_eq!(alpha_of(canvas), alpha_of(&composed), "フレーム{index}のα");
+            let error: f64 = canvas
+                .iter()
+                .zip(&composed)
+                .map(|(a, b)| f64::from(a.abs_diff(*b)))
+                .sum::<f64>()
+                / canvas.len() as f64;
+            assert!(error < LIMIT, "フレーム{index}の平均絶対誤差 {error}");
+        }
+    }
 }

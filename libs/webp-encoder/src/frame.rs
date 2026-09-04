@@ -361,6 +361,7 @@ fn snap_to_even(rect: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::{Codec, Job};
 
     /// 4x3のキャンバスを覆う配置
     fn layout(color_type: ColorType) -> Layout {
@@ -403,15 +404,20 @@ mod tests {
         data
     }
 
-    /// 入力どうしを比べる設定
-    fn lossless(color_type: ColorType) -> Config {
+    /// 比べる相手を決める設定
+    fn settings(color_type: ColorType, lossless: bool) -> Config {
         Config {
             color_type,
-            lossless: true,
-            quality: 100.0,
+            lossless,
+            quality: 75.0,
             method: 4,
             num_plays: 0,
         }
+    }
+
+    /// 入力どうしを比べる設定
+    fn lossless(color_type: ColorType) -> Config {
+        settings(color_type, true)
     }
 
     /// 据えたフレームを可逆のキャンバスへ映す
@@ -431,6 +437,125 @@ mod tests {
         let placement = canvas.place(false).expect("先頭フレームは全面を持つ");
         draw(&mut canvas, placement);
         canvas
+    }
+
+    /// 可逆のキャンバスは、比べる相手も据え方も入力だけで閉じる
+    #[test]
+    fn a_lossless_canvas_tracks_the_input_alone() {
+        let layout = layout(ColorType::Rgba8);
+        let mut canvas = Canvas::new(&layout, &lossless(layout.color_type));
+        assert!(matches!(canvas.basis, Basis::Inputs));
+
+        canvas.stage(&ramp(layout.width, layout.height), ColorType::Rgba8);
+        let placement = canvas.place(false).expect("先頭フレームは全面を持つ");
+        draw(&mut canvas, placement);
+    }
+
+    /// 半透明の平らな面の対角へ、`tint` で塗った不透明な画素を置いたRGBA
+    fn translucent(width: u32, height: u32, tint: u8) -> Vec<u8> {
+        let corners = [(0, 0), (width - 1, height - 1)];
+        (0..height)
+            .flat_map(|y| {
+                (0..width).flat_map(move |x| {
+                    if corners.contains(&(x, y)) {
+                        [tint, 0x22, 0x33, OPAQUE]
+                    } else {
+                        [0x40, 0x80, 0xC0, 0x80]
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// 半透明の未変更画素を重ねられるのは、透過置換を持つ可逆だけ
+    ///
+    /// 画面が入力へ完全に戻った最良の場合で問う。非可逆は置換を持たないので、
+    /// 一致していることが重ねてよい理由にならない。
+    #[test]
+    fn a_translucent_unchanged_pixel_is_blended_only_where_it_is_substituted() {
+        let layout = Layout::new(8, 8, ColorType::Rgba8).unwrap();
+        let first = translucent(layout.width, layout.height, 0x11);
+        let second = translucent(layout.width, layout.height, 0x99);
+
+        for lossless in [true, false] {
+            let mut canvas = Canvas::new(&layout, &settings(layout.color_type, lossless));
+            canvas.stage(&first, ColorType::Rgba8);
+            let placement = canvas.place(false).expect("先頭フレームは全面を持つ");
+            assert_eq!(placement.rect, layout.whole(), "可逆{lossless}");
+            canvas.drawn = canvas.staged.clone();
+            canvas.disposed = vec![0; canvas.staged.len()];
+
+            canvas.stage(&second, ColorType::Rgba8);
+            let placement = canvas.place(false).expect("対角の色が変わっている");
+            assert_eq!(placement.rect, layout.whole(), "可逆{lossless}");
+            assert_eq!(placement.blend, lossless, "可逆{lossless}");
+        }
+    }
+
+    /// 決定的な擬似乱数で埋めた不透明なRGBA
+    fn noise(width: u32, height: u32, seed: u32) -> Vec<u8> {
+        let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+        (0..width * height)
+            .flat_map(|_| {
+                let mut byte = || {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    (state >> 16) as u8
+                };
+                [byte(), byte(), byte(), OPAQUE]
+            })
+            .collect()
+    }
+
+    /// `rect` を透過にする
+    fn cleared(data: &[u8], rect: Rect, stride: usize) -> Vec<u8> {
+        let mut data = data.to_vec();
+        let row_len = rect.width as usize * PIXEL;
+        let head = rect.y as usize * stride + rect.x as usize * PIXEL;
+        for y in 0..rect.height as usize {
+            let at = head + y * stride;
+            data[at..at + row_len].fill(0);
+        }
+        data
+    }
+
+    /// 抜いた面は、合成した画面から据えた矩形を抜いたものになる
+    ///
+    /// 復号結果を追う2面が同じ画面を映していないと、抜いた側だけが入力へ
+    /// 寄って比べる相手がずれる。
+    #[test]
+    fn the_disposed_face_follows_the_composed_screen() {
+        let layout = Layout::new(24, 20, ColorType::Rgba8).unwrap();
+        let config = settings(layout.color_type, false);
+        let codec = Codec::new(&config).unwrap();
+        let mut canvas = Canvas::new(&layout, &config);
+
+        let frames: Vec<Vec<u8>> = (0..4)
+            .map(|seed| {
+                let mut frame = noise(layout.width, layout.height, 0x5EED);
+                let at = (seed * 3 + 2) as usize;
+                for y in at..at + 6 {
+                    let head = (y * layout.width as usize + at) * PIXEL;
+                    frame[head..head + 6 * PIXEL].fill(0x33);
+                }
+                frame
+            })
+            .collect();
+
+        for (index, frame) in frames.iter().enumerate() {
+            canvas.stage(frame, ColorType::Rgba8);
+            let placement = canvas.place(index > 0).expect("フレームごとに画素が変わる");
+            let job = Job::crop(canvas.staged(), &layout, placement.rect, None, Vec::new());
+            let encoded = codec.encode(&job).unwrap();
+            canvas.commit(placement, || Ok(encoded)).unwrap();
+
+            assert_eq!(
+                canvas.base(true),
+                cleared(canvas.base(false), placement.rect, layout.stride),
+                "フレーム{index} {placement:?}"
+            );
+        }
     }
 
     #[test]
