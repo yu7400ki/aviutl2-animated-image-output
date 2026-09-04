@@ -6,6 +6,8 @@ mod error;
 mod layers;
 mod layout;
 mod split;
+#[cfg(test)]
+mod tests;
 
 pub use encoder::Encoder;
 pub use error::{DecodingError, EncodingError, Error, ErrorCode};
