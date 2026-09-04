@@ -3,11 +3,13 @@
 mod delta;
 mod encoder;
 mod error;
+mod layers;
 mod layout;
 mod split;
 
 pub use encoder::Encoder;
-pub use error::{EncodingError, Error, ErrorCode};
+pub use error::{DecodingError, EncodingError, Error, ErrorCode};
+pub use layers::Layers;
 pub use layout::ColorType;
 
 use std::ops::RangeInclusive;

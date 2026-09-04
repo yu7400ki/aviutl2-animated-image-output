@@ -1,4 +1,4 @@
-//! `JxlEncoderStatus` / `JxlEncoderError` の写像と、入力検査のエラー
+//! `JxlEncoderStatus` / `JxlEncoderError` / `JxlDecoderStatus` の写像と、入力検査のエラー
 
 use jxl_sys::{
     JXL_ENC_ERR_API_USAGE, JXL_ENC_ERR_BAD_INPUT, JXL_ENC_ERR_GENERIC, JXL_ENC_ERR_JBRD,
@@ -28,6 +28,8 @@ pub enum Error {
     FrameCountMismatch { expected: u32, actual: u32 },
     /// libjxlの符号化が失敗した
     Encode(EncodingError),
+    /// libjxlの復号が失敗した
+    Decode(DecodingError),
     /// 書き出し先のI/Oエラー
     Io(std::io::Error),
 }
@@ -91,6 +93,26 @@ impl EncodingError {
     }
 }
 
+/// libjxlが返した復号の失敗
+///
+/// 復号器は内訳を持たないので、`JxlDecoderStatus` だけを運ぶ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodingError {
+    status: c_int,
+}
+
+impl DecodingError {
+    /// 失敗した `JxlDecoderStatus` を写す
+    pub(crate) fn new(status: c_int) -> Self {
+        DecodingError { status }
+    }
+
+    /// libjxlが返した `JxlDecoderStatus`
+    pub fn status(&self) -> c_int {
+        self.status
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -123,6 +145,7 @@ impl fmt::Display for Error {
                 )
             }
             Error::Encode(e) => write!(f, "符号化に失敗しました: {e}"),
+            Error::Decode(e) => write!(f, "復号に失敗しました: {e}"),
             Error::Io(e) => write!(f, "書き出しに失敗しました: {e}"),
         }
     }
@@ -149,6 +172,12 @@ impl fmt::Display for EncodingError {
     }
 }
 
+impl fmt::Display for DecodingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "JxlDecoderStatus = {}", self.status)
+    }
+}
+
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -160,6 +189,8 @@ impl std::error::Error for Error {
 
 impl std::error::Error for EncodingError {}
 
+impl std::error::Error for DecodingError {}
+
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::Io(e)
@@ -169,7 +200,7 @@ impl From<std::io::Error> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jxl_sys::JXL_ENC_ERROR;
+    use jxl_sys::{JXL_DEC_ERROR, JXL_ENC_ERROR};
 
     /// 列挙の全域が名前を持つ
     #[test]
@@ -225,6 +256,20 @@ mod tests {
         assert_eq!(
             e.to_string(),
             "JXL_ENC_ERR_BAD_INPUT (JxlEncoderStatus = 1)"
+        );
+    }
+
+    /// 同じ番号でも、符号化の失敗と復号の失敗は別物として読める
+    #[test]
+    fn a_decoding_failure_is_told_apart_from_an_encoding_failure() {
+        let decode = DecodingError::new(JXL_DEC_ERROR);
+        assert_eq!(decode.status(), JXL_DEC_ERROR);
+        assert_eq!(decode.to_string(), "JxlDecoderStatus = 1");
+
+        let encode = EncodingError::new(JXL_ENC_ERROR, JXL_ENC_ERR_GENERIC);
+        assert_ne!(
+            Error::Decode(decode).to_string(),
+            Error::Encode(encode).to_string()
         );
     }
 }
