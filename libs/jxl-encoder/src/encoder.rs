@@ -25,9 +25,6 @@ use std::ptr;
 /// 1度の排水で受け取るバイト数
 const OUTPUT_CHUNK: usize = 64 * 1024;
 
-/// フレームが土台にし、合成後のキャンバスを置く参照スロット
-const REFERENCE_SLOT: u32 = 1;
-
 /// `JxlAnimationHeader::tps_numerator` が採れる値
 const TPS_NUMERATOR_RANGE: RangeInclusive<u32> = 1..=(1 << 30);
 
@@ -154,7 +151,7 @@ impl Drop for Raw {
 /// フレーム数が2以上ならアニメーションになり、1なら静止画になる。
 /// `writer` への書き出しは1フレーム遅れる。
 ///
-/// キャンバス2面ぶんまでの画素を抱える (1920x1080のRGBA8で約16.6MB)。
+/// キャンバス3面ぶんまでの画素を抱える (1920x1080のRGBA8で約24.9MB)。
 pub struct Encoder<W: Write> {
     writer: W,
     raw: Raw,
@@ -316,15 +313,16 @@ impl<W: Write> Encoder<W> {
     /// `last` はこれがストリームの最後のフレームであることを表す。
     fn write(&mut self, pending: Pending, last: bool) -> Result<(), Error> {
         let mut offset = 0;
+        let save = pending.save();
         let mut frames = pending.frames().peekable();
         while let Some((region, duration)) = frames.next() {
             let mut header = MaybeUninit::<JxlFrameHeader>::zeroed();
             unsafe { JxlEncoderInitFrameHeader(header.as_mut_ptr()) };
             let mut header = unsafe { header.assume_init() };
             header.duration = duration;
-            header.layer_info.blend_info.source = REFERENCE_SLOT;
-            header.layer_info.save_as_reference = REFERENCE_SLOT;
-            if let Region::Part(rect) = region {
+            header.layer_info.save_as_reference = save;
+            if let Region::Part { source, rect } = region {
+                header.layer_info.blend_info.source = source;
                 header.layer_info.have_crop = JXL_TRUE;
                 header.layer_info.crop_x0 = rect.x as i32;
                 header.layer_info.crop_y0 = rect.y as i32;

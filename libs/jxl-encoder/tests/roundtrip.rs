@@ -610,9 +610,9 @@ fn a_partial_frame_chains_through_a_reference_slot() {
                 );
                 assert_ne!(header.blending_info.source, 0, "{at} の土台が空のスロット");
                 if !header.is_last {
-                    assert_eq!(
+                    assert_ne!(
                         header.save_as_reference, header.blending_info.source,
-                        "{at}"
+                        "{at} が土台にした枠を上書きしている"
                     );
                 }
             }
@@ -809,6 +809,8 @@ fn cutting_a_frame_keeps_the_visible_frames_and_their_ticks() {
 }
 
 /// 副フレームは表示時間を持たず、表示フレームと同じスロットへ連なる
+///
+/// 副フレームを重ねた結果は置き先の枠に入るので、表示フレームはそちらを土台にする。
 #[test]
 fn a_sub_frame_chains_through_the_slot_of_its_display_frame() {
     for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
@@ -832,18 +834,195 @@ fn a_sub_frame_chains_through_the_slot_of_its_display_frame() {
             "{color_type:?} の副フレームが表示フレームと違う枠へ置く"
         );
         assert_eq!(
-            sub.blending_info.source, display.blending_info.source,
-            "{color_type:?} の副フレームが表示フレームと違う枠を土台にする"
+            sub.blending_info.source, headers[0].save_as_reference,
+            "{color_type:?} の副フレームの土台が、直前のフレームの置き先と違う"
         );
         assert_eq!(
-            sub.blending_info.source, sub.save_as_reference,
-            "{color_type:?} の副フレームの土台と置き先が違う"
+            display.blending_info.source, sub.save_as_reference,
+            "{color_type:?} の表示フレームが副フレームの置き先を土台にしていない"
         );
         assert_eq!(
             sub.blending_info.mode,
             BlendingMode::Replace,
             "{color_type:?} の副フレームの重ね方"
         );
+    }
+}
+
+/// 一過性の重なり (x, y, 幅, 高さ)
+///
+/// 消えたあとのフレームは、重なる前のキャンバスを土台にすれば書き直す画素が無くなる。
+const POPUP: (u32, u32, u32, u32) = (10, 6, 24, 18);
+
+/// 差分が空になったフレームが書き直す矩形 (x, y, 幅, 高さ)
+const UNCHANGED: (u32, u32, u32, u32) = (0, 0, 1, 1);
+
+/// 勾配、`POPUP` を反転したもの、勾配へ戻したもの、`TRAILING_DOT` を反転したものの4枚
+fn popup_frames(color_type: ColorType) -> Vec<Vec<u8>> {
+    let base = frame(color_type, 0);
+    let mut covered = base.clone();
+    invert_block(&mut covered, color_type, POPUP);
+    let mut tail = base.clone();
+    invert_block(&mut tail, color_type, TRAILING_DOT);
+    vec![base.clone(), covered, base, tail]
+}
+
+/// `popup_frames` を符号化する
+fn encode_popup(config: Config) -> Vec<u8> {
+    encode_frames(
+        config,
+        WIDTH,
+        HEIGHT,
+        &popup_frames(config.color_type),
+        &BLOCK_DURATIONS,
+    )
+}
+
+/// 各フレームが合成後のキャンバスを置く参照スロット
+fn saved_slots(headers: &[FrameHeader]) -> Vec<u32> {
+    headers
+        .iter()
+        .map(|header| header.save_as_reference)
+        .collect()
+}
+
+/// 一過性の重なりが消えたフレームは、2つ前のキャンバスを土台にする
+#[test]
+fn a_frame_that_undoes_a_transient_overlay_restores_the_older_canvas() {
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        let frames = popup_frames(color_type);
+        let decoded = decode(&encode_popup(config(color_type)), color_type);
+        let headers = &decoded.headers;
+
+        assert_eq!(
+            rects(headers),
+            [WHOLE, POPUP, UNCHANGED, TRAILING_DOT],
+            "{color_type:?}"
+        );
+        assert_eq!(
+            headers[2].blending_info.source, headers[2].save_as_reference,
+            "{color_type:?} の3枚目が2つ前のキャンバスを土台にしていない"
+        );
+        assert_eq!(
+            headers[3].blending_info.source, headers[2].save_as_reference,
+            "{color_type:?} の4枚目の土台が、直前のフレームの置き先と違う"
+        );
+        assert_eq!(decoded.pixels, frames, "{color_type:?}");
+    }
+}
+
+/// 合成後のキャンバスを置く枠は、表示フレームごとに入れ替わる
+///
+/// 入れ替えることで、直前のキャンバスと2つ前のキャンバスが同時に生きる。
+#[test]
+fn the_reference_slot_alternates_between_display_frames() {
+    let color_type = ColorType::Rgb8;
+    let decoded = decode(&encode_popup(config(color_type)), color_type);
+
+    // 最終フレームは置き先の欄を持たない
+    assert_eq!(saved_slots(&decoded.headers), [1, 2, 1, 0]);
+}
+
+/// 空の枠と同じ透明な黒のキャンバスに、`block` だけを反転して置いたフレーム
+fn lone_block(color_type: ColorType, block: (u32, u32, u32, u32)) -> Vec<u8> {
+    let mut frame = vec![0u8; (WIDTH * HEIGHT) as usize * color_type.bytes_per_pixel()];
+    invert_block(&mut frame, color_type, block);
+    frame
+}
+
+/// 空の枠を土台にすれば1画素で書けるフレーム列
+///
+/// 空の枠は透明な黒として読まれるので、2枚目は自分の置き先を土台にすると
+/// 書き直す画素がほとんど無くなる。
+fn lone_block_frames(color_type: ColorType) -> Vec<Vec<u8>> {
+    let second = lone_block(color_type, LONE_BLOCKS[1]);
+    let mut tail = second.clone();
+    invert_block(&mut tail, color_type, TRAILING_DOT);
+    vec![lone_block(color_type, LONE_BLOCKS[0]), second, tail]
+}
+
+/// 透明な黒の上を動く塊 (x, y, 幅, 高さ)
+const LONE_BLOCKS: [(u32, u32, u32, u32); 2] = [(2, 2, 6, 6), (10, 2, 6, 6)];
+
+/// `LONE_BLOCKS` の外接矩形
+const LONE_BOUNDS: (u32, u32, u32, u32) = (2, 2, 14, 6);
+
+/// 2枚目のフレームは、まだ書き込まれていない枠を土台にしない
+#[test]
+fn the_second_frame_leaves_the_unwritten_slot_alone() {
+    let color_type = ColorType::Rgb8;
+    let frames = lone_block_frames(color_type);
+    let encoded = encode_frames(
+        config(color_type),
+        WIDTH,
+        HEIGHT,
+        &frames,
+        &SCATTERED_DURATIONS,
+    );
+    let decoded = decode(&encoded, color_type);
+    let headers = &decoded.headers;
+
+    assert_eq!(
+        rects(headers),
+        [WHOLE, LONE_BOUNDS, TRAILING_DOT],
+        "2枚目が空の枠との差分で書かれている"
+    );
+    assert_eq!(
+        headers[1].blending_info.source, headers[0].save_as_reference,
+        "2枚目の土台が、直前のフレームの置き先と違う"
+    );
+    assert_ne!(
+        headers[1].blending_info.source, headers[1].save_as_reference,
+        "2枚目が空の自分の置き先を土台にしている"
+    );
+    assert_eq!(decoded.pixels, frames);
+}
+
+/// 勾配、全面を反転したもの、勾配へ `DISTANT` を書き加えたもの、`TRAILING_DOT` を
+/// さらに反転したものの4枚
+///
+/// 3枚目は直前のフレームとは全面で食い違い、2つ前のキャンバスとは離れた2箇所しか
+/// 違わない。
+fn flash_frames(color_type: ColorType) -> Vec<Vec<u8>> {
+    let base = frame(color_type, 0);
+    let mut flashed = base.clone();
+    invert_block(&mut flashed, color_type, WHOLE);
+    let mut scattered = base.clone();
+    for block in DISTANT {
+        invert_block(&mut scattered, color_type, block);
+    }
+    let mut tail = scattered.clone();
+    invert_block(&mut tail, color_type, TRAILING_DOT);
+    vec![base, flashed, scattered, tail]
+}
+
+/// 2つ前のキャンバスを土台にした表示フレームも、離れた変化なら矩形へ割られる
+#[test]
+fn a_restored_display_frame_is_cut_against_the_older_canvas() {
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        let frames = flash_frames(color_type);
+        let encoded = encode_frames(config(color_type), WIDTH, HEIGHT, &frames, &BLOCK_DURATIONS);
+        let decoded = decode(&encoded, color_type);
+        let headers = &decoded.headers;
+
+        assert_eq!(
+            rects(headers),
+            [WHOLE, WHOLE, DISTANT[0], DISTANT[1], TRAILING_DOT],
+            "{color_type:?}"
+        );
+        assert_eq!(saved_slots(headers), [1, 2, 1, 1, 0], "{color_type:?}");
+
+        let (sub, display) = (&headers[2], &headers[3]);
+        assert_eq!(sub.duration, 0, "{color_type:?} の副フレームが表示される");
+        assert_eq!(
+            sub.blending_info.source, sub.save_as_reference,
+            "{color_type:?} の副フレームが2つ前のキャンバスを土台にしていない"
+        );
+        assert_eq!(
+            display.blending_info.source, sub.save_as_reference,
+            "{color_type:?} の表示フレームが副フレームの置き先を土台にしていない"
+        );
+        assert_eq!(decoded.pixels, frames, "{color_type:?}");
     }
 }
 
