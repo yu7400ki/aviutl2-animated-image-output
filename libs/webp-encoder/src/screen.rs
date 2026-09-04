@@ -403,4 +403,104 @@ mod tests {
             BTreeSet::from([(false, false), (false, true), (true, false), (true, true)])
         );
     }
+
+    /// αが左から右へ連続して変わり、RGBが位置で決まるRGBA
+    ///
+    /// 左の4分の1は完全透過、続く4分の1でαが上がり、右の半分は完全不透明になる。
+    fn alpha_ramp(width: u32, height: u32) -> Vec<u8> {
+        let fade = width / 4;
+        (0..height)
+            .flat_map(|y| {
+                (0..width).flat_map(move |x| {
+                    let alpha = (x.saturating_sub(fade) * 255 / fade).min(255) as u8;
+                    if alpha == 0 {
+                        [0, 0, 0, 0]
+                    } else {
+                        [(x * 3) as u8, (y * 5) as u8, 0x80, alpha]
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// αの連続する素材から切り出した、縦横の違う矩形
+    const FADE_RECT: Rect = Rect {
+        x: 6,
+        y: 5,
+        width: 37,
+        height: 29,
+    };
+
+    /// αの連続する素材から矩形を符号化して復号し、切り出した画素と対で返す
+    fn decode_fade(lossless: bool, quality: f32) -> (Vec<u8>, Vec<u8>) {
+        let layout = Layout::new(64, 48, ColorType::Rgba8).unwrap();
+        let mut canvas = Canvas::new(&layout);
+        canvas.stage(&alpha_ramp(layout.width, layout.height), ColorType::Rgba8);
+
+        let job = Job::crop(canvas.staged(), &layout, FADE_RECT, None, Vec::new());
+        let encoded = codec(lossless, quality).encode(&job).unwrap();
+        let decoded = decode(encoded.still(), FADE_RECT).unwrap();
+
+        (
+            decoded.to_vec(),
+            cropped(canvas.staged(), &layout, FADE_RECT),
+        )
+    }
+
+    /// 選んだ画素のRGBの、入力からの平均の隔たり
+    fn mean_rgb_gap(decoded: &[u8], expected: &[u8], alpha: u8) -> f64 {
+        let mut total = 0u64;
+        let mut count = 0u64;
+        for (decoded, expected) in decoded
+            .chunks_exact(PIXEL)
+            .zip(expected.chunks_exact(PIXEL))
+        {
+            if expected[3] != alpha {
+                continue;
+            }
+            total += decoded[..3]
+                .iter()
+                .zip(&expected[..3])
+                .map(|(a, b)| u64::from(a.abs_diff(*b)))
+                .sum::<u64>();
+            count += 3;
+        }
+        assert!(count > 0, "α = {alpha} の画素が無い");
+        total as f64 / count as f64
+    }
+
+    /// 品質を振って測る動作点
+    const QUALITIES: [f32; 3] = [50.0, 75.0, 90.0];
+
+    /// 非可逆でも、矩形の中のαは入力とバイト一致する
+    #[test]
+    fn a_lossy_rect_carries_the_alpha_of_the_input() {
+        for quality in QUALITIES {
+            let (decoded, expected) = decode_fade(false, quality);
+            let alpha: Vec<u8> = decoded.iter().skip(3).step_by(PIXEL).copied().collect();
+            let want: Vec<u8> = expected.iter().skip(3).step_by(PIXEL).copied().collect();
+            assert_eq!(alpha, want, "品質{quality}のα");
+        }
+    }
+
+    /// 非可逆では、完全透過の下のRGBが動く
+    ///
+    /// 動く量は品質を上げても縮まず、同じ矩形の不透明な画素より何倍も大きい。
+    /// 完全透過の画素をRGBで比べられないのはこのため。
+    #[test]
+    fn the_color_under_a_fully_transparent_pixel_moves_when_it_is_lossy() {
+        for quality in QUALITIES {
+            let (decoded, expected) = decode_fade(false, quality);
+            let hidden = mean_rgb_gap(&decoded, &expected, 0);
+            let visible = mean_rgb_gap(&decoded, &expected, OPAQUE);
+            assert!(hidden > 16.0, "品質{quality}の完全透過の下 {hidden}");
+            assert!(
+                hidden > visible * 4.0,
+                "品質{quality}: 完全透過の下 {hidden}、不透明 {visible}"
+            );
+
+            let (decoded, expected) = decode_fade(true, quality);
+            assert_eq!(decoded, expected, "可逆の品質{quality}");
+        }
+    }
 }
