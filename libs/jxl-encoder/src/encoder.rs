@@ -312,39 +312,47 @@ impl<W: Write> Encoder<W> {
 
     /// 取り出したフレームを符号化し、書き出せる分を `writer` へ流す
     ///
+    /// 矩形へ割れたフレームは、表示時間を持つ1枚が最後に来るよう順に書く。
     /// `last` はこれがストリームの最後のフレームであることを表す。
     fn write(&mut self, pending: Pending, last: bool) -> Result<(), Error> {
-        let mut header = MaybeUninit::<JxlFrameHeader>::zeroed();
-        unsafe { JxlEncoderInitFrameHeader(header.as_mut_ptr()) };
-        let mut header = unsafe { header.assume_init() };
-        header.duration = pending.duration;
-        header.layer_info.blend_info.source = REFERENCE_SLOT;
-        header.layer_info.save_as_reference = REFERENCE_SLOT;
-        if let Region::Part(rect) = pending.region {
-            header.layer_info.have_crop = JXL_TRUE;
-            header.layer_info.crop_x0 = rect.x as i32;
-            header.layer_info.crop_y0 = rect.y as i32;
-            header.layer_info.xsize = rect.width;
-            header.layer_info.ysize = rect.height;
-        }
-        self.raw
-            .check(unsafe { JxlEncoderSetFrameHeader(self.settings, &header) })?;
+        let mut offset = 0;
+        let mut frames = pending.frames().peekable();
+        while let Some((region, duration)) = frames.next() {
+            let mut header = MaybeUninit::<JxlFrameHeader>::zeroed();
+            unsafe { JxlEncoderInitFrameHeader(header.as_mut_ptr()) };
+            let mut header = unsafe { header.assume_init() };
+            header.duration = duration;
+            header.layer_info.blend_info.source = REFERENCE_SLOT;
+            header.layer_info.save_as_reference = REFERENCE_SLOT;
+            if let Region::Part(rect) = region {
+                header.layer_info.have_crop = JXL_TRUE;
+                header.layer_info.crop_x0 = rect.x as i32;
+                header.layer_info.crop_y0 = rect.y as i32;
+                header.layer_info.xsize = rect.width;
+                header.layer_info.ysize = rect.height;
+            }
+            self.raw
+                .check(unsafe { JxlEncoderSetFrameHeader(self.settings, &header) })?;
 
-        let pixels = self.delta.pixels();
-        self.raw.check(unsafe {
-            JxlEncoderAddImageFrame(
-                self.settings,
-                &self.format,
-                pixels.as_ptr().cast::<c_void>(),
-                pixels.len(),
-            )
-        })?;
+            let len = region.byte_len(&self.layout);
+            let pixels = &self.delta.pixels()[offset..offset + len];
+            self.raw.check(unsafe {
+                JxlEncoderAddImageFrame(
+                    self.settings,
+                    &self.format,
+                    pixels.as_ptr().cast::<c_void>(),
+                    pixels.len(),
+                )
+            })?;
+            offset += len;
 
-        // 最後のフレームかどうかは排水した時点の状態で焼き込まれる
-        if last {
-            unsafe { JxlEncoderCloseInput(self.raw.enc) };
+            // 最後のフレームかどうかは排水した時点の状態で焼き込まれる
+            if last && frames.peek().is_none() {
+                unsafe { JxlEncoderCloseInput(self.raw.enc) };
+            }
+            self.drain()?;
         }
-        self.drain()
+        Ok(())
     }
 
     /// 書き出せる分を `writer` へ流し切る

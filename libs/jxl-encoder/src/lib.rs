@@ -4,6 +4,7 @@ mod delta;
 mod encoder;
 mod error;
 mod layout;
+mod split;
 
 pub use encoder::Encoder;
 pub use error::{EncodingError, Error, ErrorCode};

@@ -3,7 +3,8 @@
 use jxl::api::{self, states::Initialized};
 use jxl::bit_reader::BitReader;
 use jxl::headers::encodings::UnconditionalCoder;
-use jxl::headers::frame_header::{BlendingMode, FrameHeader};
+use jxl::headers::frame_header::{BlendingMode, FrameHeader, FrameType};
+use jxl::headers::toc::{Toc, TocNonserialized};
 use jxl::headers::{FileHeader, JxlHeader};
 use jxl_encoder::{ColorType, Config, Encoder, QUALITY_RANGE};
 
@@ -108,46 +109,89 @@ struct Decoded {
     info: api::JxlBasicInfo,
     profile: api::JxlColorProfile,
     frames: Vec<api::VisibleFrameInfo>,
-    /// 合成前の各フレームが書かれたときのヘッダ
+    /// 書かれた順の通常フレームのヘッダ。表示時間0の副フレームを含む
     headers: Vec<FrameHeader>,
     /// 合成後の各フレームのキャンバス全面
     pixels: Vec<Vec<u8>>,
 }
 
-/// 各フレームのヘッダを、記録された位置から読み出す
+/// 表示時間を持つヘッダ
 ///
-/// 位置が実際にヘッダを指していることを、可視フレームと重なる欄で検める。
+/// 表示時間0の副フレームは次の表示フレームへ畳まれるので、単独では表示されない。
+/// 静止画は表示時間の欄を持たないので、ストリームを閉じる1枚がそのまま表示される。
+fn displayed(headers: &[FrameHeader]) -> Vec<&FrameHeader> {
+    headers
+        .iter()
+        .filter(|header| header.duration != 0 || header.is_last)
+        .collect()
+}
+
+/// コードストリームを順に歩き、通常フレームのヘッダを読み出す
+///
+/// 表示時間0の副フレームは `scanned_frames` に現れないので、記録された位置からは
+/// 届かない。libjxlがpatchのために書く参照フレームは、こちらが並べたものでは
+/// ないので落とす。読めた並びが実体であることを、表示フレームと重なる欄で検める。
 fn frame_headers(encoded: &[u8], frames: &[api::VisibleFrameInfo]) -> Vec<FrameHeader> {
-    let file_header =
-        FileHeader::read(&mut BitReader::new(encoded)).expect("ファイルヘッダの読み出し");
+    let mut reader = BitReader::new(encoded);
+    let file_header = FileHeader::read(&mut reader).expect("ファイルヘッダの読み出し");
     let nonserialized = file_header.frame_header_nonserialized();
 
-    frames
-        .iter()
-        .map(|frame| {
-            let mut reader = BitReader::new(&encoded[frame.file_offset as usize..]);
-            let header = FrameHeader::read_unconditional(&(), &mut reader, &nonserialized)
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "{} 枚目のフレームヘッダの読み出し: {error}",
-                        frame.index + 1
-                    )
-                });
-            assert_eq!(
-                header.duration,
-                frame.duration_ticks,
-                "{} 枚目のヘッダの位置がずれている",
-                frame.index + 1
-            );
-            assert_eq!(
-                header.is_last,
-                frame.is_last,
-                "{} 枚目のヘッダの位置がずれている",
-                frame.index + 1
-            );
-            header
-        })
-        .collect()
+    let mut headers: Vec<FrameHeader> = Vec::new();
+    loop {
+        reader
+            .jump_to_byte_boundary()
+            .expect("フレームの先頭への整列");
+        let header = FrameHeader::read_unconditional(&(), &mut reader, &nonserialized)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{} 枚目のフレームヘッダの読み出し: {error}",
+                    headers.len() + 1
+                )
+            });
+        let toc = Toc::read_unconditional(
+            &(),
+            &mut reader,
+            &TocNonserialized {
+                num_entries: header.num_toc_entries() as u32,
+            },
+        )
+        .unwrap_or_else(|error| panic!("{} 枚目のTOCの読み出し: {error}", headers.len() + 1));
+        reader.jump_to_byte_boundary().expect("節の先頭への整列");
+        let section_bytes: u32 = toc.entries.iter().sum();
+
+        let is_last = header.is_last;
+        if header.frame_type == FrameType::RegularFrame {
+            headers.push(header);
+        }
+        if is_last {
+            break;
+        }
+        reader
+            .skip_bits(section_bytes as usize * 8)
+            .expect("次のフレームへの読み飛ばし");
+    }
+
+    let display = displayed(&headers);
+    assert_eq!(
+        display.len(),
+        frames.len(),
+        "表示フレームの数が読み戻した可視フレームと違う"
+    );
+    for (header, frame) in display.iter().zip(frames) {
+        assert_eq!(
+            header.duration,
+            frame.duration_ticks,
+            "{} 枚目のヘッダが読み戻した可視フレームと違う",
+            frame.index + 1
+        );
+        assert_eq!(
+            header.is_last,
+            frame.is_last,
+            "{} 枚目のヘッダが読み戻した可視フレームと違う",
+            frame.index + 1
+        );
+    }
+    headers
 }
 
 /// 段を1つ進める。入力を使い切らずに止まったら符号化が不完全
@@ -660,6 +704,147 @@ fn identical_frames_fold_into_the_pending_duration() {
         decoded.pixels,
         [frames[0].clone(), frames[1].clone(), frames[2].clone()]
     );
+}
+
+/// 変化のあと1枚だけ書き加える点 (x, y, 幅, 高さ)
+///
+/// 割れた表示フレームを最終フレームから離し、置き先の欄が書かれる位置へ置く。
+const TRAILING_DOT: (u32, u32, u32, u32) = (1, 1, 1, 1);
+
+/// 離れた2箇所の変化 (x, y, 幅, 高さ)
+///
+/// 外接矩形は 38x24 で、割ると 840 画素を書かずに済む。
+const DISTANT: [(u32, u32, u32, u32); 2] = [(2, 2, 6, 6), (34, 20, 6, 6)];
+
+/// 近い2箇所の変化 (x, y, 幅, 高さ)
+///
+/// 外接矩形は 14x20 で、割っても 40 画素しか減らない。
+const NEARBY: [(u32, u32, u32, u32); 2] = [(2, 2, 6, 20), (10, 2, 6, 20)];
+
+/// `NEARBY` の外接矩形
+const NEARBY_BOUNDS: (u32, u32, u32, u32) = (2, 2, 14, 20);
+
+/// `scattered_frames` の各フレームの表示時間
+const SCATTERED_DURATIONS: [u32; 3] = [3, 5, 7];
+
+/// 勾配、`blocks` を反転したもの、さらに `TRAILING_DOT` を反転したものの3枚
+fn scattered_frames(color_type: ColorType, blocks: &[(u32, u32, u32, u32)]) -> Vec<Vec<u8>> {
+    let base = frame(color_type, 0);
+    let mut scattered = base.clone();
+    for block in blocks {
+        invert_block(&mut scattered, color_type, *block);
+    }
+    let mut tail = scattered.clone();
+    invert_block(&mut tail, color_type, TRAILING_DOT);
+    vec![base, scattered, tail]
+}
+
+/// `scattered_frames` を符号化する
+fn encode_scattered(config: Config, blocks: &[(u32, u32, u32, u32)]) -> Vec<u8> {
+    encode_frames(
+        config,
+        WIDTH,
+        HEIGHT,
+        &scattered_frames(config.color_type, blocks),
+        &SCATTERED_DURATIONS,
+    )
+}
+
+/// 離れた2箇所の変化は矩形へ割られ、近い2箇所は外接矩形のまま書かれる
+#[test]
+fn a_distant_pair_of_changes_is_cut_apart() {
+    let color_type = ColorType::Rgb8;
+
+    let distant = decode(&encode_scattered(config(color_type), &DISTANT), color_type);
+    assert_eq!(
+        rects(&distant.headers),
+        [WHOLE, DISTANT[0], DISTANT[1], TRAILING_DOT]
+    );
+
+    let nearby = decode(&encode_scattered(config(color_type), &NEARBY), color_type);
+    assert_eq!(rects(&nearby.headers), [WHOLE, NEARBY_BOUNDS, TRAILING_DOT]);
+}
+
+/// 割った表示フレームの合成結果が、投入したフレームと一致する
+#[test]
+fn a_cut_display_frame_round_trips_byte_for_byte() {
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        let frames = scattered_frames(color_type, &DISTANT);
+        let decoded = decode(&encode_scattered(config(color_type), &DISTANT), color_type);
+
+        assert_eq!(
+            decoded.headers.len(),
+            frames.len() + 1,
+            "{color_type:?} 副フレームが書かれていない"
+        );
+        assert_eq!(
+            decoded.pixels.len(),
+            frames.len(),
+            "{color_type:?} 副フレームが表示フレームとして数えられている"
+        );
+        for (index, (pixels, source)) in decoded.pixels.iter().zip(&frames).enumerate() {
+            assert_eq!(pixels, source, "{color_type:?} の {} 枚目", index + 1);
+        }
+    }
+}
+
+/// 割っても投入したフレーム数と表示時間の並びは動かない
+#[test]
+fn cutting_a_frame_keeps_the_visible_frames_and_their_ticks() {
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        let decoded = decode(&encode_scattered(config(color_type), &DISTANT), color_type);
+
+        assert_eq!(
+            decoded.frames.len(),
+            SCATTERED_DURATIONS.len(),
+            "{color_type:?}"
+        );
+        assert_eq!(ticks(&decoded), SCATTERED_DURATIONS, "{color_type:?}");
+        assert_eq!(
+            ticks(&decoded).iter().sum::<u32>(),
+            SCATTERED_DURATIONS.iter().sum::<u32>(),
+            "{color_type:?} の1周の総表示時間が動いている"
+        );
+    }
+}
+
+/// 副フレームは表示時間を持たず、表示フレームと同じスロットへ連なる
+#[test]
+fn a_sub_frame_chains_through_the_slot_of_its_display_frame() {
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        let decoded = decode(&encode_scattered(config(color_type), &DISTANT), color_type);
+        let headers = &decoded.headers;
+        assert_eq!(headers.len(), 4, "{color_type:?}");
+
+        let (sub, display) = (&headers[1], &headers[2]);
+        assert_eq!(sub.duration, 0, "{color_type:?} の副フレームが表示される");
+        assert!(!sub.is_last, "{color_type:?} の副フレームで閉じている");
+        assert_eq!(
+            display.duration, SCATTERED_DURATIONS[1],
+            "{color_type:?} の表示フレームの表示時間"
+        );
+        assert_ne!(
+            sub.save_as_reference, 0,
+            "{color_type:?} の副フレームが枠0へ入る"
+        );
+        assert_eq!(
+            sub.save_as_reference, display.save_as_reference,
+            "{color_type:?} の副フレームが表示フレームと違う枠へ置く"
+        );
+        assert_eq!(
+            sub.blending_info.source, display.blending_info.source,
+            "{color_type:?} の副フレームが表示フレームと違う枠を土台にする"
+        );
+        assert_eq!(
+            sub.blending_info.source, sub.save_as_reference,
+            "{color_type:?} の副フレームの土台と置き先が違う"
+        );
+        assert_eq!(
+            sub.blending_info.mode,
+            BlendingMode::Replace,
+            "{color_type:?} の副フレームの重ね方"
+        );
+    }
 }
 
 /// `u32` に収まらない表示時間は、そこでフレームを分けて持つ
