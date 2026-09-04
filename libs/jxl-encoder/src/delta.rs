@@ -272,10 +272,11 @@ impl Basis {
             }
             Basis::Screen(screen) => {
                 let kept = screen.triggers(data, &screen.shown);
+                let bounds = kept.bounds()?;
                 let restored = (!screen.shown_back.is_empty())
                     .then(|| screen.triggers(data, &screen.shown_back));
                 let (base, rect) = narrower(
-                    kept.bounds()?,
+                    bounds,
                     restored
                         .as_ref()
                         .map(|map| map.bounds().unwrap_or(UNCHANGED)),
