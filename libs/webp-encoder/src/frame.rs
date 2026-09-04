@@ -60,8 +60,7 @@ impl Sheets<'_> {
 
     /// `rect` の中の写した入力を、重ねる先の面へ重ねられるか
     ///
-    /// 完全不透明な画素はそのまま置き換わる。残る画素は `mixes` が、重ねた
-    /// 結果が入力そのものになるかで分ける。
+    /// 完全不透明な画素はそのまま置き換わる。残る画素は `mixes` が分ける。
     fn blendable(&self, rect: Rect, dispose: bool, mixes: impl Fn(&[u8], &[u8]) -> bool) -> bool {
         let base = self.base(dispose);
         let row_len = rect.width as usize * PIXEL;
