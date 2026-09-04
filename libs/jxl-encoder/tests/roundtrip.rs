@@ -1,12 +1,14 @@
-//! 符号化した .jxl を jxl-rs で読み直し、入力と設定に照らす
+//! 符号化した .jxl を jxl-rs と自前の復号器で読み直し、入力と設定に照らす
 
+use anim_core::Rect;
 use jxl::api::{self, states::Initialized};
 use jxl::bit_reader::BitReader;
 use jxl::headers::encodings::UnconditionalCoder;
 use jxl::headers::frame_header::{BlendingMode, FrameHeader, FrameType};
 use jxl::headers::toc::{Toc, TocNonserialized};
 use jxl::headers::{FileHeader, JxlHeader};
-use jxl_encoder::{ColorType, Config, Encoder, QUALITY_RANGE};
+use jxl_encoder::{ColorType, Config, Encoder, Layers, QUALITY_RANGE};
+use std::io::Write;
 
 const WIDTH: u32 = 48;
 const HEIGHT: u32 = 32;
@@ -81,6 +83,22 @@ fn config(color_type: ColorType) -> Config {
     }
 }
 
+/// `width` x `height` の `frames` を `writer` へ符号化する
+fn encode_into<W: Write>(
+    writer: W,
+    config: Config,
+    width: u32,
+    height: u32,
+    frames: &[Vec<u8>],
+    durations: &[u32],
+) -> W {
+    let mut encoder = Encoder::new(writer, width, height, frames.len() as u32, config).unwrap();
+    for (frame, duration) in frames.iter().zip(durations) {
+        encoder.add_frame(frame, *duration).unwrap();
+    }
+    encoder.finish().unwrap()
+}
+
 /// `width` x `height` の `frames` を符号化する
 fn encode_frames(
     config: Config,
@@ -89,11 +107,7 @@ fn encode_frames(
     frames: &[Vec<u8>],
     durations: &[u32],
 ) -> Vec<u8> {
-    let mut encoder = Encoder::new(Vec::new(), width, height, frames.len() as u32, config).unwrap();
-    for (frame, duration) in frames.iter().zip(durations) {
-        encoder.add_frame(frame, *duration).unwrap();
-    }
-    encoder.finish().unwrap()
+    encode_into(Vec::new(), config, width, height, frames, durations)
 }
 
 /// `durations` と同じ数の勾配のフレームを符号化する
@@ -1039,4 +1053,300 @@ fn a_duration_beyond_the_writable_range_splits_the_frame() {
 
     assert_eq!(ticks(&decoded), durations);
     assert_eq!(decoded.pixels, input);
+}
+
+/// 層の取り出しにかけるフレーム列
+struct Sequence {
+    name: &'static str,
+    frames: Vec<Vec<u8>>,
+    durations: &'static [u32],
+    /// 書かれる矩形 (x, y, 幅, 高さ)
+    rects: Vec<(u32, u32, u32, u32)>,
+}
+
+/// 全面・矩形1枚・矩形2枚の3つの書き方を、直前と2つ前の2通りの土台で踏む列
+fn sequences(color_type: ColorType) -> Vec<Sequence> {
+    vec![
+        // 2枚目は直前を、3枚目は2つ前を土台にした矩形1枚
+        Sequence {
+            name: "popup",
+            frames: popup_frames(color_type),
+            durations: &BLOCK_DURATIONS,
+            rects: vec![WHOLE, POPUP, UNCHANGED, TRAILING_DOT],
+        },
+        // 2枚目は直前を土台に矩形2枚へ割れる
+        Sequence {
+            name: "scattered",
+            frames: scattered_frames(color_type, &DISTANT),
+            durations: &SCATTERED_DURATIONS,
+            rects: vec![WHOLE, DISTANT[0], DISTANT[1], TRAILING_DOT],
+        },
+        // 3枚目は2つ前を土台に矩形2枚へ割れる
+        Sequence {
+            name: "flash",
+            frames: flash_frames(color_type),
+            durations: &BLOCK_DURATIONS,
+            rects: vec![WHOLE, WHOLE, DISTANT[0], DISTANT[1], TRAILING_DOT],
+        },
+    ]
+}
+
+/// `sequence` のフレームを符号化する
+fn encode_sequence(config: Config, sequence: &Sequence) -> Vec<u8> {
+    encode_frames(config, WIDTH, HEIGHT, &sequence.frames, sequence.durations)
+}
+
+/// 矩形を `Layers` へ渡す形へ写す
+fn rect_of((x, y, width, height): (u32, u32, u32, u32)) -> Rect {
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+/// `rect` の範囲を連続したバイト列として切り出す
+fn crop(frame: &[u8], color_type: ColorType, rect: Rect) -> Vec<u8> {
+    let bytes_per_pixel = color_type.bytes_per_pixel();
+    let row_len = rect.width as usize * bytes_per_pixel;
+    let mut out = Vec::with_capacity(row_len * rect.height as usize);
+    for row in 0..rect.height as usize {
+        let start = ((rect.y as usize + row) * WIDTH as usize + rect.x as usize) * bytes_per_pixel;
+        out.extend_from_slice(&frame[start..start + row_len]);
+    }
+    out
+}
+
+/// 連続したバイト列を `rect` の範囲へ書き込む
+fn paste(canvas: &mut [u8], color_type: ColorType, rect: Rect, layer: &[u8]) {
+    let bytes_per_pixel = color_type.bytes_per_pixel();
+    let row_len = rect.width as usize * bytes_per_pixel;
+    for row in 0..rect.height as usize {
+        let start = ((rect.y as usize + row) * WIDTH as usize + rect.x as usize) * bytes_per_pixel;
+        canvas[start..start + row_len].copy_from_slice(&layer[row * row_len..(row + 1) * row_len]);
+    }
+}
+
+/// 各層を切り出した投入フレームの番号
+///
+/// 副フレームは、続く表示フレームと同じ投入フレームから切り出される。
+fn sources(headers: &[FrameHeader]) -> Vec<usize> {
+    let mut shown = 0;
+    headers
+        .iter()
+        .map(|header| {
+            let at = shown;
+            if header.duration != 0 || header.is_last {
+                shown += 1;
+            }
+            at
+        })
+        .collect()
+}
+
+/// 矩形を書いた順に控えながら `parts` を流し込み、返った対を集める
+fn peel<'a>(
+    color_type: ColorType,
+    parts: impl IntoIterator<Item = &'a [u8]>,
+    written: &[(u32, u32, u32, u32)],
+) -> Vec<(Rect, Vec<u8>)> {
+    let mut layers = Layers::new(color_type, 2).unwrap();
+    for rect in written {
+        layers.wrote(rect_of(*rect));
+    }
+
+    let mut peeled = Vec::new();
+    for part in parts {
+        layers
+            .feed(part, |rect, layer| peeled.push((rect, layer.to_vec())))
+            .unwrap();
+    }
+    peeled
+}
+
+/// 取り出した層が、そのフレームが書いた矩形で切り出した入力と一致する
+#[test]
+fn each_layer_is_the_input_cropped_to_its_rect() {
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        for sequence in sequences(color_type) {
+            let encoded = encode_sequence(config(color_type), &sequence);
+            let decoded = decode(&encoded, color_type);
+            let at = format!("{} の {color_type:?}", sequence.name);
+            assert_eq!(rects(&decoded.headers), sequence.rects, "{at}");
+
+            let peeled = peel(color_type, [encoded.as_slice()], &sequence.rects);
+            assert_eq!(peeled.len(), sequence.rects.len(), "{at} の層の枚数");
+            let sources = sources(&decoded.headers);
+            for (index, ((rect, layer), written)) in peeled.iter().zip(&sequence.rects).enumerate()
+            {
+                let at = format!("{at} の {} 枚目の層", index + 1);
+                assert_eq!(*rect, rect_of(*written), "{at} と対になった矩形");
+                assert_eq!(
+                    layer,
+                    &crop(&sequence.frames[sources[index]], color_type, *rect),
+                    "{at}"
+                );
+            }
+        }
+    }
+}
+
+/// 書き出しの1回ぶんずつバイト列を控える writer
+#[derive(Default)]
+struct Chunks(Vec<Vec<u8>>);
+
+impl Write for Chunks {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.push(buf.to_vec());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// バイト列をどこで区切って流し込んでも、同じ層が同じ順で返る
+#[test]
+fn the_layers_do_not_depend_on_where_the_bytes_are_split() {
+    let color_type = ColorType::Rgba8;
+    for sequence in sequences(color_type) {
+        let chunks = encode_into(
+            Chunks::default(),
+            config(color_type),
+            WIDTH,
+            HEIGHT,
+            &sequence.frames,
+            sequence.durations,
+        )
+        .0;
+        let encoded: Vec<u8> = chunks.concat();
+        let written = &sequence.rects;
+
+        let whole = peel(color_type, [encoded.as_slice()], written);
+        assert_eq!(whole.len(), written.len(), "{}", sequence.name);
+        assert_eq!(
+            peel(color_type, encoded.chunks(1), written),
+            whole,
+            "{} を1バイトずつ流し込んだ層",
+            sequence.name
+        );
+        assert_eq!(
+            peel(color_type, chunks.iter().map(Vec::as_slice), written),
+            whole,
+            "{} を書き出しの区切りで流し込んだ層",
+            sequence.name
+        );
+    }
+}
+
+/// 層を貼り合わせると、表示フレームごとに投入フレームへ戻る
+///
+/// 全面の層はそのままキャンバスになり、矩形の層は土台の枠の写しへ貼る。置き先の枠が
+/// 0 でなければ、合成後をその枠へ置く。
+#[test]
+fn pasting_the_layers_rebuilds_the_input_frames() {
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        for sequence in sequences(color_type) {
+            let encoded = encode_sequence(config(color_type), &sequence);
+            let decoded = decode(&encoded, color_type);
+            let peeled = peel(color_type, [encoded.as_slice()], &sequence.rects);
+
+            let empty = vec![0u8; (WIDTH * HEIGHT) as usize * color_type.bytes_per_pixel()];
+            let mut slots = [empty.clone(), empty.clone(), empty.clone(), empty];
+            let mut shown = Vec::new();
+            for (header, (rect, layer)) in decoded.headers.iter().zip(&peeled) {
+                let canvas = if *rect == rect_of(WHOLE) {
+                    layer.clone()
+                } else {
+                    let mut canvas = slots[header.blending_info.source as usize].clone();
+                    paste(&mut canvas, color_type, *rect, layer);
+                    canvas
+                };
+                if header.save_as_reference != 0 {
+                    slots[header.save_as_reference as usize] = canvas.clone();
+                }
+                if header.duration != 0 || header.is_last {
+                    shown.push(canvas);
+                }
+            }
+
+            assert_eq!(
+                shown, sequence.frames,
+                "{} の {color_type:?} を貼り合わせたキャンバス",
+                sequence.name
+            );
+        }
+    }
+}
+
+/// 書いた矩形より多く層が返ったら、そこで落ちる
+#[test]
+#[should_panic(expected = "枚目の層が返った")]
+fn a_layer_beyond_the_written_rects_stops_the_decoding() {
+    let color_type = ColorType::Rgb8;
+    let sequence = &sequences(color_type)[0];
+    let encoded = encode_sequence(config(color_type), sequence);
+
+    let rects = &sequence.rects[..sequence.rects.len() - 1];
+    peel(color_type, [encoded.as_slice()], rects);
+}
+
+/// 書いた矩形より層が少ないまま閉じたら、そこで落ちる
+#[test]
+#[should_panic(expected = "ストリームが閉じた時点で")]
+fn a_stream_that_closes_short_of_the_written_rects_stops_the_decoding() {
+    let color_type = ColorType::Rgb8;
+    let sequence = &sequences(color_type)[0];
+    let encoded = encode_sequence(config(color_type), sequence);
+
+    let mut rects = sequence.rects.clone();
+    rects.push(TRAILING_DOT);
+    peel(color_type, [encoded.as_slice()], &rects);
+}
+
+/// 控えた矩形と大きさの合わない層が返ったら、そこで落ちる
+#[test]
+#[should_panic(expected = "1 枚目の層が")]
+fn a_layer_that_does_not_fill_its_rect_stops_the_decoding() {
+    let color_type = ColorType::Rgb8;
+    let sequence = &sequences(color_type)[0];
+    let encoded = encode_sequence(config(color_type), sequence);
+
+    let mut rects = sequence.rects.clone();
+    rects[0] = (0, 0, WIDTH - 1, HEIGHT);
+    peel(color_type, [encoded.as_slice()], &rects);
+}
+
+/// 非可逆でも層は矩形のぶんだけ返り、αは入力のまま残る
+#[test]
+fn a_lossy_encoding_returns_a_layer_for_each_rect() {
+    let color_type = ColorType::Rgba8;
+    let config = Config {
+        quality: 40.0,
+        ..config(color_type)
+    };
+    for sequence in sequences(color_type) {
+        let encoded = encode_sequence(config, &sequence);
+        let decoded = decode(&encoded, color_type);
+        let at = format!("{} の非可逆", sequence.name);
+        assert_eq!(rects(&decoded.headers), sequence.rects, "{at}");
+
+        let peeled = peel(color_type, [encoded.as_slice()], &sequence.rects);
+        assert_eq!(peeled.len(), sequence.rects.len(), "{at} の層の枚数");
+        let sources = sources(&decoded.headers);
+        let mut moved = false;
+        for (index, (rect, layer)) in peeled.iter().enumerate() {
+            let source = crop(&sequence.frames[sources[index]], color_type, *rect);
+            let at = format!("{at} の {} 枚目の層", index + 1);
+            assert_eq!(layer.len(), source.len(), "{at} の大きさ");
+            assert_eq!(alpha_channel(layer), alpha_channel(&source), "{at} のα");
+            moved |= color_channels(layer) != color_channels(&source);
+        }
+        assert!(
+            moved,
+            "{at} のどの層の色も入力と一致していて、非可逆になっていない"
+        );
+    }
 }
