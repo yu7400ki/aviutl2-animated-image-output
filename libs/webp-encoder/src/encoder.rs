@@ -177,6 +177,16 @@ fn filler<'a>(
     Ok(slot.as_ref().expect("符号化した結果が入っている"))
 }
 
+/// 符号化へ渡す画素
+///
+/// RGBAは正規化した写し、RGBは投入されたフレームそのもの。
+fn source<'a>(layout: &Layout, canvas: &'a Canvas, data: &'a [u8]) -> &'a [u8] {
+    match layout.color_type {
+        ColorType::Rgb8 => data,
+        ColorType::Rgba8 => canvas.staged(),
+    }
+}
+
 /// 符号化したフレームの行き先
 enum Sink<W: Write + Seek> {
     /// 単葉。`WebPEncode` の出力をそのまま書く
@@ -389,7 +399,6 @@ impl<W: Write + Seek> Encoder<W> {
 
     /// フレームを符号化して行き先へ渡す
     ///
-    /// 符号化に渡す画素は、RGBAなら正規化した写し、RGBなら入力そのもの。
     /// 自分の出力を追うキャンバスは、載せ方を決めた矩形の符号化を待って復号し、
     /// 次のフレームの決定より前に画面を組み直す。
     fn write_frame(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
@@ -400,10 +409,7 @@ impl<W: Write + Seek> Encoder<W> {
 
         let animation = match &mut self.sink {
             Sink::Still(writer) => {
-                let source = match self.layout.color_type {
-                    ColorType::Rgb8 => data,
-                    ColorType::Rgba8 => self.canvas.staged(),
-                };
+                let source = source(&self.layout, &self.canvas, data);
                 let job = Job::crop(source, &self.layout, self.layout.whole(), None, Vec::new());
                 let encoded = self.pipeline.codec().encode(&job)?;
                 return Ok(writer.write_all(encoded.still())?);
@@ -417,10 +423,7 @@ impl<W: Write + Seek> Encoder<W> {
             return Ok(());
         };
 
-        let source = match self.layout.color_type {
-            ColorType::Rgb8 => data,
-            ColorType::Rgba8 => self.canvas.staged(),
-        };
+        let source = source(&self.layout, &self.canvas, data);
         let base = (placement.blend && self.pipeline.codec().substitutes_transparency())
             .then(|| self.canvas.base(placement.dispose));
         // 切り出しはここで閉じる。以降の符号化はキャンバスを読まない
