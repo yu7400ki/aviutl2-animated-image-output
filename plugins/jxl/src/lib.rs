@@ -191,12 +191,24 @@ mod tests {
         ))
     }
 
+    /// 隣り合う `seed` の隔たり
+    ///
+    /// 非可逆は画面が入力から離れた量で矩形を決めるので、既定の品質で見える
+    /// 隔たりを置く。
+    const SEED_STEP: u32 = 64;
+
     /// 画素ごとに値の違う不透明なRGBA
     fn frame_of(seed: u32) -> Vec<u8> {
         (0..FRAME_HEIGHT)
             .flat_map(|y| {
-                (0..FRAME_WIDTH)
-                    .flat_map(move |x| [(x * 7) as u8, (y * 11) as u8, seed as u8, 0xFF])
+                (0..FRAME_WIDTH).flat_map(move |x| {
+                    [
+                        (x * 7) as u8,
+                        (y * 11) as u8,
+                        (seed * SEED_STEP) as u8,
+                        0xFF,
+                    ]
+                })
             })
             .collect()
     }
