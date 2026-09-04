@@ -338,6 +338,12 @@ impl Canvas {
         basis.draw(&mut sheets, placement, encoded)
     }
 
+    /// 自分の出力を復号した結果を比べる相手にしているか
+    #[cfg(test)]
+    pub(crate) fn tracks_the_screen(&self) -> bool {
+        matches!(self.basis, Basis::Screen(_))
+    }
+
     /// 比べる相手と、それが読み書きする面を分ける
     fn split(&mut self) -> (&mut Basis, Sheets<'_>) {
         let Canvas {
@@ -534,6 +540,37 @@ mod tests {
             data[at..at + row_len].fill(0);
         }
         data
+    }
+
+    /// 非可逆でも、重ねられるかは実際に重なる面で判定する
+    ///
+    /// 抜いた後の面は前のフレームの矩形が完全透過なので重ねられる。抜く前の面で
+    /// 判定すると、そこに残る不透明な画素が重ねる形を落とす。
+    #[test]
+    fn a_lossy_frame_is_judged_against_the_face_it_lands_on() {
+        let layout = Layout::new(24, 20, ColorType::Rgba8).unwrap();
+        let config = settings(layout.color_type, false);
+        let codec = Codec::new(&config).unwrap();
+        let mut canvas = Canvas::new(&layout, &config);
+
+        // 透過の面を不透明な四角が重なりながら動く。奇数の縦位置が矩形を1行上へ
+        // 広げ、四角の外の完全透過な画素を巻き込む
+        let frames = [(2, 2), (6, 5), (10, 8)].map(|at| sprite(layout.width, layout.height, at, 8));
+
+        let mut judged = 0;
+        for (index, frame) in frames.iter().enumerate() {
+            canvas.stage(frame, ColorType::Rgba8);
+            let placement = canvas.place(index > 0).expect("四角が動いている");
+            let job = Job::crop(canvas.staged(), &layout, placement.rect, None, Vec::new());
+            let encoded = codec.encode(&job).unwrap();
+            canvas.commit(placement, || Ok(encoded)).unwrap();
+
+            if placement.dispose {
+                assert!(placement.blend, "フレーム{index} {placement:?}");
+                judged += 1;
+            }
+        }
+        assert!(judged > 0, "抜く廃棄方法が現れていない");
     }
 
     /// 抜いた面は、合成した画面から据えた矩形を抜いたものになる

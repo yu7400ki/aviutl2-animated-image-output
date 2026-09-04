@@ -625,6 +625,27 @@ mod tests {
         assert_eq!(sprite.merged_frames, 0, "動く四角が併合されている");
     }
 
+    /// 可逆のエンコーダは復号器を組み立てない
+    ///
+    /// 比べる相手が入力どうしなので、書き直す画素の地図も復号した矩形も要らない。
+    #[test]
+    fn a_lossless_encoder_builds_no_decoder() {
+        for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+            for lossless in [true, false] {
+                let config = Config {
+                    color_type,
+                    ..config(lossless)
+                };
+                let encoder = Encoder::new(Cursor::new(Vec::new()), 16, 16, 2, config).unwrap();
+                assert_eq!(
+                    encoder.canvas.tracks_the_screen(),
+                    !lossless,
+                    "{color_type:?} 可逆{lossless}"
+                );
+            }
+        }
+    }
+
     /// 半透明の平らな背景に、離れた2つの不透明な四角を置いたRGBA
     fn panel_frames(width: u32, height: u32, count: usize) -> Vec<Vec<u8>> {
         let corners = [(2, 2), (width - SQUARE - 2, height - SQUARE - 2)];

@@ -1458,10 +1458,12 @@ const PANEL_BLOCK: u32 = 6;
 
 /// 半透明の平らな背景に、離れた2つの不透明な四角を置いたRGBA
 ///
-/// 四角だけが `index` で色を変える。2つを囲む矩形が背景を広く巻き込むので、
-/// 変わらない半透明の画素が毎フレーム矩形の中へ入る。
+/// 四角だけが `index` で明るさを変える。2つを囲む矩形が背景を広く巻き込むので、
+/// 変わらない半透明の画素が毎フレーム矩形の中へ入る。**無彩色で作る** — 色差を
+/// 持つ背景は 4:2:0 を通って復号結果が入力と食い違い、キャンバスと一致する
+/// 画素が矩形の中に現れなくなる。
 fn translucent_panel(width: u32, height: u32, index: usize) -> Vec<u8> {
-    const BACKGROUND: [u8; 4] = [0x40, 0x80, 0xC0, 0x80];
+    const BACKGROUND: [u8; 4] = [0x80, 0x80, 0x80, 0x80];
     let blocks = [(2, 2), (width - PANEL_BLOCK - 2, height - PANEL_BLOCK - 2)];
 
     let mut rgba = Vec::with_capacity((width * height * 4) as usize);
@@ -1470,8 +1472,9 @@ fn translucent_panel(width: u32, height: u32, index: usize) -> Vec<u8> {
             let inside = blocks
                 .iter()
                 .any(|at| x.wrapping_sub(at.0) < PANEL_BLOCK && y.wrapping_sub(at.1) < PANEL_BLOCK);
+            let level = (index * 32) as u8;
             rgba.extend_from_slice(&if inside {
-                [(index * 32) as u8, 0x30, 0xF0, 0xFF]
+                [level, level, level, 0xFF]
             } else {
                 BACKGROUND
             });
