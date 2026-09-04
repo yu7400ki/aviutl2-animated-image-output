@@ -1,5 +1,9 @@
 //! JPEG XLエンコーダ
 
+// `tests/support` は公開APIの名前で書かれており、crateの内側からも同じ名前で引く
+#[cfg(test)]
+extern crate self as jxl_encoder;
+
 mod delta;
 mod encoder;
 mod error;
