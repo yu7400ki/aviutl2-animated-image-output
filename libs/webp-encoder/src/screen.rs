@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn a_lossless_rect_decodes_back_to_the_pixels_it_carried() {
         let layout = Layout::new(23, 17, ColorType::Rgba8).unwrap();
-        let mut canvas = Canvas::new(&layout);
+        let mut canvas = Canvas::new(&layout, true);
         canvas.stage(&ramp(layout.width, layout.height), ColorType::Rgba8);
 
         let job = Job::crop(canvas.staged(), &layout, RECT, None, Vec::new());
@@ -327,7 +327,7 @@ mod tests {
     /// 合成した面は、開ループのキャンバスが持つ2面と同じものになる。
     fn compose_frames(layout: &Layout, frames: &[Vec<u8>]) -> Vec<Placement> {
         let codec = codec(true, 100.0);
-        let mut canvas = Canvas::new(layout);
+        let mut canvas = Canvas::new(layout, true);
         let mut shown = vec![0u8; layout.frame_len];
         let mut disposed = vec![0u8; layout.frame_len];
         let mut placements = Vec::new();
@@ -434,7 +434,7 @@ mod tests {
     /// αの連続する素材から矩形を符号化して復号し、切り出した画素と対で返す
     fn decode_fade(lossless: bool, quality: f32) -> (Vec<u8>, Vec<u8>) {
         let layout = Layout::new(64, 48, ColorType::Rgba8).unwrap();
-        let mut canvas = Canvas::new(&layout);
+        let mut canvas = Canvas::new(&layout, true);
         canvas.stage(&alpha_ramp(layout.width, layout.height), ColorType::Rgba8);
 
         let job = Job::crop(canvas.staged(), &layout, FADE_RECT, None, Vec::new());

@@ -270,7 +270,7 @@ impl<W: Write + Seek> Encoder<W> {
 
         Ok(Encoder {
             sink,
-            canvas: Canvas::new(&layout),
+            canvas: Canvas::new(&layout, config.lossless),
             layout,
             pipeline,
             num_frames,

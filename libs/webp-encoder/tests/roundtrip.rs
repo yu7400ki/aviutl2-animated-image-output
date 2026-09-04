@@ -1281,9 +1281,24 @@ fn assert_lossy_close(decoded: &[Vec<u8>], expected: &[Vec<u8>], limit: f64) {
     for (index, (decoded, expected)) in decoded.iter().zip(expected).enumerate() {
         assert_eq!(decoded.len(), expected.len(), "フレーム{index}の長さ");
 
-        let alpha: Vec<u8> = decoded.iter().skip(ALPHA_AT).step_by(4).copied().collect();
-        let want: Vec<u8> = expected.iter().skip(ALPHA_AT).step_by(4).copied().collect();
-        assert_eq!(alpha, want, "フレーム{index}のα");
+        let alpha = decoded.iter().skip(ALPHA_AT).step_by(4);
+        let want = expected.iter().skip(ALPHA_AT).step_by(4);
+        let (pixels, moved, worst) = alpha.zip(want).fold(
+            (0usize, 0usize, 0u8),
+            |(pixels, moved, worst), (alpha, want)| {
+                (
+                    pixels + 1,
+                    moved + usize::from(alpha != want),
+                    worst.max(alpha.abs_diff(*want)),
+                )
+            },
+        );
+        assert_eq!(
+            moved,
+            0,
+            "フレーム{index}のαが {moved}/{pixels} 画素 ({:.1}%) ずれている。最大 {worst}",
+            moved as f64 * 100.0 / pixels as f64
+        );
 
         let error = mean_abs_error(decoded, expected);
         assert!(error < limit, "フレーム{index}の平均絶対誤差 {error}");
@@ -1336,6 +1351,63 @@ fn a_lossy_animation_composes_near_the_input() {
         placements(&bytes).iter().skip(1).any(|frame| frame.blend),
         "重ねる形のフレームが1枚も無い"
     );
+
+    assert_lossy_close(
+        &decode_with_image_webp(&bytes, width, height).frames,
+        &frames,
+        3.0,
+    );
+    if let Some(composed) = decode_with_ffmpeg(&bytes, width, height) {
+        assert_lossy_close(&composed, &frames, 3.0);
+    }
+}
+
+/// 半透明の背景に置いた四角の一辺の長さ
+const PANEL_BLOCK: u32 = 6;
+
+/// 半透明の平らな背景に、離れた2つの不透明な四角を置いたRGBA
+///
+/// 四角だけが `index` で色を変える。2つを囲む矩形が背景を広く巻き込むので、
+/// 変わらない半透明の画素が毎フレーム矩形の中へ入る。
+fn translucent_panel(width: u32, height: u32, index: usize) -> Vec<u8> {
+    const BACKGROUND: [u8; 4] = [0x40, 0x80, 0xC0, 0x80];
+    let blocks = [(2, 2), (width - PANEL_BLOCK - 2, height - PANEL_BLOCK - 2)];
+
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let inside = blocks
+                .iter()
+                .any(|at| x.wrapping_sub(at.0) < PANEL_BLOCK && y.wrapping_sub(at.1) < PANEL_BLOCK);
+            rgba.extend_from_slice(&if inside {
+                [(index * 32) as u8, 0x30, 0xF0, 0xFF]
+            } else {
+                BACKGROUND
+            });
+        }
+    }
+    rgba
+}
+
+/// 矩形が巻き込んだ半透明の未変更画素は、画面のαを動かさない
+///
+/// 重ねる形で載せると合成のたびにαが不透明へ寄り、画面が入力から離れる。
+#[test]
+fn a_translucent_background_swept_into_a_rect_keeps_its_alpha() {
+    let (width, height) = (48, 32);
+    let frames: Vec<Vec<u8>> = (0..8)
+        .map(|index| translucent_panel(width, height, index))
+        .collect();
+
+    let (bytes, _) = encode(width, height, lossy_config(ColorType::Rgba8), &frames).unwrap();
+
+    // 巻き込む画素があることを、2つの四角より広い矩形が並ぶことで押さえる
+    let swept = placements(&bytes)
+        .iter()
+        .skip(1)
+        .filter(|frame| frame.rect.2 * frame.rect.3 > 2 * PANEL_BLOCK * PANEL_BLOCK)
+        .count();
+    assert_eq!(swept, frames.len() - 1, "背景を巻き込む矩形が並んでいない");
 
     assert_lossy_close(
         &decode_with_image_webp(&bytes, width, height).frames,

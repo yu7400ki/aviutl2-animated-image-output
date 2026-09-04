@@ -44,11 +44,15 @@ pub(crate) struct Canvas {
     whole: Rect,
     /// 1行のバイト数
     stride: usize,
+    /// 切り出した画素をそのまま書く符号化か
+    lossless: bool,
 }
 
 impl Canvas {
     /// `layout` の大きさの、まだ何も描いていないキャンバスを作る
-    pub(crate) fn new(layout: &Layout) -> Self {
+    ///
+    /// `lossless` は切り出した画素をそのまま書く符号化かどうか。
+    pub(crate) fn new(layout: &Layout, lossless: bool) -> Self {
         let stride = layout.width as usize * PIXEL;
         Canvas {
             drawn: Vec::new(),
@@ -56,6 +60,7 @@ impl Canvas {
             staged: Vec::with_capacity(stride * layout.height as usize),
             whole: layout.whole(),
             stride,
+            lossless,
         }
     }
 
@@ -141,9 +146,6 @@ impl Canvas {
     }
 
     /// `rect` の中の写した入力を `base` の上へ重ねられるか
-    ///
-    /// 完全不透明な画素は重ねても入力そのものになり、`base` と一致する画素は
-    /// 重ねる先がその値なので入力へ戻る。
     fn blendable(&self, base: &[u8], rect: Rect) -> bool {
         let row_len = rect.width as usize * PIXEL;
         let head = rect.y as usize * self.stride + rect.x as usize * PIXEL;
@@ -152,8 +154,25 @@ impl Canvas {
             self.staged[at..at + row_len]
                 .chunks_exact(PIXEL)
                 .zip(base[at..at + row_len].chunks_exact(PIXEL))
-                .all(|(staged, base)| staged[3] == OPAQUE || staged == base)
+                .all(|(staged, base)| self.mixes(staged, base))
         })
+    }
+
+    /// 写した入力の1画素を `base` の上へ重ねると、入力そのものになるか
+    ///
+    /// 完全不透明な画素はそのまま置き換わる。可逆は `base` と一致する画素を
+    /// 完全透過へ置き換えてから書くので、重ねる先の値がそのまま戻る。非可逆は
+    /// その置き換えを持たないため、重ねる先が完全透過で入力のαを動かさない
+    /// 画素だけになる。
+    fn mixes(&self, staged: &[u8], base: &[u8]) -> bool {
+        if staged[3] == OPAQUE {
+            return true;
+        }
+        if self.lossless {
+            staged == base
+        } else {
+            base[3] == 0
+        }
     }
 }
 
@@ -218,7 +237,7 @@ mod tests {
 
     /// フレームを1つ据えたキャンバス
     fn canvas_with(layout: &Layout, data: &[u8]) -> Canvas {
-        let mut canvas = Canvas::new(layout);
+        let mut canvas = Canvas::new(layout, true);
         canvas.stage(data, layout.color_type);
         let placement = canvas.place(false).expect("先頭フレームは全面を持つ");
         canvas.commit(placement.rect);
@@ -278,7 +297,7 @@ mod tests {
     #[test]
     fn the_first_frame_covers_the_whole_canvas() {
         let layout = layout(ColorType::Rgba8);
-        let mut canvas = Canvas::new(&layout);
+        let mut canvas = Canvas::new(&layout, true);
         canvas.stage(&vec![0; layout.frame_len], ColorType::Rgba8);
 
         assert_eq!(
@@ -345,7 +364,7 @@ mod tests {
     fn an_rgb_frame_is_carried_as_opaque_rgba() {
         let layout = layout(ColorType::Rgb8);
         let data: Vec<u8> = (0..layout.frame_len as u8).collect();
-        let mut canvas = Canvas::new(&layout);
+        let mut canvas = Canvas::new(&layout, true);
         canvas.stage(&data, ColorType::Rgb8);
 
         let expected: Vec<u8> = data
@@ -422,7 +441,7 @@ mod tests {
     #[test]
     fn a_frame_equal_to_the_disposed_canvas_takes_a_single_pixel() {
         let layout = Layout::new(16, 16, ColorType::Rgba8).unwrap();
-        let mut canvas = Canvas::new(&layout);
+        let mut canvas = Canvas::new(&layout, true);
         canvas.stage(&sprite(16, 16, (0, 0), 16), ColorType::Rgba8);
         canvas.commit(layout.whole());
         canvas.stage(&sprite(16, 16, (4, 4), 4), ColorType::Rgba8);
