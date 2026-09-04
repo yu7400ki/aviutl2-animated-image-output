@@ -172,3 +172,73 @@ fn the_first_lossy_frame_covers_the_canvas() {
 
     assert_eq!(rects(&decoded.headers), [WHOLE, DOT]);
 }
+
+/// 矩形を2枚へ割った隙間の画素は、書かれていない入力を覚えない
+///
+/// 隙間の画素は符号化器が触れないので、最後に書いた入力と書き直しの1回が残る。
+/// 外接矩形へまとめて覚えさせると、7枚目で書き直しの1回が戻って矩形が立つ。
+#[test]
+fn the_gap_between_two_pieces_remembers_no_input() {
+    /// 割った2枚が覆う塊 (x, y, 幅, 高さ)
+    const CORNERS: [(u32, u32, u32, u32); 2] = [(2, 2, 6, 6), (34, 20, 6, 6)];
+
+    /// 2枚の隙間に入る塊 (x, y, 幅, 高さ)
+    const GAP: (u32, u32, u32, u32) = (16, 10, 8, 8);
+
+    /// 背景を持ち上げる量。許容量を超える
+    const LIFT: u8 = 10;
+
+    let color_type = ColorType::Rgb8;
+    let base = flat(color_type, FLAT);
+    let mut corners = base.clone();
+    for corner in CORNERS {
+        paint(&mut corners, color_type, corner, PAINT);
+    }
+
+    // 4枚目の全面で、隙間の塊は入力が変わらないまま書き直されて1回を使う。
+    // 5枚目が2つ前へ戻すと、その画素の画面だけが覚えた入力から離れる。
+    let frames = vec![
+        base.clone(),
+        painted(&base, color_type, GAP, PAINT),
+        base.clone(),
+        painted(&flat(color_type, FLAT + LIFT), color_type, GAP, PAINT),
+        base.clone(),
+        corners.clone(),
+        painted(&corners, color_type, GAP, PAINT),
+    ];
+    let durations = [3, 5, 7, 11, 13, 17, 19];
+
+    let encoded = encode_frames(
+        lossy(color_type, QUALITY),
+        WIDTH,
+        HEIGHT,
+        &frames,
+        &durations,
+    );
+    let decoded = decode(&encoded, color_type);
+
+    assert_eq!(
+        rects(&decoded.headers),
+        [
+            WHOLE, GAP, UNCHANGED, WHOLE, UNCHANGED, CORNERS[0], CORNERS[1]
+        ]
+    );
+    assert_eq!(ticks(&decoded), [3, 5, 7, 11, 13, 36]);
+}
+
+/// 粗い品質でも、平坦な背景の列は2つ前のキャンバスを土台にする
+///
+/// 保留中のフレームの土台が2つ前になる状態を、書かれる矩形で留める。
+#[test]
+fn a_flat_background_restores_the_older_canvas_at_a_coarse_quality() {
+    for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
+        let sequence = sequences(color_type)
+            .into_iter()
+            .find(|sequence| sequence.name == "restored")
+            .expect("2つ前へ戻す列が無い");
+        let encoded = encode_sequence(lossy(color_type, COARSE_QUALITY), &sequence);
+        let decoded = decode(&encoded, color_type);
+
+        assert_eq!(rects(&decoded.headers), sequence.rects, "{color_type:?}");
+    }
+}
