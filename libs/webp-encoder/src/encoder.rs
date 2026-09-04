@@ -17,10 +17,17 @@ use std::thread::available_parallelism;
 /// キャンバスを書き換えないフレームが載せる画素 (RGBA)
 const FILLER_PIXEL: [u8; 4] = [0, 0, 0, 0];
 
+/// 保留中のフレームが待っている符号化の結果
+enum Encoded {
+    /// パイプラインが預かっているジョブの番号
+    Waiting(usize),
+    /// 画面を組むために受け取り済みの結果
+    Ready(EncodedFrame),
+}
+
 /// 書き出しを待っているフレーム
 struct Pending {
-    /// パイプラインへ投入したジョブの番号
-    index: usize,
+    encoded: Encoded,
     /// キャンバス上の矩形
     rect: Rect,
     /// 透過画素を下のキャンバスへ重ねるか
@@ -111,7 +118,10 @@ impl<W: Write + Seek> Animation<W> {
         let Some(pending) = self.pending.pop_front() else {
             return Ok(());
         };
-        let encoded = pipeline.take(pending.index)?;
+        let encoded = match pending.encoded {
+            Encoded::Waiting(index) => pipeline.take(index)?,
+            Encoded::Ready(encoded) => encoded,
+        };
         let dispose = pending.dispose;
 
         let mut durations = Durations::new(pending.duration);
@@ -185,7 +195,8 @@ enum Sink<W: Write + Seek> {
 /// アニメーションにせず、単葉の .webp をそのまま書く。
 ///
 /// フレームの載せ方の決定は投入した場で済ませ、符号化はワーカーへ回す。
-/// 落としたエンコーダはワーカーを畳んでから返る。
+/// 非可逆は決定が自分の出力の復号結果に依るので、1フレームぶんの符号化を
+/// 待ってから次のフレームへ進む。落としたエンコーダはワーカーを畳んでから返る。
 pub struct Encoder<W: Write + Seek> {
     sink: Sink<W>,
     layout: Layout,
@@ -270,7 +281,7 @@ impl<W: Write + Seek> Encoder<W> {
 
         Ok(Encoder {
             sink,
-            canvas: Canvas::new(&layout, config.lossless),
+            canvas: Canvas::new(&layout, &config),
             layout,
             pipeline,
             num_frames,
@@ -297,7 +308,8 @@ impl<W: Write + Seek> Encoder<W> {
     /// [`Error::FrameSizeMismatch`]。宣言したフレーム数を超えたとき
     /// [`Error::FrameCountMismatch`]。符号化に失敗したとき [`Error::Encode`]。
     /// 符号化した内容のチャンク構成を読み取れないとき
-    /// [`Error::MalformedOutput`]。ファイルがRIFFの上限を超えるとき
+    /// [`Error::MalformedOutput`]。符号化した矩形を復号できないとき
+    /// [`Error::Decode`]。ファイルがRIFFの上限を超えるとき
     /// [`Error::FileTooLarge`]。書き出しに失敗したとき [`Error::Io`]。
     /// 以前の投入が書き出しに失敗しているとき [`Error::Poisoned`]。
     pub fn add_frame(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
@@ -378,18 +390,20 @@ impl<W: Write + Seek> Encoder<W> {
     /// フレームを符号化して行き先へ渡す
     ///
     /// 符号化に渡す画素は、RGBAなら正規化した写し、RGBなら入力そのもの。
+    /// 自分の出力を追うキャンバスは、載せ方を決めた矩形の符号化を待って復号し、
+    /// 次のフレームの決定より前に画面を組み直す。
     fn write_frame(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
         // 写した画素を読むのは、差分を取るときと、RGBAを符号化へ渡すとき
         if self.layout.color_type == ColorType::Rgba8 || !matches!(self.sink, Sink::Still(_)) {
             self.canvas.stage(data, self.layout.color_type);
         }
-        let source = match self.layout.color_type {
-            ColorType::Rgb8 => data,
-            ColorType::Rgba8 => self.canvas.staged(),
-        };
 
         let animation = match &mut self.sink {
             Sink::Still(writer) => {
+                let source = match self.layout.color_type {
+                    ColorType::Rgb8 => data,
+                    ColorType::Rgba8 => self.canvas.staged(),
+                };
                 let job = Job::crop(source, &self.layout, self.layout.whole(), None, Vec::new());
                 let encoded = self.pipeline.codec().encode(&job)?;
                 return Ok(writer.write_all(encoded.still())?);
@@ -403,6 +417,10 @@ impl<W: Write + Seek> Encoder<W> {
             return Ok(());
         };
 
+        let source = match self.layout.color_type {
+            ColorType::Rgb8 => data,
+            ColorType::Rgba8 => self.canvas.staged(),
+        };
         let base = (placement.blend && self.pipeline.codec().substitutes_transparency())
             .then(|| self.canvas.base(placement.dispose));
         // 切り出しはここで閉じる。以降の符号化はキャンバスを読まない
@@ -413,12 +431,15 @@ impl<W: Write + Seek> Encoder<W> {
             base,
             self.pipeline.buffer(),
         );
-        self.canvas.commit(placement.rect);
 
         let index = self.pipeline.submit(job);
+        let held = self
+            .canvas
+            .commit(placement, || self.pipeline.take(index))?;
+
         animation.push(
             Pending {
-                index,
+                encoded: held.map_or(Encoded::Waiting(index), Encoded::Ready),
                 rect: placement.rect,
                 blend: placement.blend,
                 dispose: false,

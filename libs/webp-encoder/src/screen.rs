@@ -45,7 +45,6 @@ impl Drop for Decoded {
 /// # Errors
 /// 画素を取り出せないとき、または復号した寸法が `rect` と違うとき
 /// [`Error::Decode`]。
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) fn decode(still: &[u8], rect: Rect) -> Result<Decoded, Error> {
     let (mut width, mut height): (c_int, c_int) = (0, 0);
     let pixels = unsafe { WebPDecodeRGBA(still.as_ptr(), still.len(), &mut width, &mut height) };
@@ -83,7 +82,6 @@ pub(crate) fn decode(still: &[u8], rect: Rect) -> Result<Decoded, Error> {
 ///
 /// 戻ったとき `shown` は `placement` のフレームを表示した面、`disposed` は
 /// そこから `decoded` の矩形を抜いた面になる。
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) fn compose(
     shown: &mut [u8],
     disposed: &mut [u8],
@@ -160,15 +158,18 @@ mod tests {
     /// 素材の四角の一辺の長さ
     const SQUARE: u32 = 6;
 
-    fn codec(lossless: bool, quality: f32) -> Codec {
-        Codec::new(&Config {
+    fn settings(lossless: bool, quality: f32) -> Config {
+        Config {
             color_type: ColorType::Rgba8,
             lossless,
             quality,
             method: 4,
             num_plays: 0,
-        })
-        .unwrap()
+        }
+    }
+
+    fn codec(lossless: bool, quality: f32) -> Codec {
+        Codec::new(&settings(lossless, quality)).unwrap()
     }
 
     /// 画素の値が縦横で別々に決まる不透明なRGBA
@@ -235,7 +236,7 @@ mod tests {
     #[test]
     fn a_lossless_rect_decodes_back_to_the_pixels_it_carried() {
         let layout = Layout::new(23, 17, ColorType::Rgba8).unwrap();
-        let mut canvas = Canvas::new(&layout, true);
+        let mut canvas = Canvas::new(&layout, &settings(true, 100.0));
         canvas.stage(&ramp(layout.width, layout.height), ColorType::Rgba8);
 
         let job = Job::crop(canvas.staged(), &layout, RECT, None, Vec::new());
@@ -327,7 +328,7 @@ mod tests {
     /// 合成した面は、開ループのキャンバスが持つ2面と同じものになる。
     fn compose_frames(layout: &Layout, frames: &[Vec<u8>]) -> Vec<Placement> {
         let codec = codec(true, 100.0);
-        let mut canvas = Canvas::new(layout, true);
+        let mut canvas = Canvas::new(layout, &settings(true, 100.0));
         let mut shown = vec![0u8; layout.frame_len];
         let mut disposed = vec![0u8; layout.frame_len];
         let mut placements = Vec::new();
@@ -339,7 +340,11 @@ mod tests {
                 .then(|| canvas.base(placement.dispose));
             let job = Job::crop(canvas.staged(), layout, placement.rect, base, Vec::new());
             let encoded = codec.encode(&job).unwrap();
-            canvas.commit(placement.rect);
+            canvas
+                .commit(placement, || {
+                    unreachable!("可逆が符号化した結果を求めている")
+                })
+                .unwrap();
 
             let decoded = decode(encoded.still(), placement.rect).unwrap();
             compose(
@@ -434,7 +439,7 @@ mod tests {
     /// αの連続する素材から矩形を符号化して復号し、切り出した画素と対で返す
     fn decode_fade(lossless: bool, quality: f32) -> (Vec<u8>, Vec<u8>) {
         let layout = Layout::new(64, 48, ColorType::Rgba8).unwrap();
-        let mut canvas = Canvas::new(&layout, true);
+        let mut canvas = Canvas::new(&layout, &settings(true, 100.0));
         canvas.stage(&alpha_ramp(layout.width, layout.height), ColorType::Rgba8);
 
         let job = Job::crop(canvas.staged(), &layout, FADE_RECT, None, Vec::new());
