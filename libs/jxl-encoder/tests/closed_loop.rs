@@ -2,7 +2,6 @@
 
 mod support;
 
-use anim_core::tolerance;
 use jxl_encoder::ColorType;
 use support::*;
 
@@ -35,18 +34,22 @@ fn an_unchanged_input_is_rewritten_when_the_screen_drifts() {
     );
 }
 
-/// 許容量に収まる変化は矩形を立てず、表示時間へ畳まれる
+/// 1刻みの変化でも矩形を立てる
 ///
-/// 2枚目が書いた矩形の外は復号結果と、内は仮置きした入力と比べられる。
+/// 3枚目は2枚目の塊の中を1だけ動かす。書き直すかどうかは変化の大きさではなく、
+/// 画面が入力に届いているかで決まる。
 #[test]
-fn a_change_within_the_tolerance_folds_into_the_duration() {
+fn a_single_step_of_change_stands_a_rect() {
     const BLOCK: (u32, u32, u32, u32) = (10, 6, 24, 18);
+
+    /// `BLOCK` の内側で1刻み動く塊 (x, y, 幅, 高さ)
+    const STEP: (u32, u32, u32, u32) = (14, 10, 8, 6);
 
     for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
         let base = flat(color_type, FLAT);
         let block = painted(&base, color_type, BLOCK, PAINT);
-        let lifted = lifted(&block, color_type, tolerance(QUALITY));
-        let frames = vec![base, block, lifted];
+        let stepped = painted(&block, color_type, STEP, PAINT + 1);
+        let frames = vec![base, block, stepped];
 
         let encoded = encode_frames(
             lossy(color_type, QUALITY),
@@ -59,10 +62,10 @@ fn a_change_within_the_tolerance_folds_into_the_duration() {
 
         assert_eq!(
             rects(&decoded.headers),
-            [WHOLE, BLOCK],
-            "{color_type:?} で許容量に収まる変化が矩形を立てている"
+            [WHOLE, BLOCK, STEP],
+            "{color_type:?} で1刻みの変化が表示時間へ畳まれている"
         );
-        assert_eq!(ticks(&decoded), [3, 12], "{color_type:?}");
+        assert_eq!(ticks(&decoded), [3, 5, 7], "{color_type:?}");
     }
 }
 
@@ -131,11 +134,16 @@ fn a_frame_restored_from_two_back_keeps_the_older_screen() {
     }
 }
 
-/// 許容量に収まる変化は、矩形を割る地図にも入らない
+/// 1刻みの変化も、矩形を割る地図に入る
+///
+/// 中央の塊が地図に入ると、割った2枚目がそこまで広がる。
 #[test]
-fn a_change_within_the_tolerance_stays_out_of_the_cut() {
+fn a_single_step_of_change_enters_the_cut() {
     const CORNERS: [(u32, u32, u32, u32); 2] = [(2, 2, 6, 6), (34, 20, 6, 6)];
     const MIDDLE: (u32, u32, u32, u32) = (20, 10, 6, 6);
+
+    /// 中央の塊まで届いた、割った2枚目 (x, y, 幅, 高さ)
+    const REACHING: (u32, u32, u32, u32) = (20, 10, 20, 16);
 
     let color_type = ColorType::Rgb8;
     let base = flat(color_type, FLAT);
@@ -143,18 +151,13 @@ fn a_change_within_the_tolerance_stays_out_of_the_cut() {
     for corner in CORNERS {
         paint(&mut scattered, color_type, corner, PAINT);
     }
-    paint(
-        &mut scattered,
-        color_type,
-        MIDDLE,
-        FLAT + tolerance(QUALITY),
-    );
+    paint(&mut scattered, color_type, MIDDLE, FLAT + 1);
     let frames = vec![base, scattered];
 
     let encoded = encode_frames(lossy(color_type, QUALITY), WIDTH, HEIGHT, &frames, &[3, 5]);
     let decoded = decode(&encoded, color_type);
 
-    assert_eq!(rects(&decoded.headers), [WHOLE, CORNERS[0], CORNERS[1]]);
+    assert_eq!(rects(&decoded.headers), [WHOLE, CORNERS[0], REACHING]);
 }
 
 /// 先頭フレームは、続く変化がどれだけ小さくても全面で書かれる

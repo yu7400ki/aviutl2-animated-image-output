@@ -6,13 +6,8 @@ use crate::diff::Rect;
 /// 1つの語が持つビット数
 const WORD_BITS: usize = u64::BITS as usize;
 
-/// 品質に対して、画面に出ている値が入力から離れてよい量
-///
-/// `quality` は0以上100以下。品質が高いほど小さく、100で1になる。
-pub fn tolerance(quality: f32) -> u8 {
-    let root = (quality / 100.0).sqrt();
-    (31.0 * (1.0 - root) + root).round() as u8
-}
+/// 画面に出ている値が入力から離れてよい量
+pub const TOLERANCE: u8 = 0;
 
 /// 端を含む整数の範囲
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -356,7 +351,7 @@ mod tests {
 
     const COLOR_TYPES: [ColorType; 2] = [ColorType::Rgb8, ColorType::Rgba8];
 
-    /// 許容量。品質75に当たる
+    /// 隔たりを跨いだ側と跨がない側を並べるための許容量
     const TAU: u8 = 5;
 
     /// 画素の並びを `color_type` のバイト列へ直す
@@ -423,20 +418,6 @@ mod tests {
                 }
             })
             .collect()
-    }
-
-    #[test]
-    fn quality_sets_the_tolerance() {
-        for (quality, expected) in [(50.0, 10), (75.0, 5), (90.0, 3), (100.0, 1)] {
-            assert_eq!(tolerance(quality), expected, "品質 {quality}");
-        }
-    }
-
-    #[test]
-    fn the_tolerance_falls_as_quality_rises() {
-        let values: Vec<u8> = (0..=100).map(|quality| tolerance(quality as f32)).collect();
-        assert!(values.windows(2).all(|pair| pair[0] >= pair[1]));
-        assert_eq!((values[0], values[100]), (31, 1));
     }
 
     /// 許容量ちょうどの隔たりは残り、1つ超えると書き直す

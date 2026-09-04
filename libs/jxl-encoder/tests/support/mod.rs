@@ -594,14 +594,14 @@ impl Write for Chunks {
     }
 }
 
-/// 画面が入力から離れてよい量を測る品質。許容量は3になる
+/// プラグインの既定に当たる品質
 pub const QUALITY: f32 = 90.0;
 
-/// 量子化の誤差が許容量を超える品質。許容量は12になる
+/// 量子化の誤差が画面に出る粗い品質
 pub const COARSE_QUALITY: f32 = 40.0;
 
-/// 一様な背景の値。平坦な面は許容量の内で復号される
-pub const FLAT: u8 = 100;
+/// 一様な背景の値。値域の端なので、平坦な面は入力どおりに復号される
+pub const FLAT: u8 = 0;
 
 /// 背景から大きく離れた値
 pub const PAINT: u8 = 200;
@@ -648,20 +648,6 @@ pub fn painted(
     let mut frame = base.to_vec();
     paint(&mut frame, color_type, block, value);
     frame
-}
-
-/// 全チャネルを `step` だけ持ち上げたフレーム
-pub fn lifted(frame: &[u8], color_type: ColorType, step: u8) -> Vec<u8> {
-    frame
-        .chunks_exact(color_type.bytes_per_pixel())
-        .flat_map(|pixel| {
-            let mut pixel = pixel.to_vec();
-            for channel in &mut pixel[..3] {
-                *channel = channel.saturating_add(step);
-            }
-            pixel
-        })
-        .collect()
 }
 
 /// 2つの面で最も離れた画素の隔たり

@@ -5,7 +5,7 @@ use crate::error::Error;
 use crate::layers::Layers;
 use crate::layout::Layout;
 use crate::split::{THRESHOLD, cut, exact_profile};
-use anim_core::{Rect, Refresh, Triggers, crop, dirty_rect, tolerance};
+use anim_core::{Rect, Refresh, TOLERANCE, Triggers, crop, dirty_rect};
 
 /// 差分が空のまま書き出すときの矩形
 const UNCHANGED: Rect = Rect {
@@ -221,8 +221,6 @@ struct Screen {
     /// 層を当て終えた、1つ前の表示フレームの画面
     shown_back: Vec<u8>,
     refresh: Refresh,
-    /// 画面が入力から離れてよい量
-    tolerance: u8,
     layers: Layers,
 }
 
@@ -354,7 +352,7 @@ impl Basis {
 impl Screen {
     /// `against` の画面に対して書き直す画素の地図
     fn triggers(&self, data: &[u8], against: &[u8]) -> Triggers {
-        self.refresh.triggers(data, against, self.tolerance)
+        self.refresh.triggers(data, against, TOLERANCE)
     }
 
     /// `shape` の矩形を `data` で書いた後の状態へ進める
@@ -392,7 +390,6 @@ impl Delta {
                 shown: Vec::new(),
                 shown_back: Vec::new(),
                 refresh: Refresh::new(layout.width, layout.height, layout.color_type.into()),
-                tolerance: tolerance(config.quality),
                 layers: Layers::new(layout.color_type, config.max_threads)?,
             }))
         };

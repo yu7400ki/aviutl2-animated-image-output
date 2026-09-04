@@ -1399,17 +1399,17 @@ fn an_unchanged_input_is_rewritten_once_while_the_screen_stays_apart() {
     );
 }
 
-/// 許容量に収まる変化は矩形を立てず、表示時間へ畳まれる
+/// 1刻みの変化でも矩形を立てる
 ///
-/// 許容量を超える刻みでは矩形が立つので、畳むのが「変化が無いこと」では
-/// ないと分かる。
+/// 刻みが1でも40でも同じだけ書く。書き直すかどうかは変化の大きさではなく、
+/// 画面が入力に届いているかで決まる。
 #[test]
-fn a_change_within_the_tolerance_folds_into_the_duration() {
+fn a_single_step_of_change_stands_a_rect() {
     /// 平らな面の高さ
     const LEVEL: u8 = 0x60;
 
     let (width, height) = (48, 32);
-    for (step, frames_written) in [(1u8, 1usize), (40, 2)] {
+    for step in [1u8, 40] {
         let frames = vec![
             flat_rgba(width, height, LEVEL),
             flat_rgba(width, height, LEVEL + step),
@@ -1417,12 +1417,8 @@ fn a_change_within_the_tolerance_folds_into_the_duration() {
         let (bytes, report) =
             encode(width, height, lossy_config(ColorType::Rgba8), &frames).unwrap();
 
-        assert_eq!(placements(&bytes).len(), frames_written, "刻み {step}");
-        assert_eq!(
-            report.merged_frames as usize,
-            frames.len() - frames_written,
-            "刻み {step}"
-        );
+        assert_eq!(placements(&bytes).len(), frames.len(), "刻み {step}");
+        assert_eq!(report.merged_frames, 0, "刻み {step}");
         assert_eq!(
             decode_with_image_webp(&bytes, width, height)
                 .durations

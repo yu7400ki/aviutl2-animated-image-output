@@ -6,7 +6,7 @@ use crate::error::Error;
 use crate::layout::Layout;
 use crate::normalize::normalize;
 use crate::screen::{compose, decode};
-use anim_core::{ColorType, Rect, Refresh, Triggers, dirty_rect, tolerance};
+use anim_core::{ColorType, Rect, Refresh, TOLERANCE, Triggers, dirty_rect};
 
 /// キャンバスの1画素のバイト数
 const PIXEL: usize = 4;
@@ -92,8 +92,6 @@ impl Sheets<'_> {
 struct Screen {
     /// キャンバスの幅と高さ
     size: (u32, u32),
-    /// 画面が入力から離れてよい量
-    tolerance: u8,
     /// 書き直す画素を追う地図。先頭フレームを全面で書いたときに張る
     refresh: Option<Refresh>,
 }
@@ -202,7 +200,7 @@ impl Screen {
     /// `against` の画面に対して書き直す画素の地図
     fn triggers(&self, staged: &[u8], against: &[u8]) -> Triggers {
         let refresh = self.refresh.as_ref().expect(EXPECT_STARTED);
-        refresh.triggers(staged, against, self.tolerance)
+        refresh.triggers(staged, against, TOLERANCE)
     }
 
     /// 張られた地図
@@ -255,7 +253,6 @@ impl Canvas {
         } else {
             Basis::Screen(Screen {
                 size: (layout.width, layout.height),
-                tolerance: tolerance(config.quality),
                 refresh: None,
             })
         };
