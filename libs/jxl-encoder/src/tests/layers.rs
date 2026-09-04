@@ -141,6 +141,8 @@ fn a_layer_that_does_not_fill_its_rect_stops_the_decoding() {
 }
 
 /// 非可逆でも層は矩形のぶんだけ返り、αは入力のまま残る
+///
+/// 非可逆の矩形は画面の隔たりで決まるので、書かれたヘッダから採る。
 #[test]
 fn a_lossy_encoding_returns_a_layer_for_each_rect() {
     let color_type = ColorType::Rgba8;
@@ -152,10 +154,15 @@ fn a_lossy_encoding_returns_a_layer_for_each_rect() {
         let encoded = encode_sequence(config, &sequence);
         let decoded = decode(&encoded, color_type);
         let at = format!("{} の非可逆", sequence.name);
-        assert_eq!(rects(&decoded.headers), sequence.rects, "{at}");
+        let written = rects(&decoded.headers);
+        assert_eq!(
+            decoded.pixels.len(),
+            sequence.frames.len(),
+            "{at} で表示フレームが畳まれている"
+        );
 
-        let peeled = peel(color_type, [encoded.as_slice()], &sequence.rects);
-        assert_eq!(peeled.len(), sequence.rects.len(), "{at} の層の枚数");
+        let peeled = peel(color_type, [encoded.as_slice()], &written);
+        assert_eq!(peeled.len(), written.len(), "{at} の層の枚数");
         let sources = sources(&decoded.headers);
         let mut moved = false;
         for (index, (rect, layer)) in peeled.iter().enumerate() {

@@ -11,7 +11,6 @@ mod tests;
 
 pub use encoder::Encoder;
 pub use error::{DecodingError, EncodingError, Error, ErrorCode};
-pub use layers::Layers;
 pub use layout::ColorType;
 
 use std::ops::RangeInclusive;

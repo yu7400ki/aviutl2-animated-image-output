@@ -151,7 +151,8 @@ impl Drop for Raw {
 /// フレーム数が2以上ならアニメーションになり、1なら静止画になる。
 /// `writer` への書き出しは1フレーム遅れる。
 ///
-/// キャンバス3面ぶんまでの画素を抱える (1920x1080のRGBA8で約24.9MB)。
+/// 可逆はキャンバス3面ぶん、非可逆は画面を組む面も含めて6面ぶんまでの画素を
+/// 抱える (1920x1080のRGBA8で約24.9MBと約49.8MB)。
 pub struct Encoder<W: Write> {
     writer: W,
     raw: Raw,
@@ -159,7 +160,7 @@ pub struct Encoder<W: Write> {
     settings: *mut JxlEncoderFrameSettings,
     format: JxlPixelFormat,
     layout: Layout,
-    /// 書き出しを待っているフレームとキャンバスの追跡
+    /// 書き出しを待っているフレームと、比べる相手の追跡
     delta: Delta,
     num_frames: u32,
     /// [`Self::add_frame`] が受け付けたフレーム数
@@ -168,8 +169,8 @@ pub struct Encoder<W: Write> {
     chunk: Vec<u8>,
 }
 
-// SAFETY: 抱える生ポインタは唯一の所有で別名を持たず、libjxl の符号化経路は
-// スレッド固有の状態を持たない。同時アクセスは Sync を付けないことで防ぐ。
+// SAFETY: 抱える生ポインタは唯一の所有で別名を持たず、libjxl の符号化と復号の
+// 経路はスレッド固有の状態を持たない。同時アクセスは Sync を付けないことで防ぐ。
 unsafe impl<W: Write + Send> Send for Encoder<W> {}
 
 impl<W: Write> Encoder<W> {
@@ -181,7 +182,8 @@ impl<W: Write> Encoder<W> {
     /// [`Error::InvalidTps`]。品質が [`QUALITY_RANGE`]
     /// の外のとき [`Error::InvalidQuality`]。均衡が [`EFFORT_RANGE`] の外のとき
     /// [`Error::InvalidEffort`]。寸法が0のとき [`Error::InvalidDimensions`]。
-    /// 符号化器を組み立てられないとき [`Error::Encode`]。
+    /// 符号化器を組み立てられないとき [`Error::Encode`]。非可逆で復号器を
+    /// 組み立てられないとき [`Error::Decode`]。
     pub fn new(
         writer: W,
         width: u32,
@@ -261,8 +263,8 @@ impl<W: Write> Encoder<W> {
                 endianness: JXL_NATIVE_ENDIAN,
                 align: 0,
             },
+            delta: Delta::new(&layout, &config)?,
             layout,
-            delta: Delta::new(),
             num_frames,
             frames_accepted: 0,
             chunk: vec![0; OUTPUT_CHUNK],
@@ -303,6 +305,7 @@ impl<W: Write> Encoder<W> {
         self.frames_accepted += 1;
         if let Some(pending) = self.delta.advance(&self.layout, data, duration) {
             self.write(pending, false)?;
+            self.delta.settle(&self.layout);
         }
         Ok(())
     }
@@ -342,6 +345,7 @@ impl<W: Write> Encoder<W> {
                     pixels.len(),
                 )
             })?;
+            self.delta.wrote(region.rect(&self.layout));
             offset += len;
 
             // 最後のフレームかどうかは排水した時点の状態で焼き込まれる
@@ -362,6 +366,7 @@ impl<W: Write> Encoder<W> {
                 unsafe { JxlEncoderProcessOutput(self.raw.enc, &mut next_out, &mut avail_out) };
             let written = self.chunk.len() - avail_out;
             self.writer.write_all(&self.chunk[..written])?;
+            self.delta.feed(&self.layout, &self.chunk[..written])?;
 
             match status {
                 JXL_ENC_SUCCESS => return Ok(()),
@@ -384,9 +389,7 @@ impl<W: Write> Encoder<W> {
                 expected: self.num_frames,
                 actual: self.frames_accepted,
             });
-        if let Some(pending) = self.delta.take(&self.layout) {
-            self.write(pending, true)?;
-        }
+        self.close()?;
         if let Some(mismatch) = mismatch {
             return Err(mismatch);
         }
@@ -394,6 +397,24 @@ impl<W: Write> Encoder<W> {
         let Encoder { mut writer, .. } = self;
         writer.flush()?;
         Ok(writer)
+    }
+
+    /// 保留中のフレームを書き出してストリームを閉じる
+    ///
+    /// # Errors
+    /// 符号化に失敗したとき [`Error::Encode`]。書き出しに失敗したとき
+    /// [`Error::Io`]。
+    pub(crate) fn close(&mut self) -> Result<(), Error> {
+        if let Some(pending) = self.delta.take(&self.layout) {
+            self.write(pending, true)?;
+        }
+        Ok(())
+    }
+
+    /// 書き出しを待っているフレームと、比べる相手の追跡
+    #[cfg(test)]
+    pub(crate) fn delta(&self) -> &Delta {
+        &self.delta
     }
 }
 

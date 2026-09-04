@@ -1,5 +1,6 @@
 //! 符号化した .jxl を jxl-rs と自前の復号器で読み直し、入力と設定に照らす
 
+mod closed;
 mod layers;
 
 use crate::layers::Layers;

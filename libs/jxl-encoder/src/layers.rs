@@ -78,7 +78,7 @@ impl Drop for Raw {
 ///
 /// 層1枚ぶんの画素と、渡されたバイト列のうち読み進めていない分を抱える。層は
 /// キャンバス全面まで大きくなる (1920x1080のRGBA8で約8.3MB)。
-pub struct Layers {
+pub(crate) struct Layers {
     raw: Raw,
     format: JxlPixelFormat,
     /// 層の1画素あたりのバイト数
@@ -98,7 +98,7 @@ impl Layers {
     ///
     /// # Errors
     /// 復号器を組み立てられないとき [`Error::Decode`]。
-    pub fn new(color_type: ColorType, max_threads: u32) -> Result<Self, Error> {
+    pub(crate) fn new(color_type: ColorType, max_threads: u32) -> Result<Self, Error> {
         Ok(Layers {
             raw: Raw::new(max_threads)?,
             format: JxlPixelFormat {
@@ -118,8 +118,20 @@ impl Layers {
     /// 書いた矩形を控える
     ///
     /// 返る層は控えた順にこの矩形と対になり、画素は矩形の面積のぶんだけ並ぶ。
-    pub fn wrote(&mut self, rect: Rect) {
+    pub(crate) fn wrote(&mut self, rect: Rect) {
         self.pending.push_back(rect);
+    }
+
+    /// 層が返った枚数
+    #[cfg(test)]
+    pub(crate) fn returned(&self) -> u64 {
+        self.returned
+    }
+
+    /// 層をまだ待っている矩形の枚数
+    #[cfg(test)]
+    pub(crate) fn awaiting(&self) -> usize {
+        self.pending.len()
     }
 
     /// バイト列を継ぎ足し、揃った層を書いた矩形と対にして `each` へ渡す
@@ -132,7 +144,11 @@ impl Layers {
     ///
     /// # Panics
     /// 返った層が、[`Layers::wrote`] で控えた矩形と枚数か大きさで食い違ったとき。
-    pub fn feed(&mut self, bytes: &[u8], mut each: impl FnMut(Rect, &[u8])) -> Result<(), Error> {
+    pub(crate) fn feed(
+        &mut self,
+        bytes: &[u8],
+        mut each: impl FnMut(Rect, &[u8]),
+    ) -> Result<(), Error> {
         if bytes.is_empty() {
             return Ok(());
         }

@@ -1,6 +1,7 @@
 //! キャンバスの大きさと、入力フレームのバイト並び
 
 use crate::error::Error;
+use anim_core::Rect;
 
 /// 画素の色種別 (ビット深度8固定)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +34,15 @@ impl ColorType {
         match self {
             ColorType::Rgb8 => false,
             ColorType::Rgba8 => true,
+        }
+    }
+}
+
+impl From<ColorType> for anim_core::ColorType {
+    fn from(color_type: ColorType) -> Self {
+        match color_type {
+            ColorType::Rgb8 => anim_core::ColorType::Rgb8,
+            ColorType::Rgba8 => anim_core::ColorType::Rgba8,
         }
     }
 }
@@ -74,6 +84,16 @@ impl Layout {
             stride,
             frame_len: stride * height as usize,
         })
+    }
+
+    /// キャンバス全体を覆う矩形
+    pub(crate) fn canvas(&self) -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            width: self.width,
+            height: self.height,
+        }
     }
 
     /// `data` が1フレームぶんの長さか検める
