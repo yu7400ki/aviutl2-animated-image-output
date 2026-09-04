@@ -1,7 +1,7 @@
-//! libjxl のエンコード経路への FFI
+//! libjxl の符号化と復号への FFI
 //!
 //! 宣言は同梱した libjxl v0.12.0 の `lib/include/jxl/` に対応する。安全な抽象は置かず、
-//! 符号化に要る関数と、その受け渡しに現れる構造体だけを写す。
+//! 符号化と復号に要る関数と、その受け渡しに現れる構造体だけを写す。
 //!
 //! 構造体はすべて呼び側が確保して値で渡すため、項目を名前で持ち、大きさも一致する。
 
@@ -42,6 +42,18 @@ pub const JXL_ENC_ERR_API_USAGE: c_int = 0x81;
 /// `JxlEncoderFrameSettingId` — 速度と圧縮率の均衡 1..=10
 pub const JXL_ENC_FRAME_SETTING_EFFORT: c_int = 0;
 
+/// `JxlDecoderStatus`
+pub const JXL_DEC_SUCCESS: c_int = 0;
+pub const JXL_DEC_ERROR: c_int = 1;
+pub const JXL_DEC_NEED_MORE_INPUT: c_int = 2;
+pub const JXL_DEC_NEED_IMAGE_OUT_BUFFER: c_int = 5;
+
+/// `JxlDecoderStatus` のうち購読できる事象。論理和で [`JxlDecoderSubscribeEvents`] へ渡し、
+/// そこまで進んだところで [`JxlDecoderProcessInput`] が同じ値を返す
+pub const JXL_DEC_BASIC_INFO: c_int = 0x40;
+pub const JXL_DEC_FRAME: c_int = 0x400;
+pub const JXL_DEC_FULL_IMAGE: c_int = 0x1000;
+
 /// [`JxlParallelRunner`] の戻り値。0 が成功
 pub type JxlParallelRetCode = c_int;
 
@@ -63,7 +75,8 @@ pub type JxlParallelRunner = unsafe extern "C" fn(
     end_range: u32,
 ) -> JxlParallelRetCode;
 
-/// 確保を差し替える器。[`JxlEncoderCreate`] へ NULL を渡すと libjxl の既定になる
+/// 確保を差し替える器。[`JxlEncoderCreate`] や [`JxlDecoderCreate`] へ NULL を渡すと
+/// libjxl の既定になる
 #[repr(C)]
 pub struct JxlMemoryManager {
     _private: [u8; 0],
@@ -78,6 +91,12 @@ pub struct JxlEncoder {
 /// フレーム単位の設定。所有は [`JxlEncoder`] にあり、個別の解放は無い
 #[repr(C)]
 pub struct JxlEncoderFrameSettings {
+    _private: [u8; 0],
+}
+
+/// 復号器。確保と解放は [`JxlDecoderCreate`] と [`JxlDecoderDestroy`]
+#[repr(C)]
+pub struct JxlDecoder {
     _private: [u8; 0],
 }
 
@@ -292,7 +311,52 @@ unsafe extern "C" {
         avail_out: *mut usize,
     ) -> c_int;
 
-    /// [`JxlEncoderSetParallelRunner`] へ渡す並列実行の実体
+    /// 失敗すれば NULL
+    pub fn JxlDecoderCreate(memory_manager: *const JxlMemoryManager) -> *mut JxlDecoder;
+
+    pub fn JxlDecoderDestroy(dec: *mut JxlDecoder);
+
+    /// 入力を進める前に呼ぶ
+    pub fn JxlDecoderSetParallelRunner(
+        dec: *mut JxlDecoder,
+        parallel_runner: Option<JxlParallelRunner>,
+        parallel_runner_opaque: *mut c_void,
+    ) -> c_int;
+
+    /// [`JxlDecoderProcessInput`] に返させる事象を選ぶ。入力を進める前に呼ぶ
+    pub fn JxlDecoderSubscribeEvents(dec: *mut JxlDecoder, events_wanted: c_int) -> c_int;
+
+    /// [`JXL_TRUE`] で各フレームをキャンバス全面へ重ねて返す。既定は [`JXL_TRUE`]
+    pub fn JxlDecoderSetCoalescing(dec: *mut JxlDecoder, coalescing: c_int) -> c_int;
+
+    /// 与えられた入力を読み進め、購読した事象か、続けるのに要るものを返す
+    pub fn JxlDecoderProcessInput(dec: *mut JxlDecoder) -> c_int;
+
+    /// 読み進める領域を与える。[`JxlDecoderReleaseInput`] まで呼び側が保持する
+    pub fn JxlDecoderSetInput(dec: *mut JxlDecoder, data: *const u8, size: usize) -> c_int;
+
+    /// 入力を手放し、まだ読み進めていないバイト数を返す。次に与える領域はその分から始める
+    pub fn JxlDecoderReleaseInput(dec: *mut JxlDecoder) -> usize;
+
+    /// `format` でフレーム1枚を受けるのに要るバイト数。[`JxlDecoderSetCoalescing`] が
+    /// [`JXL_TRUE`] なら [`JXL_DEC_BASIC_INFO`] より後に呼べ、[`JXL_FALSE`] なら
+    /// [`JXL_DEC_FRAME`] より後に呼べて切り出された寸法の分を返す
+    pub fn JxlDecoderImageOutBufferSize(
+        dec: *const JxlDecoder,
+        format: *const JxlPixelFormat,
+        size: *mut usize,
+    ) -> c_int;
+
+    /// 画素の書き出し先を与える。領域は呼び側が所有し、今のフレームに効く。
+    /// [`JXL_DEC_FRAME`] より後、遅くとも [`JXL_DEC_NEED_IMAGE_OUT_BUFFER`] で与える
+    pub fn JxlDecoderSetImageOutBuffer(
+        dec: *mut JxlDecoder,
+        format: *const JxlPixelFormat,
+        buffer: *mut c_void,
+        size: usize,
+    ) -> c_int;
+
+    /// [`JxlEncoderSetParallelRunner`] と [`JxlDecoderSetParallelRunner`] へ渡す並列実行の実体
     pub fn JxlThreadParallelRunner(
         runner_opaque: *mut c_void,
         jpegxl_opaque: *mut c_void,
@@ -546,5 +610,16 @@ mod tests {
         assert!(!enc.is_null());
         assert_eq!(unsafe { JxlEncoderGetError(enc) }, JXL_ENC_ERR_OK);
         unsafe { JxlEncoderDestroy(enc) };
+    }
+
+    #[test]
+    fn a_created_decoder_takes_a_subscription() {
+        let dec = unsafe { JxlDecoderCreate(std::ptr::null()) };
+        assert!(!dec.is_null());
+        assert_eq!(
+            unsafe { JxlDecoderSubscribeEvents(dec, JXL_DEC_BASIC_INFO | JXL_DEC_FULL_IMAGE) },
+            JXL_DEC_SUCCESS
+        );
+        unsafe { JxlDecoderDestroy(dec) };
     }
 }
