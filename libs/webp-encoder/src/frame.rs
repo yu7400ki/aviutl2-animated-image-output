@@ -71,16 +71,16 @@ impl Sheets<'_> {
         })
     }
 
-    /// `kept` を抜かない仮定として、狭い方の候補で載せ方を組む
+    /// 2つの候補の狭い方で載せ方を組む
     ///
-    /// `mixes` は完全不透明でない画素を重ねられるかを分けるもの。
+    /// `kept` は矩形を抜かない仮定の候補、`cleared` は抜いた仮定のもの。`mixes` は
+    /// 完全不透明でない画素を重ねられるかを分ける。
     fn placement(
         &self,
         kept: Rect,
-        disposable: bool,
+        cleared: Option<Rect>,
         mixes: impl Fn(&[u8], &[u8]) -> bool,
     ) -> Placement {
-        let cleared = disposable.then(|| self.exact(self.disposed).unwrap_or(SINGLE_PIXEL));
         let (rect, dispose) = narrower(kept, cleared);
         Placement {
             rect,
@@ -129,13 +129,21 @@ impl Basis {
         match self {
             Basis::Inputs => {
                 let kept = sheets.exact(sheets.drawn)?;
-                Some(sheets.placement(kept, disposable, |staged, base| staged == base))
+                let cleared =
+                    disposable.then(|| sheets.exact(sheets.disposed).unwrap_or(SINGLE_PIXEL));
+                Some(sheets.placement(kept, cleared, |staged, base| staged == base))
             }
             Basis::Rewritten(rewrite) => {
                 let change = rewrite.changes(sheets.staged, sheets.drawn);
                 let kept = rewrite.carried(&change).bounds().map(snap_to_even);
+                let cleared = disposable.then(|| {
+                    rewrite
+                        .changes(sheets.staged, sheets.disposed)
+                        .bounds()
+                        .map_or(SINGLE_PIXEL, snap_to_even)
+                });
                 rewrite.advance(change);
-                Some(sheets.placement(kept?, disposable, |_, base| base[3] == 0))
+                Some(sheets.placement(kept?, cleared, |_, base| base[3] == 0))
             }
         }
     }

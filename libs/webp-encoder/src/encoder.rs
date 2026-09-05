@@ -550,14 +550,6 @@ mod tests {
         for (index, frame) in frames.iter().enumerate() {
             let delay = FrameDelay::new(index as u32 * 7 + 20, 1000).unwrap();
             encoder.add_frame(frame, delay).unwrap();
-            if let Sink::Animation(a) = &encoder.sink {
-                let q: Vec<String> = a
-                    .pending
-                    .iter()
-                    .map(|p| format!("{:?} b{} d{}", p.rect, p.blend, p.dispose))
-                    .collect();
-                println!("after {index}: {q:?}");
-            }
         }
         let (writer, report) = encoder.finish().unwrap();
         (writer.into_inner(), report)
@@ -717,9 +709,9 @@ mod tests {
     /// αは可逆で格納されるので、合成後も入力と1も違わない。これが重ねる形を
     /// 入力のキャンバスで判定してよい根拠になる。RGBは非可逆の量子化ぶん離れる。
     ///
-    /// 素材は半透明の背景を上書きで載せるので、`image-webp` の重ねる合成の
-    /// 逸脱にも廃棄の逸脱にも当たらない。矩形がずれるか重ねる向きが逆になれば
-    /// 桁で外れる。
+    /// 素材は半透明の背景を上書きで載せるので、`image-webp` の重ねる合成の逸脱にも、
+    /// 非可逆のフレームの廃棄を落とす逸脱にも当たらない。矩形がずれるか重ねる向きが
+    /// 逆になれば桁で外れる。廃棄を踏む素材は `tests/roundtrip.rs` が ffmpeg で見る。
     #[test]
     fn a_lossy_output_decodes_back_to_the_input() {
         /// 画素ごとの差の平均の上限。非可逆の量子化とデコーダ間の変換の違いを見込む

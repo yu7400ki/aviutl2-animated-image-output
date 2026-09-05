@@ -122,18 +122,6 @@ impl Layers {
         self.pending.push_back(rect);
     }
 
-    /// 層が返った枚数
-    #[cfg(test)]
-    pub(crate) fn returned(&self) -> u64 {
-        self.returned
-    }
-
-    /// 層をまだ待っている矩形の枚数
-    #[cfg(test)]
-    pub(crate) fn awaiting(&self) -> usize {
-        self.pending.len()
-    }
-
     /// バイト列を継ぎ足し、揃った層を書いた矩形と対にして `each` へ渡す
     ///
     /// 渡すのは [`Encoder`](crate::Encoder) が書き出したバイト列を、書き出した順に

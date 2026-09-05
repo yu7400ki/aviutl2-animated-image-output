@@ -7,7 +7,7 @@ extern crate self as jxl_encoder;
 mod delta;
 mod encoder;
 mod error;
-#[expect(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 mod layers;
 mod layout;
 mod split;

@@ -1362,6 +1362,37 @@ fn a_lossy_animation_composes_near_the_input() {
     }
 }
 
+/// 非可逆で矩形を抜いたフレームも、合成が入力の近くへ戻る
+///
+/// 透過の面を四角が動く素材は抜く廃棄方法を踏む。抜いた跡は誰も塗り直さないので、
+/// 抜く矩形を取り違えるとαがそのまま残る。
+///
+/// 合成は ffmpeg だけで確かめる。**`image-webp` は非可逆のフレームの廃棄を
+/// 落とす** — 同じ素材を可逆で書くと ANMF の矩形・重ね方・廃棄方法は1つも
+/// 変わらないのに、そちらは合成が入力へバイト一致で戻る
+/// (`a_loop_that_clears_rects_composes_the_same_on_the_second_pass`)。
+#[test]
+fn a_lossy_animation_that_clears_rects_composes_near_the_input() {
+    let (width, height) = (32, 24);
+    let frames: Vec<Vec<u8>> = [(2, 2), (6, 6), (12, 10), (20, 14)]
+        .map(|at| sprite_rgba(width, height, at))
+        .to_vec();
+
+    let (bytes, _) = encode(width, height, lossy_config(ColorType::Rgba8), &frames).unwrap();
+
+    let placed = placements(&bytes);
+    assert!(
+        placed.iter().any(|frame| frame.dispose),
+        "矩形を抜くフレームが1つも無い"
+    );
+    let (lossless, _) = encode(width, height, config(ColorType::Rgba8, 0), &frames).unwrap();
+    assert_eq!(placed, placements(&lossless), "可逆と非可逆で載せ方が違う");
+
+    if let Some(composed) = decode_with_ffmpeg(&bytes, width, height) {
+        assert_lossy_close(&composed, &frames, 3.0);
+    }
+}
+
 /// 決定的な擬似乱数で埋めた不透明なRGBA
 fn noisy_rgba(width: u32, height: u32) -> Vec<u8> {
     let mut rgba = noise((width * height * 4) as usize, 0x5EED);
