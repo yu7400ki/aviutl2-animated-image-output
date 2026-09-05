@@ -2,11 +2,6 @@
 
 use crate::filter;
 use crate::zlib::Compressor;
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::thread::{self, JoinHandle};
-
-/// 相方に付ける名前
-const MATE_NAME: &str = "apng-deflate";
 
 /// 使い終わったバッファを溜めて配り直す領域
 ///
@@ -60,76 +55,6 @@ impl Candidate {
     }
 }
 
-/// 相方へ渡す、フィルタ後のバイト列と書き込み先
-struct Job {
-    filtered: Vec<u8>,
-    body: Vec<u8>,
-}
-
-/// 渡されたバイト列を圧縮して返し続ける
-fn work(level: u32, jobs: &Receiver<Job>, done: &Sender<Job>) {
-    let compressor = Compressor::new(level);
-    while let Ok(mut job) = jobs.recv() {
-        compressor.compress_into(&job.filtered, &mut job.body);
-        if done.send(job).is_err() {
-            return;
-        }
-    }
-}
-
-/// 戦略の対の片方を受け持つ相方
-///
-/// [`Mate::submit`] で渡したバイト列は、[`Mate::wait`] が書き込み先ごと返す。
-struct Mate {
-    jobs: Option<Sender<Job>>,
-    done: Receiver<Job>,
-    worker: Option<JoinHandle<()>>,
-}
-
-impl Mate {
-    /// 圧縮レベル `level` (1..=9) の相方を、並列に走らせる先がある環境で起こす
-    fn start(level: u32) -> Option<Self> {
-        if thread::available_parallelism().ok()?.get() < 2 {
-            return None;
-        }
-
-        let (jobs, requests) = channel();
-        let (replies, done) = channel();
-        let worker = thread::Builder::new()
-            .name(MATE_NAME.to_owned())
-            .spawn(move || work(level, &requests, &replies))
-            .ok()?;
-        Some(Mate {
-            jobs: Some(jobs),
-            done,
-            worker: Some(worker),
-        })
-    }
-
-    /// `filtered` の圧縮を渡す
-    fn submit(&self, filtered: Vec<u8>, body: Vec<u8>) {
-        let jobs = self.jobs.as_ref().expect("畳むまで相方は居る");
-        jobs.send(Job { filtered, body })
-            .expect("畳むまで相方は居る");
-    }
-
-    /// 渡した圧縮の結末を待つ
-    fn wait(&self) -> (Vec<u8>, Vec<u8>) {
-        let job = self.done.recv().expect("畳むまで相方は居る");
-        (job.filtered, job.body)
-    }
-}
-
-/// 投入口を落として相方を畳む
-impl Drop for Mate {
-    fn drop(&mut self) {
-        self.jobs = None;
-        if let Some(worker) = self.worker.take() {
-            drop(worker.join());
-        }
-    }
-}
-
 /// 領域をフィルタして圧縮する
 ///
 /// 圧縮に使うバッファはプールから借り、使い終わったら返す。
@@ -141,10 +66,6 @@ pub(crate) struct Codec {
     filtered: Vec<u8>,
     /// 切り出した領域と圧縮した本体を回すバッファ
     pool: BufferPool,
-    /// [`filter::Strategy::Unfiltered`] の圧縮を受け持つ相方
-    ///
-    /// 相方が居ない環境では、対を順に走らせる。
-    mate: Option<Mate>,
 }
 
 impl Codec {
@@ -155,7 +76,6 @@ impl Codec {
             scratch: filter::Scratch::new(),
             filtered: Vec::new(),
             pool: BufferPool::new(),
-            mate: Mate::start(level),
         }
     }
 
@@ -185,35 +105,9 @@ impl Codec {
         region_stride: usize,
         bpp: usize,
     ) -> Candidate {
-        let mut rows = self.pool.take();
-        filter::filter_image(
-            region,
-            region_stride,
-            bpp,
-            filter::Strategy::Unfiltered,
-            &mut self.scratch,
-            &mut rows,
-        );
-
-        let mut body = self.pool.take();
-        let unfiltered = match self.mate.as_ref() {
-            Some(mate) => {
-                mate.submit(rows, body);
-                None
-            }
-            None => {
-                self.compressor.compress_into(&rows, &mut body);
-                self.pool.give(rows);
-                Some(body)
-            }
-        };
-
+        let unfiltered =
+            self.compress_with(region, region_stride, bpp, filter::Strategy::Unfiltered);
         let adaptive = self.compress_with(region, region_stride, bpp, filter::Strategy::Adaptive);
-        let unfiltered = unfiltered.unwrap_or_else(|| {
-            let (rows, body) = self.mate.as_ref().expect("圧縮を渡した相方").wait();
-            self.pool.give(rows);
-            body
-        });
         Candidate {
             body: self.shorter(adaptive, unfiltered),
         }
@@ -283,29 +177,6 @@ mod tests {
 
         let candidate = codec.compress(&region, STRIDE, BPP);
         assert_eq!(candidate.body, unfiltered);
-    }
-
-    /// 対を並列に走らせても順に走らせても、書き出す本体は変わらない
-    ///
-    /// 並列に走らせる先がある環境では、比べる片方が本当に相方を起こしている
-    /// ことまで確かめる。相方が起きなければ順と順を比べるだけになる。
-    #[test]
-    fn running_the_pair_in_parallel_keeps_the_same_body() {
-        let mates_are_possible = thread::available_parallelism().is_ok_and(|n| n.get() >= 2);
-        for rows in [1, 256] {
-            let region = noise(rows * STRIDE, rows as u32);
-            let mut parallel = Codec::new(6);
-            if mates_are_possible {
-                assert!(parallel.mate.is_some(), "相方が起きていること");
-            }
-            let mut serial = Codec::new(6);
-            serial.mate = None;
-            assert_eq!(
-                parallel.compress(&region, STRIDE, BPP).body,
-                serial.compress(&region, STRIDE, BPP).body,
-                "{rows} 行"
-            );
-        }
     }
 
     /// 退けた候補のバッファはプールへ返り、書き出す候補のバッファは出ていく
