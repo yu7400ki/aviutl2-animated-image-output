@@ -3,27 +3,9 @@ use apng_encoder::COMPRESSION_LEVELS;
 use win32_ui::{
     Dialog, MessageBox,
     layout::{FlexLayout, JustifyContent, SizeValue, labeled},
-    widget::{Button, CheckBox, ComboBox, Label, Number},
+    widget::{Button, ComboBox, Number},
 };
 use windows::Win32::Foundation::HWND;
-
-/// 色数の削減のチェックボックスに出す名前
-pub(crate) const REDUCE_COLOR_LABEL: &str = "色数を削減する";
-
-/// 色数の削減に添える但し書き
-///
-/// 有効にした書き出しは、全フレームの色が256色に収まらなければ失敗する。
-const REDUCE_COLOR_NOTE: &str = "256色に収まらないと出力に失敗します";
-
-/// 色数の削減。
-///
-/// 名前だけでは書き出しが失敗しうる設定だと読めないため、但し書きを直下へ添える
-fn reduce_color_field(checkbox: &CheckBox) -> FlexLayout {
-    FlexLayout::column()
-        .with_gap(3.0)
-        .with_widget(checkbox.clone())
-        .with_widget(Label::new(REDUCE_COLOR_NOTE))
-}
 
 fn new_repeat_input(repeat: u32) -> Number {
     Number::new().value(repeat as i32).range(0, i32::MAX)
@@ -44,7 +26,6 @@ fn collect_config(
     repeat_input: &Number,
     color_combobox: &ComboBox,
     compression_input: &Number,
-    reduce_color_checkbox: &CheckBox,
 ) -> Result<Config, String> {
     let repeat = repeat_input
         .validate()
@@ -61,7 +42,6 @@ fn collect_config(
             _ => Default::default(),
         },
         compression_level: compression_level as u32,
-        reduce_color: reduce_color_checkbox.is_checked(),
     })
 }
 
@@ -70,7 +50,6 @@ fn settings_layout(
     repeat_input: &Number,
     color_combobox: &ComboBox,
     compression_input: &Number,
-    reduce_color_checkbox: &CheckBox,
 ) -> FlexLayout {
     FlexLayout::column()
         .with_width(SizeValue::Points(300.0))
@@ -79,7 +58,6 @@ fn settings_layout(
         .with_layout(labeled("ループ回数 (0=無限ループ)", repeat_input.clone()))
         .with_layout(labeled("カラーフォーマット", color_combobox.clone()))
         .with_layout(labeled(&compression_label(), compression_input.clone()))
-        .with_layout(reduce_color_field(reduce_color_checkbox))
 }
 
 pub fn show_config_dialog(
@@ -96,9 +74,6 @@ pub fn show_config_dialog(
 
     let compression_input = new_compression_input(default_config.compression_level);
 
-    let reduce_color_checkbox =
-        CheckBox::new(REDUCE_COLOR_LABEL).checked(default_config.reduce_color);
-
     let dialog = Dialog::new("APNG出力設定");
     let handle = dialog.handle();
 
@@ -108,13 +83,7 @@ pub fn show_config_dialog(
         let repeat_input = repeat_input.clone();
         let color_combobox = color_combobox.clone();
         let compression_input = compression_input.clone();
-        let reduce_color_checkbox = reduce_color_checkbox.clone();
-        move || match collect_config(
-            &repeat_input,
-            &color_combobox,
-            &compression_input,
-            &reduce_color_checkbox,
-        ) {
+        move || match collect_config(&repeat_input, &color_combobox, &compression_input) {
             Ok(_) => handle.accept(),
             Err(message) => MessageBox::error(handle.hwnd(), &message, "エラー"),
         }
@@ -125,13 +94,7 @@ pub fn show_config_dialog(
         move || handle.cancel()
     });
 
-    let layout = settings_layout(
-        &repeat_input,
-        &color_combobox,
-        &compression_input,
-        &reduce_color_checkbox,
-    )
-    .with_layout(
+    let layout = settings_layout(&repeat_input, &color_combobox, &compression_input).with_layout(
         FlexLayout::row()
             .with_gap(10.0)
             .with_padding_rect(0.0, 0.0, 5.0, 0.0)
@@ -148,14 +111,9 @@ pub fn show_config_dialog(
         return Ok(None);
     }
 
-    collect_config(
-        &repeat_input,
-        &color_combobox,
-        &compression_input,
-        &reduce_color_checkbox,
-    )
-    .map(Some)
-    .map_err(|_| ())
+    collect_config(&repeat_input, &color_combobox, &compression_input)
+        .map(Some)
+        .map_err(|_| ())
 }
 
 fn compression_label() -> String {
@@ -178,21 +136,8 @@ fn compression_error_message() -> String {
 mod tests {
     use super::*;
 
-    /// 色数の削減に添える但し書きは、有効にすると何が起きるかを述べる
-    ///
-    /// 名前だけでは、書き出しが失敗しうる設定であることが読めない。
-    #[test]
-    fn the_reduce_color_note_says_what_can_go_wrong() {
-        assert!(REDUCE_COLOR_NOTE.contains("256色"), "{REDUCE_COLOR_NOTE}");
-        assert!(REDUCE_COLOR_NOTE.contains("失敗"), "{REDUCE_COLOR_NOTE}");
-    }
-
     fn color_combobox() -> ComboBox {
         ComboBox::new(vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()])
-    }
-
-    fn reduce_color_checkbox() -> CheckBox {
-        CheckBox::new(REDUCE_COLOR_LABEL)
     }
 
     /// 値域の内側の入力は、そのまま設定になる
@@ -201,20 +146,16 @@ mod tests {
         let repeat = new_repeat_input(0);
         let color = color_combobox();
         let compression = new_compression_input(6);
-        let reduce_color = reduce_color_checkbox();
 
         repeat.set_value(3);
         color.set_selected_index(1);
         compression.set_value(*COMPRESSION_LEVELS.end());
-        reduce_color.set_checked(true);
 
-        let config = collect_config(&repeat, &color, &compression, &reduce_color)
-            .expect("値域の内側なので組める");
+        let config = collect_config(&repeat, &color, &compression).expect("値域の内側なので組める");
 
         assert_eq!(config.repeat, 3);
         assert!(config.color_format == ColorFormat::Rgba32);
         assert_eq!(config.compression_level, *COMPRESSION_LEVELS.end());
-        assert!(config.reduce_color);
     }
 
     /// 値域の外の圧縮レベルは、値域を名乗る文言で弾かれる
@@ -223,14 +164,13 @@ mod tests {
         let repeat = new_repeat_input(0);
         let color = color_combobox();
         let compression = new_compression_input(6);
-        let reduce_color = reduce_color_checkbox();
 
         for level in [
             *COMPRESSION_LEVELS.start() as i32 - 1,
             *COMPRESSION_LEVELS.end() as i32 + 1,
         ] {
             compression.set_value(level);
-            let Err(message) = collect_config(&repeat, &color, &compression, &reduce_color) else {
+            let Err(message) = collect_config(&repeat, &color, &compression) else {
                 panic!("圧縮レベル{level}は値域の外なので弾かれる");
             };
             assert_eq!(message, compression_error_message());
@@ -243,11 +183,10 @@ mod tests {
         let repeat = new_repeat_input(0);
         let color = color_combobox();
         let compression = new_compression_input(6);
-        let reduce_color = reduce_color_checkbox();
 
         for text in ["abc", "", "2147483648", "-1"] {
             repeat.set_text(text);
-            let Err(message) = collect_config(&repeat, &color, &compression, &reduce_color) else {
+            let Err(message) = collect_config(&repeat, &color, &compression) else {
                 panic!("ループ回数{text:?}は弾かれる");
             };
             assert_eq!(

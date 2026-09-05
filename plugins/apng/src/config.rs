@@ -8,7 +8,6 @@ pub struct Config {
     pub repeat: u32,
     pub color_format: ColorFormat,
     pub compression_level: u32,
-    pub reduce_color: bool,
 }
 
 impl Default for Config {
@@ -17,7 +16,6 @@ impl Default for Config {
             repeat: 0,
             color_format: ColorFormat::default(),
             compression_level: 6,
-            reduce_color: false,
         }
     }
 }
@@ -44,16 +42,10 @@ impl IniConfig for Config {
             .filter(|level| COMPRESSION_LEVELS.contains(level))
             .unwrap_or(default.compression_level);
 
-        let reduce_color = section
-            .and_then(|s| s.get("reduce_color"))
-            .and_then(|s| s.parse::<bool>().ok())
-            .unwrap_or(default.reduce_color);
-
         Self {
             repeat,
             color_format,
             compression_level,
-            reduce_color,
         }
     }
 
@@ -61,8 +53,7 @@ impl IniConfig for Config {
         ini.with_section(Some(Self::SECTION))
             .set("repeat", self.repeat.to_string())
             .set("color_format", self.color_format.to_index().to_string())
-            .set("compression_level", self.compression_level.to_string())
-            .set("reduce_color", self.reduce_color.to_string());
+            .set("compression_level", self.compression_level.to_string());
     }
 }
 
@@ -85,13 +76,11 @@ mod tests {
         assert_eq!(default.repeat, 0);
         assert!(default.color_format == ColorFormat::Rgb24);
         assert_eq!(default.compression_level, 6);
-        assert!(!default.reduce_color);
 
         let config = Config::load_from(None);
         assert_eq!(config.repeat, default.repeat);
         assert!(config.color_format == default.color_format);
         assert_eq!(config.compression_level, default.compression_level);
-        assert_eq!(config.reduce_color, default.reduce_color);
     }
 
     #[test]
@@ -100,7 +89,6 @@ mod tests {
             repeat: 3,
             color_format: ColorFormat::Rgba32,
             compression_level: 9,
-            reduce_color: true,
         };
 
         let mut ini = Ini::new();
@@ -110,31 +98,6 @@ mod tests {
         assert_eq!(loaded.repeat, saved.repeat);
         assert!(loaded.color_format == saved.color_format);
         assert_eq!(loaded.compression_level, saved.compression_level);
-        assert_eq!(loaded.reduce_color, saved.reduce_color);
-    }
-
-    /// 色数の削減を持たない設定ファイルは、削減しない状態で読める
-    #[test]
-    fn a_config_without_the_reduce_color_key_falls_back_to_off() {
-        let config = load(&[
-            ("repeat", "3"),
-            ("color_format", "1"),
-            ("compression_level", "9"),
-        ]);
-
-        assert_eq!(config.repeat, 3);
-        assert!(config.color_format == ColorFormat::Rgba32);
-        assert_eq!(config.compression_level, 9);
-        assert!(!config.reduce_color);
-    }
-
-    /// 真偽値として読めない色数の削減は既定値になる
-    #[test]
-    fn an_unparsable_reduce_color_falls_back_to_the_default() {
-        for value in ["yes", "1", ""] {
-            assert!(!load(&[("reduce_color", value)]).reduce_color);
-        }
-        assert!(load(&[("reduce_color", "true")]).reduce_color);
     }
 
     #[test]
@@ -156,6 +119,5 @@ mod tests {
         assert_eq!(config.repeat, default.repeat);
         assert!(config.color_format == default.color_format);
         assert_eq!(config.compression_level, default.compression_level);
-        assert_eq!(config.reduce_color, default.reduce_color);
     }
 }
