@@ -83,16 +83,28 @@ struct Staged {
     job: usize,
 }
 
+/// 決定点が組み立てた、blend_op=OVERの候補
+///
+/// 書き出し点はこの3つから、間合いを進めるかどうかと、比べる相手があるかどうかを読む。
+enum Over {
+    /// アルファを持たない出力と先頭フレーム。そのままblend_op=SOURCEで書く
+    Skipped,
+    /// 詰め直せなかったフレーム。間合いを1つ進めてblend_op=SOURCEで書く
+    Unpacked,
+    /// 詰め直して投入したフレーム。間合いを1つ進め、休みが明けていれば比べる
+    Packed(usize),
+}
+
 /// 決定を終えたフレーム
 ///
-/// dispose_opは次のフレームの決定で確定する。
+/// dispose_opは次のフレームの決定で、blend_opは書き出し点で確定する。
 struct Decided {
     rect: Rect,
     delay: FrameDelay,
-    /// キャンバスへ重ねる方法
-    blend: u8,
-    /// フィルタして圧縮した本体
-    body: Vec<u8>,
+    /// `rect` をblend_op=SOURCEで圧縮した候補
+    source: Candidate,
+    /// blend_op=OVERの候補
+    over: Over,
 }
 
 /// 書き出しを待っているフレーム
@@ -110,7 +122,7 @@ struct Writing {
     pending: VecDeque<Pending>,
     /// dispose_opがまだ決まっていない、直前に決定したフレーム
     open: Option<Decided>,
-    /// blend_op=OVERの候補を立てるかどうかの間合い
+    /// blend_op=OVERの候補を採るかどうかの間合い
     blend_pacing: Pacing,
 }
 
@@ -247,7 +259,7 @@ impl<W: Write> Encoder<W> {
             pipeline,
             delta: Delta::new(),
             staged: VecDeque::new(),
-            staged_depth: workers.get() * 2,
+            staged_depth: workers.get().saturating_mul(2),
             writing: Writing::new(),
             pending_depth: workers.saturating_add(1),
             num_frames,
@@ -354,18 +366,20 @@ impl<W: Write> Encoder<W> {
             job,
         } = self.staged.pop_front().expect("決めるフレームがある");
 
-        let disposal = self.choose_dispose(&data, index, kept, job);
-        let (dispose, rect) = (disposal.op, disposal.rect);
-        let (blend, candidate) = self.choose_blend(&data, index, disposal);
-        let body = candidate.into_body();
+        let Disposal {
+            op: dispose,
+            rect,
+            candidate: source,
+        } = self.choose_dispose(&data, index, kept, job);
+        let over = self.submit_over(&data, index, dispose, rect);
 
         self.writing.advance(
             dispose,
             Decided {
                 rect,
                 delay,
-                blend,
-                body,
+                source,
+                over,
             },
         );
         self.delta.advance(data, dispose);
@@ -441,49 +455,65 @@ impl<W: Write> Encoder<W> {
         }
     }
 
-    /// 投入されたフレームをキャンバスへ重ねる方法を決める
+    /// 投入されたフレームをキャンバスへ重ねる候補を詰め直し、圧縮を投入する
     ///
     /// 矩形の中で変化した画素がすべて不透明なら、変化していない画素を完全な透明へ
     /// 潰した候補が立つ。blend_op=OVERはその画素でキャンバスを残すため、潰しても
-    /// 元の値に戻る。`disposal` の候補と両方を圧縮して小さい方を採り、採った側を
-    /// 戻り値へ残して、退けた側のバッファは配り直す先へ返す。同じ大きさならSOURCEを採る。
+    /// 元の値に戻る。重ねる先は確定した `dispose` から決まる。
     ///
-    /// 潰した画素を書けない出力では候補が立たない。先頭フレームはキャンバスがまだ空で、
-    /// 重ねる先が無い。負けが続く間は [`Pacing`] が候補を立てるのを休ませる。
-    fn choose_blend(&mut self, data: &[u8], index: u32, disposal: Disposal) -> (u8, Candidate) {
-        let Disposal {
-            op: dispose,
-            rect,
-            candidate: source,
-        } = disposal;
-
-        // 潰した画素は完全な透明として書くため、アルファを持つ出力でしか置けない
-        if !matches!(self.layout.input, ColorType::Rgba8) {
-            return (BLEND_OP_SOURCE, source);
-        }
-        if index == 0 || !self.writing.blend_pacing.should_try() {
-            return (BLEND_OP_SOURCE, source);
+    /// 潰した画素は完全な透明として書くため、アルファを持つ出力でだけ候補が立つ。
+    /// 重ねる先を持つのは、キャンバスの埋まった2フレーム目以降になる。
+    ///
+    /// 採るかどうかは書き出し点で決まるため、条件を満たすフレームは間合いに依らず
+    /// 投入する。
+    fn submit_over(&mut self, data: &[u8], index: u32, dispose: u8, rect: Rect) -> Over {
+        if !matches!(self.layout.input, ColorType::Rgba8) || index == 0 {
+            return Over::Skipped;
         }
 
         let base = self.delta.base(dispose);
         let stride = self.layout.stride;
-        let mut over = self.pipeline.buffer();
-        if !over::pack_over(base, data, stride, rect, &mut over) {
-            self.pipeline.recycle(over);
-            return (BLEND_OP_SOURCE, source);
+        let mut region = self.pipeline.buffer();
+        if !over::pack_over(base, data, stride, rect, &mut region) {
+            self.pipeline.recycle(region);
+            return Over::Unpacked;
         }
 
         let bpp = self.layout.bytes_per_pixel;
-        let job = self.pipeline.submit(over, rect.width as usize * bpp, bpp);
-        let over_candidate = self.pipeline.take(job);
+        Over::Packed(self.pipeline.submit(region, rect.width as usize * bpp, bpp))
+    }
 
-        let taken = over_candidate.len() < source.len();
+    /// 書き出すフレームをキャンバスへ重ねる方法を決める
+    ///
+    /// 候補が立ったフレームは、詰め直せたかどうかに依らず間合いを1つ進める。休みが
+    /// 明けていれば圧縮した候補と `source` を比べて小さい方を採り、その結果を間合いへ
+    /// 記録する。同じ大きさならSOURCEを採る。
+    ///
+    /// 投入した候補は休みの最中でも受け取り、退けた側と一緒にバッファを配り直す先へ返す。
+    fn resolve_blend(&mut self, over: Over, source: Candidate) -> (u8, Candidate) {
+        let packed = match over {
+            Over::Skipped => return (BLEND_OP_SOURCE, source),
+            Over::Unpacked => None,
+            Over::Packed(job) => Some(job),
+        };
+
+        let trying = self.writing.blend_pacing.should_try();
+        let Some(job) = packed else {
+            return (BLEND_OP_SOURCE, source);
+        };
+        let candidate = self.pipeline.take(job);
+        if !trying {
+            self.pipeline.recycle(candidate.into_body());
+            return (BLEND_OP_SOURCE, source);
+        }
+
+        let taken = candidate.len() < source.len();
         self.writing.blend_pacing.record(taken);
         if taken {
             self.pipeline.recycle(source.into_body());
-            (BLEND_OP_OVER, over_candidate)
+            (BLEND_OP_OVER, candidate)
         } else {
-            self.pipeline.recycle(over_candidate.into_body());
+            self.pipeline.recycle(candidate.into_body());
             (BLEND_OP_SOURCE, source)
         }
     }
@@ -491,10 +521,18 @@ impl<W: Write> Encoder<W> {
     /// 確定したフレームを書き出す
     fn write(&mut self, pending: Pending) -> Result<(), Error> {
         let Pending { frame, dispose } = pending;
+        let Decided {
+            rect,
+            delay,
+            source,
+            over,
+        } = frame;
 
+        let (blend, candidate) = self.resolve_blend(over, source);
+        let body = candidate.into_body();
         self.chunks
-            .write_frame(frame.rect, frame.delay, dispose, frame.blend, &frame.body)?;
-        self.pipeline.recycle(frame.body);
+            .write_frame(rect, delay, dispose, blend, &body)?;
+        self.pipeline.recycle(body);
         Ok(())
     }
 
@@ -967,20 +1005,26 @@ mod tests {
         assert!(pacing.should_try(), "閾値に届く前に休みに入っている");
     }
 
-    /// 投入済みのフレームをすべて決定させ、そのときの間合いを返す
+    /// 投入済みのフレームを決定して書き出し、そのときの間合いを返す
     ///
-    /// 決定は投入の順に進むため、列に溜めたまま進めた場合と決定の並びは変わらない。
-    fn pacing_after_deciding<W: Write>(encoder: &mut Encoder<W>) -> &Pacing {
+    /// 決定も書き出しも投入の順に進むため、列に溜めたまま進めた場合と並びは変わらない。
+    /// 最後に決定したフレームはdispose_opが次の決定で確定するため、書き出しは
+    /// その1つ手前まで届く。
+    fn pacing_after_writing<W: Write>(encoder: &mut Encoder<W>) -> &Pacing {
         while !encoder.staged.is_empty() {
             encoder.decide().unwrap();
+        }
+        while let Some(pending) = encoder.writing.overflowing(1) {
+            encoder.write(pending).unwrap();
         }
         &encoder.writing.blend_pacing
     }
 
-    /// 書き出しの経路は、候補を立てる前に間合いを見る
+    /// 書き出しの経路は、詰め直せなかったフレームでも間合いを1つ進める
     ///
-    /// まだらな半透明の画素は不透明でないため候補が立たず、それを塗り潰すフレームだけが
-    /// 一様な矩形の候補を立てて必ず負ける。連敗が尽きた後は、フレームごとに休みが減る。
+    /// まだらな半透明の画素は不透明でないため詰め直せず、それを塗り潰すフレームだけが
+    /// 一様な矩形を詰め直して必ず負ける。連敗が尽きた後は、詰め直せないフレームでも
+    /// 休みが1つ減る。
     #[test]
     fn the_write_path_consults_the_pacing() {
         const PIXELS: usize = (WIDTH * HEIGHT) as usize;
@@ -998,6 +1042,8 @@ mod tests {
             input.push(speckled.clone());
             input.push(uniform.clone());
         }
+        // 連敗が閾値に届くフレームを書き出しへ届かせる
+        input.push(speckled.clone());
         let delay = FrameDelay::new(1, 30).unwrap();
 
         let mut encoder = Encoder::new(
@@ -1011,11 +1057,12 @@ mod tests {
         for frame in &input {
             encoder.add_frame(frame, delay).unwrap();
         }
-        let blend_pacing = pacing_after_deciding(&mut encoder);
+        let blend_pacing = pacing_after_writing(&mut encoder);
         assert_eq!(blend_pacing.resting(), BLEND_REST_FRAMES);
 
-        encoder.add_frame(&speckled, delay).unwrap();
-        let blend_pacing = pacing_after_deciding(&mut encoder);
+        // 新しく書き出しへ届くのは、詰め直せないまだらなフレーム
+        encoder.add_frame(&uniform, delay).unwrap();
+        let blend_pacing = pacing_after_writing(&mut encoder);
         assert_eq!(blend_pacing.resting(), BLEND_REST_FRAMES - 1);
     }
 }
