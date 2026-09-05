@@ -263,7 +263,7 @@ impl<W: Write> Encoder<W> {
                 endianness: JXL_NATIVE_ENDIAN,
                 align: 0,
             },
-            delta: Delta::new(&layout, &config)?,
+            delta: Delta::new(&layout, &config),
             layout,
             num_frames,
             frames_accepted: 0,
@@ -305,7 +305,6 @@ impl<W: Write> Encoder<W> {
         self.frames_accepted += 1;
         if let Some(pending) = self.delta.advance(&self.layout, data, duration) {
             self.write(pending, false)?;
-            self.delta.settle(&self.layout);
         }
         Ok(())
     }
@@ -345,7 +344,6 @@ impl<W: Write> Encoder<W> {
                     pixels.len(),
                 )
             })?;
-            self.delta.wrote(region.rect(&self.layout));
             offset += len;
 
             // 最後のフレームかどうかは排水した時点の状態で焼き込まれる
@@ -366,7 +364,6 @@ impl<W: Write> Encoder<W> {
                 unsafe { JxlEncoderProcessOutput(self.raw.enc, &mut next_out, &mut avail_out) };
             let written = self.chunk.len() - avail_out;
             self.writer.write_all(&self.chunk[..written])?;
-            self.delta.feed(&self.layout, &self.chunk[..written])?;
 
             match status {
                 JXL_ENC_SUCCESS => return Ok(()),

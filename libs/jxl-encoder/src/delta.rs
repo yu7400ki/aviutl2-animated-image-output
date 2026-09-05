@@ -1,11 +1,9 @@
 //! 書き出しを待っているフレームと、比べる相手から決まる差分矩形
 
 use crate::Config;
-use crate::error::Error;
-use crate::layers::Layers;
 use crate::layout::Layout;
 use crate::split::{THRESHOLD, cut, exact_profile};
-use anim_core::{Rect, Refresh, TOLERANCE, Triggers, crop, dirty_rect};
+use anim_core::{Rect, Rewrite, crop, dirty_rect};
 
 /// 差分が空のまま書き出すときの矩形
 const UNCHANGED: Rect = Rect {
@@ -109,14 +107,6 @@ impl Shape {
         }
     }
 
-    /// 矩形の外に残るキャンバス。全面フレームは何も残さない
-    fn base(self) -> Option<Base> {
-        match self {
-            Shape::Whole => None,
-            Shape::One(base, _) | Shape::Two(base, _, _) => Some(base),
-        }
-    }
-
     /// 書き直す矩形を書き出す順に返す
     fn rects(self, layout: &Layout) -> impl Iterator<Item = Rect> {
         let (head, tail) = match self {
@@ -180,27 +170,6 @@ impl Pending {
     }
 }
 
-/// `frame` の `rect` を覆う行
-fn rows_of<'a>(frame: &'a [u8], rect: Rect, layout: &Layout) -> impl Iterator<Item = &'a [u8]> {
-    let row_len = rect.width as usize * layout.bytes_per_pixel;
-    let head = rect.y as usize * layout.stride + rect.x as usize * layout.bytes_per_pixel;
-    let stride = layout.stride;
-    (0..rect.height as usize).map(move |row| {
-        let start = head + row * stride;
-        &frame[start..start + row_len]
-    })
-}
-
-/// 1行ずつ渡された画素を `canvas` の `rect` へ写す
-fn paste<'a>(canvas: &mut [u8], rect: Rect, layout: &Layout, rows: impl Iterator<Item = &'a [u8]>) {
-    let row_len = rect.width as usize * layout.bytes_per_pixel;
-    let head = rect.y as usize * layout.stride + rect.x as usize * layout.bytes_per_pixel;
-    for (row, pixels) in rows.enumerate() {
-        let start = head + row * layout.stride;
-        canvas[start..start + row_len].copy_from_slice(pixels);
-    }
-}
-
 /// 書く面積の小さい土台
 ///
 /// `kept` は直前のキャンバスとの差分の外接矩形、`restored` は2つ前のキャンバスとの
@@ -212,48 +181,31 @@ fn narrower(kept: Rect, restored: Option<Rect>) -> (Base, Rect) {
     }
 }
 
-/// 自分の出力を復号して組み上げた画面
-struct Screen {
-    /// 書き出しを待っているフレームまでを映した画面
-    ///
-    /// そのフレームの矩形には、まだ層が返っていないので投入された入力が乗る。
-    shown: Vec<u8>,
-    /// 層を当て終えた、1つ前の表示フレームの画面
-    shown_back: Vec<u8>,
-    refresh: Refresh,
-    layers: Layers,
-}
-
 /// 差分矩形を決めるとき比べる相手
+///
+/// どちらも投入された入力どうしを比べる。直前のフレームの画素を残す土台だけが、
+/// そのフレームが書いた画素をもう1回ぶん引き継ぐ。
 enum Basis {
-    /// 投入された入力どうしを厳密に比べる
-    Inputs {
-        /// 直前に投入されたフレームを描く直前のキャンバス
-        canvas: Vec<u8>,
-    },
-    /// 自分の出力を復号した結果と比べる
-    Screen(Box<Screen>),
+    /// 厳密に一致しない画素を書き直す
+    Inputs,
+    /// 直前の投入で変わった画素も書き直す
+    Rewritten(Rewrite),
 }
 
 impl Basis {
-    /// 先頭フレームを全面で書いた後の状態へ進める
-    fn start(&mut self, data: &[u8]) {
-        match self {
-            Basis::Inputs { .. } => {}
-            Basis::Screen(screen) => {
-                screen.refresh.commit_whole(data);
-                screen.shown.clear();
-                screen.shown.extend_from_slice(data);
-            }
-        }
-    }
-
     /// 投入されたフレームを書き直す形を決め、書いた後の状態へ進める
     ///
+    /// `previous` は直前に投入されたフレーム、`canvas` は2つ前のキャンバス。
     /// 書き直す画素が1つも無ければ `None`。
-    fn commit(&mut self, layout: &Layout, previous: &[u8], data: &[u8]) -> Option<Shape> {
+    fn commit(
+        &mut self,
+        layout: &Layout,
+        previous: &[u8],
+        canvas: &[u8],
+        data: &[u8],
+    ) -> Option<Shape> {
         match self {
-            Basis::Inputs { canvas } => {
+            Basis::Inputs => {
                 let kept = dirty_rect(previous, data, layout.stride, layout.bytes_per_pixel)?;
                 let restored = (!canvas.is_empty()).then(|| {
                     dirty_rect(canvas, data, layout.stride, layout.bytes_per_pixel)
@@ -268,24 +220,25 @@ impl Basis {
                     exact_profile(against, data, layout, rect)
                 }))
             }
-            Basis::Screen(screen) => {
-                let kept = screen.triggers(data, &screen.shown);
-                let bounds = kept.bounds()?;
-                let restored = (!screen.shown_back.is_empty())
-                    .then(|| screen.triggers(data, &screen.shown_back));
-                let (base, rect) = narrower(
-                    bounds,
-                    restored
-                        .as_ref()
-                        .map(|map| map.bounds().unwrap_or(UNCHANGED)),
-                );
-                let map = match base {
-                    Base::Previous => &kept,
-                    Base::TwoBack => restored.as_ref().expect("2つ前の地図が無い"),
-                };
-                let shape = Shape::of(layout, base, rect, || map.profile(rect));
-                screen.apply(layout, &shape, map, data);
-                Some(shape)
+            Basis::Rewritten(rewrite) => {
+                let change = rewrite.changes(data, previous);
+                let kept = rewrite.carried(&change);
+                let shape = kept.bounds().map(|bounds| {
+                    let restored = (!canvas.is_empty()).then(|| rewrite.changes(data, canvas));
+                    let (base, rect) = narrower(
+                        bounds,
+                        restored
+                            .as_ref()
+                            .map(|map| map.bounds().unwrap_or(UNCHANGED)),
+                    );
+                    let map = match base {
+                        Base::Previous => &kept,
+                        Base::TwoBack => restored.as_ref().expect("2つ前の地図が無い"),
+                    };
+                    Shape::of(layout, base, rect, || map.profile(rect))
+                });
+                rewrite.advance(change);
+                shape
             }
         }
     }
@@ -293,74 +246,16 @@ impl Basis {
     /// 差分が空のまま `UNCHANGED` の1枚を書いた後の状態へ進める
     fn commit_unchanged(&mut self, layout: &Layout, previous: &[u8], data: &[u8]) -> Shape {
         match self {
-            Basis::Inputs { .. } => Shape::of(layout, Base::Previous, UNCHANGED, || {
+            Basis::Inputs => Shape::of(layout, Base::Previous, UNCHANGED, || {
                 exact_profile(previous, data, layout, UNCHANGED)
             }),
-            Basis::Screen(screen) => {
-                let map = screen.triggers(data, &screen.shown);
+            Basis::Rewritten(rewrite) => {
+                let change = rewrite.changes(data, previous);
+                let map = rewrite.carried(&change);
                 let shape = Shape::of(layout, Base::Previous, UNCHANGED, || map.profile(UNCHANGED));
-                screen.apply(layout, &shape, &map, data);
+                rewrite.advance(change);
                 shape
             }
-        }
-    }
-
-    /// 比べる相手を1つ送り、書き出したフレームの層を受ける面を空ける
-    fn rotate(&mut self, previous: &mut Vec<u8>) {
-        match self {
-            Basis::Inputs { canvas } => std::mem::swap(canvas, previous),
-            Basis::Screen(screen) => std::mem::swap(&mut screen.shown, &mut screen.shown_back),
-        }
-    }
-
-    /// 層を当て終えた面から、保留中のフレーム `shape` までの画面を組む
-    ///
-    /// `frame` は保留中のフレームの入力。矩形の中はまだ層が返っていないので、
-    /// 入力をそのまま置く。
-    fn settle(&mut self, layout: &Layout, shape: Shape, frame: &[u8]) {
-        match self {
-            Basis::Inputs { .. } => {}
-            Basis::Screen(screen) => {
-                if shape.base() != Some(Base::TwoBack) {
-                    screen.shown.clear();
-                    screen.shown.extend_from_slice(&screen.shown_back);
-                }
-                for rect in shape.rects(layout) {
-                    paste(
-                        &mut screen.shown,
-                        rect,
-                        layout,
-                        rows_of(frame, rect, layout),
-                    );
-                }
-            }
-        }
-    }
-
-    /// 比べる相手を手放し、最後の層を受ける面だけを残す
-    fn close(&mut self) {
-        match self {
-            Basis::Inputs { canvas } => *canvas = Vec::new(),
-            Basis::Screen(screen) => {
-                std::mem::swap(&mut screen.shown, &mut screen.shown_back);
-                screen.shown = Vec::new();
-            }
-        }
-    }
-}
-
-impl Screen {
-    /// `against` の画面に対して書き直す画素の地図
-    fn triggers(&self, data: &[u8], against: &[u8]) -> Triggers {
-        self.refresh.triggers(data, against, TOLERANCE)
-    }
-
-    /// `shape` の矩形を `data` で書いた後の状態へ進める
-    ///
-    /// 割った矩形は巻き込む画素が1枚ごとに違うので、1枚ずつ書く。
-    fn apply(&mut self, layout: &Layout, shape: &Shape, map: &Triggers, data: &[u8]) {
-        for rect in shape.rects(layout) {
-            self.refresh.commit(map, rect, data);
         }
     }
 }
@@ -371,6 +266,8 @@ impl Screen {
 pub(crate) struct Delta {
     /// 直前に投入されたフレーム
     previous: Vec<u8>,
+    /// 2つ前に投入されたフレームを描くキャンバス
+    canvas: Vec<u8>,
     pending: Option<Pending>,
     /// 取り出したフレームが書き直す画素
     staged: Vec<u8>,
@@ -378,27 +275,24 @@ pub(crate) struct Delta {
 }
 
 impl Delta {
-    /// `config` が可逆なら入力どうしを、非可逆なら復号結果を比べる相手にする
-    ///
-    /// # Errors
-    /// 復号器を組み立てられないとき [`Error::Decode`]。
-    pub(crate) fn new(layout: &Layout, config: &Config) -> Result<Self, Error> {
+    /// `config` が可逆なら厳密な一致で、非可逆なら直前の変化も含めて矩形を採る
+    pub(crate) fn new(layout: &Layout, config: &Config) -> Self {
         let basis = if config.is_lossless() {
-            Basis::Inputs { canvas: Vec::new() }
+            Basis::Inputs
         } else {
-            Basis::Screen(Box::new(Screen {
-                shown: Vec::new(),
-                shown_back: Vec::new(),
-                refresh: Refresh::new(layout.width, layout.height, layout.color_type.into()),
-                layers: Layers::new(layout.color_type, config.max_threads)?,
-            }))
+            Basis::Rewritten(Rewrite::new(
+                layout.width,
+                layout.height,
+                layout.color_type.into(),
+            ))
         };
-        Ok(Delta {
+        Delta {
             previous: Vec::new(),
+            canvas: Vec::new(),
             pending: None,
             staged: Vec::new(),
             basis,
-        })
+        }
     }
 
     /// 投入されたフレームを保留し、押し出された保留中のフレームを返す
@@ -407,8 +301,7 @@ impl Delta {
     /// 畳んで `None` を返す。畳んだ表示時間が `u32` に収まらないときは、保留中の
     /// フレームを押し出して投入されたフレームを保留し直す。
     ///
-    /// 返したフレームが書き直す画素は [`Self::pixels`] にある。書き出して層を
-    /// [`Self::feed`] へ渡したら [`Self::settle`] を呼ぶ。
+    /// 返したフレームが書き直す画素は [`Self::pixels`] にある。
     pub(crate) fn advance(
         &mut self,
         layout: &Layout,
@@ -419,7 +312,6 @@ impl Delta {
             // 先頭フレームには土台にする直前のフレームが無い
             self.previous.clear();
             self.previous.extend_from_slice(data);
-            self.basis.start(data);
             self.pending = Some(Pending {
                 shape: Shape::Whole,
                 slot: Slot::First,
@@ -458,22 +350,9 @@ impl Delta {
     pub(crate) fn take(&mut self, layout: &Layout) -> Option<Pending> {
         let pending = self.pending.take()?;
         self.stage(layout, pending.shape);
-        self.basis.close();
+        self.canvas = Vec::new();
         self.previous = Vec::new();
         Some(pending)
-    }
-
-    /// 書き出したフレームの層を当て終えた面から、次に比べる相手を組む
-    pub(crate) fn settle(&mut self, layout: &Layout) {
-        let Delta {
-            previous,
-            pending,
-            basis,
-            ..
-        } = self;
-        if let Some(pending) = pending {
-            basis.settle(layout, pending.shape, previous);
-        }
     }
 
     /// 取り出したフレームが書き直す画素
@@ -483,53 +362,20 @@ impl Delta {
         &self.staged
     }
 
-    /// 書いた矩形を控える
-    pub(crate) fn wrote(&mut self, rect: Rect) {
-        if let Basis::Screen(screen) = &mut self.basis {
-            screen.layers.wrote(rect);
-        }
-    }
-
-    /// 書き出したバイト列を復号器へ継ぎ足し、揃った層を画面へ当てる
-    ///
-    /// # Errors
-    /// libjxlの復号が失敗したとき [`Error::Decode`]。
-    pub(crate) fn feed(&mut self, layout: &Layout, bytes: &[u8]) -> Result<(), Error> {
-        let Basis::Screen(screen) = &mut self.basis else {
-            return Ok(());
-        };
-        let Screen {
-            layers, shown_back, ..
-        } = &mut **screen;
-        layers.feed(bytes, |rect, layer| {
-            let row_len = rect.width as usize * layout.bytes_per_pixel;
-            paste(shown_back, rect, layout, layer.chunks_exact(row_len));
-        })
-    }
-
-    /// 層を取り出す復号器
+    /// 直前の投入で変わった画素も書き直すか
     #[cfg(test)]
-    pub(crate) fn decoder(&self) -> Option<&Layers> {
-        match &self.basis {
-            Basis::Inputs { .. } => None,
-            Basis::Screen(screen) => Some(&screen.layers),
-        }
-    }
-
-    /// 層を当て終えた、直近に書き出した表示フレームの画面
-    #[cfg(test)]
-    pub(crate) fn screen(&self) -> Option<&[u8]> {
-        match &self.basis {
-            Basis::Inputs { .. } => None,
-            Basis::Screen(screen) => Some(&screen.shown_back),
-        }
+    pub(crate) fn carries_the_previous_change(&self) -> bool {
+        matches!(self.basis, Basis::Rewritten(_))
     }
 
     fn commit(&mut self, layout: &Layout, data: &[u8]) -> Option<Shape> {
         let Delta {
-            previous, basis, ..
+            previous,
+            canvas,
+            basis,
+            ..
         } = self;
-        basis.commit(layout, previous, data)
+        basis.commit(layout, previous, canvas, data)
     }
 
     fn commit_unchanged(&mut self, layout: &Layout, data: &[u8]) -> Shape {
@@ -539,11 +385,9 @@ impl Delta {
         basis.commit_unchanged(layout, previous, data)
     }
 
+    /// 直前に投入されたフレームを2つ前のキャンバスへ送る
     fn rotate(&mut self) {
-        let Delta {
-            previous, basis, ..
-        } = self;
-        basis.rotate(previous);
+        std::mem::swap(&mut self.canvas, &mut self.previous);
     }
 
     /// 直前のフレームのうち `shape` が書き直す画素を [`Self::staged`] へ移す

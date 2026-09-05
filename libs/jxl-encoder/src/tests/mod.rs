@@ -1,6 +1,6 @@
 //! crate の内側からしか見られないものを使う検証
 
-mod closed;
+mod basis;
 mod layers;
 
 #[path = "../../tests/support/mod.rs"]
@@ -29,20 +29,4 @@ fn peel<'a>(
             .unwrap();
     }
     peeled
-}
-
-/// フレームを1枚ずつ投入し、表示フレームごとの画面と書き出したバイト列を集める
-fn screens(config: Config, frames: &[Vec<u8>], durations: &[u32]) -> (Vec<Vec<u8>>, Vec<u8>) {
-    let mut encoder = Encoder::new(Vec::new(), WIDTH, HEIGHT, frames.len() as u32, config).unwrap();
-    let mut screens = Vec::new();
-    for (frame, duration) in frames.iter().zip(durations) {
-        encoder.add_frame(frame, *duration).unwrap();
-        screens.push(encoder.delta().screen().expect("復号器が無い").to_vec());
-    }
-    encoder.close().unwrap();
-    screens.push(encoder.delta().screen().expect("復号器が無い").to_vec());
-
-    // 先頭フレームはまだ書き出されておらず、画面に出ていない
-    screens.remove(0);
-    (screens, encoder.finish().unwrap())
 }

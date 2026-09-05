@@ -103,6 +103,7 @@ pub struct DecodingError {
 
 impl DecodingError {
     /// 失敗した `JxlDecoderStatus` を写す
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn new(status: c_int) -> Self {
         DecodingError { status }
     }
