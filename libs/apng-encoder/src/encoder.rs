@@ -569,6 +569,7 @@ mod tests {
     use super::*;
     use crate::chunk;
     use crate::testing::noise;
+    use anim_core::dirty_rect;
     use flate2::read::ZlibDecoder;
     use std::io::{Cursor, Read};
 
@@ -890,6 +891,36 @@ mod tests {
         (rgba_config(), resting_frames())
     }
 
+    /// 捨てる候補が圧縮した上で退けられるRGBA8の列
+    ///
+    /// 最後のフレームは狭い領域だけが擬似乱数で、残りは一様。1つ前はそこに広い帯を
+    /// 重ね、2つ前は狭い領域を持たない。捨てた場合の矩形は狭い領域に縮んで候補に立つが、
+    /// 一様な広い帯より大きく圧縮されるため退けられる。
+    fn rejected_restore_material() -> (Config, Vec<Vec<u8>>) {
+        /// 擬似乱数で埋める領域 (左, 上, 幅, 高さ)
+        const BLOCK: (usize, usize, usize, usize) = (20, 20, 8, 4);
+        /// 一様に塗り替える帯の行数
+        const BAND: usize = 8;
+
+        let base = with_alpha(&vec![0x30u8; (WIDTH * HEIGHT) as usize * 3]);
+        let grain = noise(BLOCK.2 * BLOCK.3 * 3, 7);
+        let mut last = base.clone();
+        for y in 0..BLOCK.3 {
+            for x in 0..BLOCK.2 {
+                let at = ((BLOCK.1 + y) * WIDTH as usize + BLOCK.0 + x) * 4;
+                let from = (y * BLOCK.2 + x) * 3;
+                last[at..at + 3].copy_from_slice(&grain[from..from + 3]);
+            }
+        }
+
+        let mut middle = last.clone();
+        for pixel in middle[..BAND * WIDTH as usize * 4].chunks_exact_mut(4) {
+            pixel[..3].copy_from_slice(&[0x80, 0x80, 0x80]);
+        }
+
+        (rgba_config(), vec![base, middle, last])
+    }
+
     /// fcTLの並びから、フレームごとの値を1つ取り出す
     fn frame_control<T>(bytes: &[u8], pick: impl Fn(&[u8]) -> T) -> Vec<T> {
         let mut values = Vec::new();
@@ -1006,6 +1037,29 @@ mod tests {
         );
     }
 
+    /// 捨てる候補は、矩形が狭くても圧縮して比べた上で退けられる
+    ///
+    /// 面積で先に落ちていないことは素材の2つの矩形の広さが示し、退けられたことは
+    /// dispose_opの並びが示す。この2つが揃うときだけ、退けた候補の本体が戻る経路を通る。
+    #[test]
+    fn the_rejected_restore_material_compresses_both_candidates() {
+        let (config, input) = rejected_restore_material();
+        let layout = Layout::new(WIDTH, HEIGHT, config.color_type).unwrap();
+        let rect = |base: &[u8], data: &[u8]| {
+            dirty_rect(base, data, layout.stride, layout.bytes_per_pixel).expect("差分がある")
+        };
+
+        assert!(
+            rect(&input[0], &input[2]).area() < rect(&input[1], &input[2]).area(),
+            "捨てた場合の矩形が面積で落ちている"
+        );
+        let ops = frame_ops(&encode_with_workers(&input, config, 1));
+        assert!(
+            ops.iter().all(|&(dispose, _)| dispose == DISPOSE_OP_NONE),
+            "捨てる候補が採られている: {ops:?}"
+        );
+    }
+
     /// 圧縮に配ったバッファは、退けた候補も捨てた候補もパイプラインへ戻る
     ///
     /// 決定は詰め直した候補のぶんだけバッファを持ち出し、退けた候補の本体を返す。
@@ -1020,7 +1074,10 @@ mod tests {
         /// 先に満たしておくバッファの数
         const PREFILLED: usize = 64;
 
-        for (config, input) in jumping_material().into_iter().chain([resting_material()]) {
+        let materials = jumping_material()
+            .into_iter()
+            .chain([resting_material(), rejected_restore_material()]);
+        for (config, input) in materials {
             let color = config.color_type;
             let delay = FrameDelay::new(1, 30).unwrap();
             let mut encoder = Encoder::new(
