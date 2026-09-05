@@ -170,10 +170,9 @@ impl<W: Write> Encoder<W> {
         }
 
         let layout = Layout::new(width, height, config.color_type)?;
+        let pipeline = Pipeline::new(config.compression_level, workers)?;
         let mut chunks = ChunkWriter::new(writer);
         Self::open(&mut chunks, &layout, num_frames, config)?;
-        // 書き出し先がヘッダを受け取ってから起こす
-        let pipeline = Pipeline::new(config.compression_level, workers)?;
 
         Ok(Encoder {
             chunks,

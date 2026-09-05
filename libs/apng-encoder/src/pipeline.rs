@@ -212,7 +212,7 @@ impl Pipeline {
 
     /// 領域の圧縮を投入し、結果を指すための番号を返す
     ///
-    /// `region` は結果を受け取った時点で配り直す先へ戻る。
+    /// `region` はパイプラインが引き取り、[`Pipeline::buffer`] から配り直す。
     pub(crate) fn submit(&mut self, region: Vec<u8>, region_stride: usize, bpp: usize) -> usize {
         let index = self.submitted;
         self.submitted += 1;
