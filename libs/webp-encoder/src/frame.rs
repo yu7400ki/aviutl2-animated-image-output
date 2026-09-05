@@ -395,8 +395,8 @@ mod tests {
 
     /// 半透明の未変更画素を重ねられるのは、透過置換を持つ可逆だけ
     ///
-    /// 画面が入力へ完全に戻った最良の場合で問う。非可逆は置換を持たないので、
-    /// 一致していることが重ねてよい理由にならない。
+    /// 非可逆は置換を持たないので、キャンバスと一致していることが重ねてよい
+    /// 理由にならない。
     #[test]
     fn a_translucent_unchanged_pixel_is_blended_only_where_it_is_substituted() {
         let layout = Layout::new(8, 8, ColorType::Rgba8).unwrap();

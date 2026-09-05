@@ -151,8 +151,7 @@ impl Drop for Raw {
 /// フレーム数が2以上ならアニメーションになり、1なら静止画になる。
 /// `writer` への書き出しは1フレーム遅れる。
 ///
-/// 可逆はキャンバス3面ぶん、非可逆は画面を組む面も含めて6面ぶんまでの画素を
-/// 抱える (1920x1080のRGBA8で約24.9MBと約49.8MB)。
+/// キャンバス3面ぶんまでの画素を抱える (1920x1080のRGBA8で約24.9MB)。
 pub struct Encoder<W: Write> {
     writer: W,
     raw: Raw,
@@ -169,8 +168,8 @@ pub struct Encoder<W: Write> {
     chunk: Vec<u8>,
 }
 
-// SAFETY: 抱える生ポインタは唯一の所有で別名を持たず、libjxl の符号化と復号の
-// 経路はスレッド固有の状態を持たない。同時アクセスは Sync を付けないことで防ぐ。
+// SAFETY: 抱える生ポインタは唯一の所有で別名を持たず、libjxl の符号化の経路は
+// スレッド固有の状態を持たない。同時アクセスは Sync を付けないことで防ぐ。
 unsafe impl<W: Write + Send> Send for Encoder<W> {}
 
 impl<W: Write> Encoder<W> {
@@ -182,8 +181,7 @@ impl<W: Write> Encoder<W> {
     /// [`Error::InvalidTps`]。品質が [`QUALITY_RANGE`]
     /// の外のとき [`Error::InvalidQuality`]。均衡が [`EFFORT_RANGE`] の外のとき
     /// [`Error::InvalidEffort`]。寸法が0のとき [`Error::InvalidDimensions`]。
-    /// 符号化器を組み立てられないとき [`Error::Encode`]。非可逆で復号器を
-    /// 組み立てられないとき [`Error::Decode`]。
+    /// 符号化器を組み立てられないとき [`Error::Encode`]。
     pub fn new(
         writer: W,
         width: u32,

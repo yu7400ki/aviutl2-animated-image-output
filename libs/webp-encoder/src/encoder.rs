@@ -308,8 +308,7 @@ impl<W: Write + Seek> Encoder<W> {
     /// [`Error::FrameSizeMismatch`]。宣言したフレーム数を超えたとき
     /// [`Error::FrameCountMismatch`]。符号化に失敗したとき [`Error::Encode`]。
     /// 符号化した内容のチャンク構成を読み取れないとき
-    /// [`Error::MalformedOutput`]。符号化した矩形を復号できないとき
-    /// [`Error::Decode`]。ファイルがRIFFの上限を超えるとき
+    /// [`Error::MalformedOutput`]。ファイルがRIFFの上限を超えるとき
     /// [`Error::FileTooLarge`]。書き出しに失敗したとき [`Error::Io`]。
     /// 以前の投入が書き出しに失敗しているとき [`Error::Poisoned`]。
     pub fn add_frame(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {

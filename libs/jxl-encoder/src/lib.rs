@@ -52,8 +52,5 @@ pub struct Config {
     /// 1秒あたりのtick数の分母
     pub tps_denominator: u32,
     /// 符号化に使うスレッド数
-    ///
-    /// 非可逆は差分矩形を決めるために自分の出力を復号するので、同じ本数の
-    /// 実行器を復号にも持つ。
     pub max_threads: u32,
 }
