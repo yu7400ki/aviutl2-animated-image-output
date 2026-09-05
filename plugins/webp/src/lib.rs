@@ -195,24 +195,12 @@ mod tests {
         ))
     }
 
-    /// 隣り合う `seed` の隔たり
-    ///
-    /// 非可逆が矩形を採る許容量は品質から決まるので、そこを動かしても素材の
-    /// 意味が変わらないよう、隔たりを値域の幅で置く。
-    const SEED_STEP: u32 = 64;
-
     /// 画素ごとに値の違う不透明なRGBA
     fn frame_of(seed: u32) -> Vec<u8> {
         (0..FRAME_HEIGHT)
             .flat_map(|y| {
-                (0..FRAME_WIDTH).flat_map(move |x| {
-                    [
-                        (x * 7) as u8,
-                        (y * 11) as u8,
-                        (seed * SEED_STEP) as u8,
-                        0xFF,
-                    ]
-                })
+                (0..FRAME_WIDTH)
+                    .flat_map(move |x| [(x * 7) as u8, (y * 11) as u8, seed as u8, 0xFF])
             })
             .collect()
     }
