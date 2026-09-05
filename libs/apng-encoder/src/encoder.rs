@@ -823,9 +823,9 @@ mod tests {
 
     /// 休みの最中に潰した候補が負け続けるフレーム数
     ///
-    /// [`BLEND_LOSS_STREAK`] を超えるだけ並べる。負けを休みの最中にも数えると、
-    /// この列の途中で連敗が閾値に届き、休みが張り直される。
-    const RESTING_LOSSES: usize = BLEND_REST_FRAMES as usize - 1;
+    /// [`BLEND_LOSS_STREAK`] のぶんだけ並べ、残りの休みを勝つフレームへ譲る。負けを
+    /// 休みの最中にも数えると、この列の終わりで連敗が閾値に届いて休みが張り直される。
+    const RESTING_LOSSES: usize = BLEND_LOSS_STREAK as usize;
 
     /// [`resting_frames`] が画素ごとに違う面へ切り替わるフレームの位置
     const DENSE_STARTS_AT: usize = LOSING_FRAMES + RESTING_LOSSES;
@@ -1020,6 +1020,10 @@ mod tests {
             assert!(
                 RESTING_LOSSES >= BLEND_LOSS_STREAK as usize,
                 "休みの最中に潰した候補が負けるフレームが連敗の閾値ぶん並ぶ"
+            );
+            assert!(
+                DENSE_STARTS_AT + 1 < REST_ENDS_AT,
+                "休みの最中に潰した候補が勝つフレームがある"
             );
         }
 
