@@ -296,8 +296,8 @@ impl<W: Write> Encoder<W> {
     /// 採った側を戻り値へ残して、退けた側のバッファは配り直す先へ返す。同じ大きさなら
     /// 捨てない。
     ///
-    /// 捨てないときの候補はワーカーへ回し、捨てるときの候補を駆動スレッドで圧縮する
-    /// あいだに進む。
+    /// 捨てないときの候補は投入し、捨てるときの候補を駆動スレッドで圧縮してから
+    /// 受け取る。
     fn choose_dispose(&mut self, data: &[u8]) -> Disposal {
         let frame = self.frames_accepted;
         let disposable = self.writing.pending.is_some();
