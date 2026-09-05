@@ -229,6 +229,88 @@ mod tests {
         }
     }
 
+    /// 指定したバイト数までしか書き出せないファイル
+    ///
+    /// 受け付けた範囲は実ファイルへそのまま書き出し、超えた書き出しは
+    /// `std::io::Error::other` で失敗する。
+    struct FailingWriter {
+        file: File,
+        remaining: usize,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf.len() > self.remaining {
+                self.remaining = 0;
+                return Err(std::io::Error::other("書き出し失敗"));
+            }
+            self.remaining -= buf.len();
+            self.file.write_all(buf)?;
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.file.flush()
+        }
+    }
+
+    impl Seek for FailingWriter {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.file.seek(pos)
+        }
+    }
+
+    /// Ioエラーで失敗した書き出しは、書きかけのファイルを残さない
+    ///
+    /// 先頭フレームはdispose_opが決まる2フレーム目の投入まで書き出されないため、
+    /// シグネチャ・IHDR・acTL・fcTLちょうどの長さで受け付けを止めると、2フレーム目を
+    /// 投入した`add_frame`が先頭フレームのIDATの書き出しでIoエラーを返す。失敗する
+    /// までに実ファイルへ書き出されたバイト数も確かめ、書きかけの状態を経ることを示す。
+    #[test]
+    fn an_io_failure_while_writing_a_frame_leaves_no_file() {
+        let path = temp_path();
+        let delay = frame_delay(1, 30).unwrap();
+        let frame = vec![0u8; 8 * 8 * 4];
+        // シグネチャ(8) + IHDR(25) + acTL(20) + fcTL(38)
+        const BUDGET: usize = 8 + 25 + 20 + 38;
+
+        let result = write_or_discard(&path, |file| {
+            let probe = file.try_clone().map_err(|e| e.to_string())?;
+
+            let mut encoder = Encoder::new(
+                FailingWriter {
+                    file,
+                    remaining: BUDGET,
+                },
+                8,
+                8,
+                2,
+                encoder_config(&Config {
+                    color_format: ColorFormat::Rgba32,
+                    ..Config::default()
+                }),
+            )
+            .map_err(|e| e.to_string())?;
+
+            encoder
+                .add_frame(&frame, delay)
+                .map_err(|e| e.to_string())?;
+
+            let error = encoder
+                .add_frame(&frame, delay)
+                .expect_err("バッファを使い切るのでIoエラーになる");
+            assert!(matches!(error, EncoderError::Io(_)), "{error}");
+
+            let written = probe.metadata().map_err(|e| e.to_string())?.len();
+            assert_eq!(written, BUDGET as u64, "失敗するまでに書き出したバイト数");
+
+            Err(error.to_string())
+        });
+
+        result.expect_err("書き出しが失敗するので残らない");
+        assert!(!path.exists(), "{}", path.display());
+    }
+
     /// 色数が溢れたエラーは、溢れたフレームと、切れば出力できる設定を指す
     ///
     /// 設定の名前はダイアログと同じものを引くため、項目名を変えても離れない。
