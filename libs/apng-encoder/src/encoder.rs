@@ -627,12 +627,12 @@ mod tests {
         }
     }
 
-    /// 不透明な背景を四角が飛び回り、ときどき全面が閃くRGBA8の列
+    /// 背景を四角が飛び回り、ときどき全面が閃くRGB8の列
     ///
-    /// 四角は離れた4点を順に移動するため、差分の外接矩形は広く取りながら
-    /// 中身のほとんどが変化せず、潰した候補が勝つ。閃光は背景ごと塗り替え、
-    /// その次のフレームで直前の内容へ戻すので、閃光を捨てたキャンバスとの
-    /// 差分が1画素になり、捨てる候補が勝つ。
+    /// 四角は離れた4点を順に移動するため、差分の外接矩形は広く取りながら中身の
+    /// ほとんどが変化しない。閃光は背景ごと塗り替え、その次のフレームで直前の
+    /// 内容へ戻すので、閃光を捨てたキャンバスとの差分が1画素になり、捨てる候補が
+    /// 勝つ。
     fn jumping_frames() -> Vec<Vec<u8>> {
         /// 四角を置く位置
         const SPOTS: [(u32, u32); 4] = [(2, 2), (50, 36), (48, 4), (4, 34)];
@@ -643,14 +643,14 @@ mod tests {
         /// 閃光を挟む間隔
         const FLASH_EVERY: usize = 5;
 
-        let background = with_alpha(&detailed_frame(0));
-        let flash = with_alpha(&detailed_frame(9));
+        let background = detailed_frame(0);
+        let flash = detailed_frame(9);
         let square = |(left, top): (u32, u32)| {
             let mut frame = background.clone();
             for y in top..top + SIDE {
                 for x in left..left + SIDE {
-                    let at = ((y * WIDTH + x) * 4) as usize;
-                    frame[at..at + 4].copy_from_slice(&[0xF0, 0x20, 0x40, 0xFF]);
+                    let at = ((y * WIDTH + x) * 3) as usize;
+                    frame[at..at + 3].copy_from_slice(&[0xF0, 0x20, 0x40]);
                 }
             }
             frame
@@ -666,6 +666,16 @@ mod tests {
             }
         }
         frames
+    }
+
+    /// [`jumping_frames`] を色種別ごとに揃えた素材
+    ///
+    /// αを足した列では、四角の動きが残す変化しない画素を潰した候補が立つ。
+    /// αの無い列で立つのは捨てる候補だけで、幅はすべてそちらから出る。
+    fn jumping_material() -> [(Config, Vec<Vec<u8>>); 2] {
+        let rgb = jumping_frames();
+        let rgba = rgb.iter().map(|frame| with_alpha(frame)).collect();
+        [(rgb_config(), rgb), (rgba_config(), rgba)]
     }
 
     /// fcTLが並べるdispose_opとblend_op
@@ -694,34 +704,40 @@ mod tests {
     /// ワーカー数は出力に現れない。フレーム数を超えるワーカー数も回す。
     #[test]
     fn the_output_does_not_depend_on_the_number_of_workers() {
-        let input = jumping_frames();
-        let expected = encode_with_workers(&input, rgba_config(), 1);
+        for (config, input) in jumping_material() {
+            let color = config.color_type;
+            let expected = encode_with_workers(&input, config, 1);
 
-        for workers in [2, 3, 4, 8, 12, 32] {
-            let bytes = encode_with_workers(&input, rgba_config(), workers);
-            assert_eq!(bytes, expected, "ワーカー{workers}個の出力");
+            for workers in [2, 3, 4, 8, 12, 32] {
+                let bytes = encode_with_workers(&input, config, workers);
+                assert_eq!(bytes, expected, "{color:?} ワーカー{workers}個の出力");
+            }
         }
     }
 
     /// 素材が決定の経路を踏んでいることを、逐次の出力で確かめる
     ///
     /// 捨てる候補も潰した候補も現れない素材では、ワーカー数の比較が薄いところしか
-    /// 通らない。
+    /// 通らない。潰した候補が立つのはαを持つ列だけで、そこはαの無い列との違いに
+    /// なる。
     #[test]
     fn the_compared_material_exercises_the_decisions() {
-        let input = jumping_frames();
-        let ops = frame_control(&encode_with_workers(&input, rgba_config(), 1));
+        for (config, input) in jumping_material() {
+            let color = config.color_type;
+            let ops = frame_control(&encode_with_workers(&input, config, 1));
 
-        assert_eq!(ops.len(), input.len());
-        assert!(
-            ops.iter()
-                .any(|&(dispose, _)| dispose == DISPOSE_OP_PREVIOUS),
-            "捨てる候補が一度も勝っていない: {ops:?}"
-        );
-        assert!(
-            ops.iter().any(|&(_, blend)| blend == BLEND_OP_OVER),
-            "潰した候補が一度も勝っていない: {ops:?}"
-        );
+            assert_eq!(ops.len(), input.len());
+            assert!(
+                ops.iter()
+                    .any(|&(dispose, _)| dispose == DISPOSE_OP_PREVIOUS),
+                "{color:?}: 捨てる候補が一度も勝っていない: {ops:?}"
+            );
+            assert_eq!(
+                ops.iter().any(|&(_, blend)| blend == BLEND_OP_OVER),
+                matches!(color, ColorType::Rgba8),
+                "{color:?}: 潰した候補の立ち方が色種別と合わない: {ops:?}"
+            );
+        }
     }
 
     /// 連敗が閾値に届くまでは候補を立てるのをやめない
