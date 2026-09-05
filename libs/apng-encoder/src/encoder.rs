@@ -820,6 +820,15 @@ mod tests {
     /// 繰り返す。最後のフレームで連敗が閾値に届く。
     const LOSING_FRAMES: usize = 1 + 2 * BLEND_LOSS_STREAK as usize;
 
+    /// 休みの最中に潰した候補が負け続けるフレーム数
+    ///
+    /// [`BLEND_LOSS_STREAK`] を超えるだけ並べる。負けを休みの最中にも数えると、
+    /// この列の途中で連敗が閾値に届き、休みが張り直される。
+    const RESTING_LOSSES: usize = BLEND_REST_FRAMES as usize - 1;
+
+    /// [`resting_frames`] が画素ごとに違う面へ切り替わるフレームの位置
+    const DENSE_STARTS_AT: usize = LOSING_FRAMES + RESTING_LOSSES;
+
     /// [`resting_frames`] で潰した候補が初めて採られるフレームの位置
     const REST_ENDS_AT: usize = LOSING_FRAMES + BLEND_REST_FRAMES as usize;
 
@@ -839,7 +848,8 @@ mod tests {
     ///
     /// 前半は一様な面とまだらな半透明の面を交互に置く。まだらへ変わるフレームは
     /// 変化した画素が不透明でないため詰め直せず、一様へ戻るフレームは1画素の矩形を
-    /// 詰め直して必ず負ける。
+    /// 詰め直して必ず負ける。連敗が閾値に届いた後は同じ面を並べ、休みが明ける手前まで
+    /// 1画素の矩形を詰め直しては負け続ける。
     ///
     /// 後半は画素ごとに違う不透明な色を敷き、そこへ離れた2画素ずつ印を書き足す。
     /// 矩形は2つの印を囲んで広がり、その中のほとんどが変化しないため、潰した候補が
@@ -860,11 +870,14 @@ mod tests {
             frames.push(speckled.clone());
             frames.push(uniform.clone());
         }
+        for _ in 0..RESTING_LOSSES {
+            frames.push(uniform.clone());
+        }
 
         let mut dense = with_alpha(&noise(PIXELS * 3, 5));
         frames.push(dense.clone());
         while frames.len() < REST_ENDS_AT + WINNING_FRAMES {
-            let step = frames.len() - LOSING_FRAMES - 1;
+            let step = frames.len() - DENSE_STARTS_AT - 1;
             invert_rgba(&mut dense, 1 + step, 1);
             invert_rgba(&mut dense, WIDTH as usize - 2 - step, HEIGHT as usize - 2);
             frames.push(dense.clone());
@@ -974,13 +987,13 @@ mod tests {
     fn the_over_candidate_is_taken_once_the_rest_ends() {
         const {
             assert!(
-                LOSING_FRAMES + 1 < REST_ENDS_AT,
-                "休みの最中に潰した候補が勝つフレームがある"
+                RESTING_LOSSES >= BLEND_LOSS_STREAK as usize,
+                "休みの最中に潰した候補が負けるフレームが連敗の閾値ぶん並ぶ"
             );
         }
 
         let (config, input) = resting_material();
-        let winning = input[LOSING_FRAMES..].to_vec();
+        let winning = input[DENSE_STARTS_AT..].to_vec();
         assert_eq!(
             over_frames(&encode_with_workers(&winning, config, 1)),
             (1..winning.len()).collect::<Vec<_>>(),
@@ -991,6 +1004,76 @@ mod tests {
             (REST_ENDS_AT..input.len()).collect::<Vec<_>>(),
             "素材全体で潰した候補が採られるフレーム"
         );
+    }
+
+    /// 圧縮に配ったバッファは、退けた候補も捨てた候補もパイプラインへ戻る
+    ///
+    /// 決定は詰め直した候補のぶんだけバッファを持ち出し、退けた候補の本体を返す。
+    /// 書き出しは持ち出したぶんと、書き出した本体を返す。休みの最中の候補も受け取って
+    /// から返すので、出入りの数はどのフレームでも候補の有無だけで決まり、書き出し切ると
+    /// 配った数がそのまま戻る。
+    ///
+    /// 仕掛かりの上限を超えるバッファを先に満たしておく。確保が入れば最後の数がそのぶん
+    /// 増える。
+    #[test]
+    fn every_compression_buffer_comes_back() {
+        /// 先に満たしておくバッファの数
+        const PREFILLED: usize = 64;
+
+        for (config, input) in jumping_material().into_iter().chain([resting_material()]) {
+            let color = config.color_type;
+            let delay = FrameDelay::new(1, 30).unwrap();
+            let mut encoder = Encoder::new(
+                Cursor::new(Vec::new()),
+                WIDTH,
+                HEIGHT,
+                input.len() as u32,
+                config,
+            )
+            .unwrap();
+            for _ in 0..PREFILLED {
+                encoder.pipeline.recycle(Vec::new());
+            }
+            // 決定と書き出しを別々に数えるため、どちらも列へ溜めさせる
+            encoder.staged_depth = input.len();
+            encoder.pending_depth = NonZeroUsize::new(input.len() + 1).unwrap();
+            for frame in &input {
+                encoder.add_frame(frame, delay).unwrap();
+            }
+
+            for index in 0..input.len() {
+                let before = encoder.pipeline.pooled();
+                encoder.decide().unwrap();
+                let decided = encoder.writing.open.as_ref().expect("決めたフレームが残る");
+                let packed = usize::from(matches!(decided.over, Over::Packed(_)));
+                assert_eq!(
+                    encoder.pipeline.pooled() + packed,
+                    before,
+                    "{color:?} フレーム {index}: 決定が持ち出したバッファ"
+                );
+            }
+
+            encoder.writing.settle(DISPOSE_OP_NONE);
+            for index in 0..input.len() {
+                let pending = encoder
+                    .writing
+                    .overflowing(0)
+                    .expect("書き出すフレームが残る");
+                let packed = usize::from(matches!(pending.frame.over, Over::Packed(_)));
+                let before = encoder.pipeline.pooled();
+                encoder.write(pending).unwrap();
+                assert_eq!(
+                    encoder.pipeline.pooled(),
+                    before + 1 + packed,
+                    "{color:?} フレーム {index}: 書き出しが返したバッファ"
+                );
+            }
+            assert_eq!(
+                encoder.pipeline.pooled(),
+                PREFILLED,
+                "{color:?}: 書き出し切った後に配り直せるバッファ"
+            );
+        }
     }
 
     /// 生のフレームの写し先は使い回され、暖機を過ぎると面を確保しない
