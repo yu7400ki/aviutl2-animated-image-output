@@ -169,17 +169,20 @@ mod tests {
 
     /// Ioエラーで失敗した書き出しは、書きかけのファイルを残さない
     ///
-    /// 先頭フレームはdispose_opが決まる2フレーム目の投入まで書き出されないため、
-    /// シグネチャ・IHDR・acTL・fcTLちょうどの長さで受け付けを止めると、2フレーム目を
-    /// 投入した`add_frame`が先頭フレームのIDATの書き出しでIoエラーを返す。失敗する
+    /// 先頭フレームは決定と書き出しの列を抜けるまで書き出されないため、
+    /// シグネチャ・IHDR・acTL・fcTLちょうどの長さで受け付けを止めると、先頭フレームが
+    /// 列を抜けたところで`add_frame`がそのIDATの書き出しでIoエラーを返す。失敗する
     /// までに実ファイルへ書き出されたバイト数も確かめ、書きかけの状態を経ることを示す。
     #[test]
     fn an_io_failure_while_writing_a_frame_leaves_no_file() {
+        /// 先頭フレームが列を抜けるだけのフレーム数
+        const COUNT: u32 = 8;
+        // シグネチャ(8) + IHDR(25) + acTL(20) + fcTL(38)
+        const BUDGET: usize = 8 + 25 + 20 + 38;
+
         let path = temp_path();
         let delay = frame_delay(1, 30).unwrap();
         let frame = vec![0u8; 8 * 8 * 4];
-        // シグネチャ(8) + IHDR(25) + acTL(20) + fcTL(38)
-        const BUDGET: usize = 8 + 25 + 20 + 38;
 
         let result = write_or_discard(&path, |file| {
             let probe = file.try_clone().map_err(|e| e.to_string())?;
@@ -191,7 +194,7 @@ mod tests {
                 },
                 8,
                 8,
-                2,
+                COUNT,
                 encoder_config(&Config {
                     color_format: ColorFormat::Rgba32,
                     ..Config::default()
@@ -199,13 +202,9 @@ mod tests {
             )
             .map_err(|e| e.to_string())?;
 
-            encoder
-                .add_frame(&frame, delay)
-                .map_err(|e| e.to_string())?;
-
-            let error = encoder
-                .add_frame(&frame, delay)
-                .expect_err("バッファを使い切るのでIoエラーになる");
+            let error = (0..COUNT)
+                .find_map(|_| encoder.add_frame(&frame, delay).err())
+                .expect("バッファを使い切るのでIoエラーになる");
             assert!(matches!(error, EncoderError::Io(_)), "{error}");
 
             let written = probe.metadata().map_err(|e| e.to_string())?.len();

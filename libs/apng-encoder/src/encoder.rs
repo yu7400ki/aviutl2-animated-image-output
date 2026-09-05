@@ -162,8 +162,9 @@ impl Writing {
 /// 投入されたフレームは決定と書き出しの列を通ってから出るため、書き出しは投入から
 /// 遅れる。
 ///
-/// 生のフレームを3面抱える (1920x1080のRGBA8で約24.9MB)。加えて、書き出しを待つ
-/// フレームの圧縮した本体を抱える。フレームは投入された順にそのまま書き出す。
+/// 生のフレームを `ワーカー数 × 2 + 3` 面抱える (ワーカーが1つのとき、1920x1080の
+/// RGBA8で約41.5MB)。加えて、書き出しを待つフレームの圧縮した本体を抱える。
+/// フレームは投入された順にそのまま書き出す。
 ///
 /// 落としたエンコーダはワーカーを畳んでから返る。
 pub struct Encoder<W: Write> {
@@ -173,7 +174,7 @@ pub struct Encoder<W: Write> {
     layout: Layout,
     /// 圧縮の投入口と、番号を指す結果の受け取り
     pipeline: Pipeline,
-    /// 直前のフレームとキャンバスの追跡
+    /// 投入と決定それぞれが見るフレームの追跡
     delta: Delta,
     /// 投入済み・未決定のフレーム
     staged: VecDeque<Staged>,
@@ -246,9 +247,9 @@ impl<W: Write> Encoder<W> {
             pipeline,
             delta: Delta::new(),
             staged: VecDeque::new(),
-            staged_depth: 0,
+            staged_depth: workers.get() * 2,
             writing: Writing::new(),
-            pending_depth: NonZeroUsize::MIN,
+            pending_depth: workers.saturating_add(1),
             num_frames,
             frames_accepted: 0,
             poisoned: false,
@@ -774,24 +775,39 @@ mod tests {
         [(rgb_config(), rgb), (rgba_config(), rgba)]
     }
 
-    /// fcTLが並べるdispose_opとblend_op
-    fn frame_control(bytes: &[u8]) -> Vec<(u8, u8)> {
-        /// fcTLの中でdispose_opが始まる位置
-        const DISPOSE_OP: usize = 24;
-
-        let mut ops = Vec::new();
+    /// fcTLの並びから、フレームごとの値を1つ取り出す
+    fn frame_control<T>(bytes: &[u8], pick: impl Fn(&[u8]) -> T) -> Vec<T> {
+        let mut values = Vec::new();
         let mut offset = chunk::SIGNATURE.len();
 
         while offset + 12 <= bytes.len() {
             let len = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
             if &bytes[offset + 4..offset + 8] == b"fcTL" {
-                let data = &bytes[offset + 8..offset + 8 + len];
-                ops.push((data[DISPOSE_OP], data[DISPOSE_OP + 1]));
+                values.push(pick(&bytes[offset + 8..offset + 8 + len]));
             }
             offset += 12 + len;
         }
 
-        ops
+        values
+    }
+
+    /// fcTLが並べるdispose_opとblend_op
+    fn frame_ops(bytes: &[u8]) -> Vec<(u8, u8)> {
+        /// fcTLの中でdispose_opが始まる位置
+        const DISPOSE_OP: usize = 24;
+
+        frame_control(bytes, |data| (data[DISPOSE_OP], data[DISPOSE_OP + 1]))
+    }
+
+    /// fcTLが並べる遅延の分子と分母
+    fn frame_delays(bytes: &[u8]) -> Vec<(u16, u16)> {
+        /// fcTLの中でdelay_numが始まる位置
+        const DELAY_NUM: usize = 20;
+
+        frame_control(bytes, |data| {
+            let part = |at: usize| u16::from_be_bytes(data[at..at + 2].try_into().unwrap());
+            (part(DELAY_NUM), part(DELAY_NUM + 2))
+        })
     }
 
     /// 並列に圧縮しても、逐次に圧縮した出力とバイト一致する
@@ -820,7 +836,7 @@ mod tests {
     fn the_compared_material_exercises_the_decisions() {
         for (config, input) in jumping_material() {
             let color = config.color_type;
-            let ops = frame_control(&encode_with_workers(&input, config, 1));
+            let ops = frame_ops(&encode_with_workers(&input, config, 1));
 
             assert_eq!(ops.len(), input.len());
             assert!(
@@ -836,37 +852,100 @@ mod tests {
         }
     }
 
-    /// 生のフレームの写し先は使い回され、フレームごとに面を増やさない
+    /// 生のフレームの写し先は使い回され、暖機を過ぎると面を確保しない
     ///
-    /// 決定を終えて指す先を失った面が1つずつ戻るため、配り直しを待つ面はフレームを
-    /// 受け付けるたびに1つで、その容量は次の1面を写すのに足りている。
+    /// 決定を終えて指す先を失った面が1つずつ戻るので、戻り始めた後は配り直しを待つ
+    /// 面がフレームごとに1つで、その容量は次の1面を写すのに足りている。戻り始める
+    /// までに確保する面の数は、決定を待たせるフレーム数から決まる。
     #[test]
     fn the_frame_buffer_is_handed_back_for_the_next_copy() {
         for (config, input) in jumping_material() {
             let color = config.color_type;
             let delay = FrameDelay::new(1, 30).unwrap();
-            let mut encoder = Encoder::new(
-                Cursor::new(Vec::new()),
-                WIDTH,
-                HEIGHT,
-                input.len() as u32,
-                config,
-            )
-            .unwrap();
 
-            for (index, frame) in input.iter().enumerate() {
-                encoder.add_frame(frame, delay).unwrap();
-                let spare = encoder.delta.spare();
+            for workers in [1, 3] {
+                let mut encoder = Encoder::with_workers(
+                    Cursor::new(Vec::new()),
+                    WIDTH,
+                    HEIGHT,
+                    input.len() as u32,
+                    config,
+                    NonZeroUsize::new(workers).unwrap(),
+                )
+                .unwrap();
+
+                let warm_up = encoder.staged_depth + 2;
+                let mut allocated = 0;
+                for (index, frame) in input.iter().enumerate() {
+                    let spare = encoder.delta.spare();
+                    if spare
+                        .first()
+                        .is_none_or(|face| face.capacity() < frame.len())
+                    {
+                        allocated += 1;
+                    }
+
+                    encoder.add_frame(frame, delay).unwrap();
+                    if index < warm_up {
+                        continue;
+                    }
+
+                    let spare = encoder.delta.spare();
+                    assert_eq!(
+                        spare.len(),
+                        1,
+                        "{color:?} ワーカー{workers}個 フレーム {index}: 配り直しを待つ面"
+                    );
+                    assert!(
+                        spare[0].capacity() >= frame.len(),
+                        "{color:?} ワーカー{workers}個 フレーム {index}: 写し先の容量が1面に足りない"
+                    );
+                }
                 assert_eq!(
-                    spare.len(),
-                    1,
-                    "{color:?} フレーム {index}: 配り直しを待つ面"
+                    allocated,
+                    encoder.staged_depth + 3,
+                    "{color:?} ワーカー{workers}個: 写し先に確保した面"
                 );
             }
-            assert!(
-                encoder.delta.spare()[0].capacity() >= input[0].len(),
-                "{color:?}: 写し先の容量が1面に足りない"
-            );
+        }
+    }
+
+    /// フレームは投入された順に書き出される
+    ///
+    /// 決定も書き出しも列の先頭から取るため、列に何フレーム溜まっていても並びは
+    /// 投入の順のまま出る。フレームごとに違う遅延を渡し、fcTLの並びで確かめる。
+    #[test]
+    fn the_frames_are_written_in_the_order_they_were_added() {
+        for (config, input) in jumping_material() {
+            let color = config.color_type;
+            let delays: Vec<FrameDelay> = (0..input.len())
+                .map(|index| FrameDelay::new(index as u32 + 1, 1).unwrap())
+                .collect();
+            let expected: Vec<(u16, u16)> = (0..input.len())
+                .map(|index| (index as u16 + 1, 1))
+                .collect();
+
+            for workers in [1, 3] {
+                let mut encoder = Encoder::with_workers(
+                    Cursor::new(Vec::new()),
+                    WIDTH,
+                    HEIGHT,
+                    input.len() as u32,
+                    config,
+                    NonZeroUsize::new(workers).unwrap(),
+                )
+                .unwrap();
+                for (frame, delay) in input.iter().zip(&delays) {
+                    encoder.add_frame(frame, *delay).unwrap();
+                }
+                let bytes = encoder.finish().unwrap().into_inner();
+
+                assert_eq!(
+                    frame_delays(&bytes),
+                    expected,
+                    "{color:?} ワーカー{workers}個の書き出し順"
+                );
+            }
         }
     }
 
@@ -888,8 +967,13 @@ mod tests {
         assert!(pacing.should_try(), "閾値に届く前に休みに入っている");
     }
 
-    /// フレームを受け付けたエンコーダが持つ間合い
-    fn pacing_of<W: Write>(encoder: &Encoder<W>) -> &Pacing {
+    /// 投入済みのフレームをすべて決定させ、そのときの間合いを返す
+    ///
+    /// 決定は投入の順に進むため、列に溜めたまま進めた場合と決定の並びは変わらない。
+    fn pacing_after_deciding<W: Write>(encoder: &mut Encoder<W>) -> &Pacing {
+        while !encoder.staged.is_empty() {
+            encoder.decide().unwrap();
+        }
         &encoder.writing.blend_pacing
     }
 
@@ -927,11 +1011,11 @@ mod tests {
         for frame in &input {
             encoder.add_frame(frame, delay).unwrap();
         }
-        let blend_pacing = pacing_of(&encoder);
+        let blend_pacing = pacing_after_deciding(&mut encoder);
         assert_eq!(blend_pacing.resting(), BLEND_REST_FRAMES);
 
         encoder.add_frame(&speckled, delay).unwrap();
-        let blend_pacing = pacing_of(&encoder);
+        let blend_pacing = pacing_after_deciding(&mut encoder);
         assert_eq!(blend_pacing.resting(), BLEND_REST_FRAMES - 1);
     }
 }

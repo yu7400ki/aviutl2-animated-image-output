@@ -324,24 +324,33 @@ impl Write for FailingWriter {
 
 /// fcTLだけが書かれた状態で再開すると不正なAPNGになるため、失敗後は受け付けない
 ///
-/// 先頭フレームはdispose_opが決まる2フレーム目の投入まで書き出されない。
+/// 先頭フレームは決定と書き出しの列を抜けるまで書き出されないので、失敗が伝わるのは
+/// 先に投入したフレームのものになる。
 #[test]
 fn a_failed_write_poisons_the_encoder() {
-    let input = frames(8, 8, ColorType::Rgba8, 3);
+    /// 列を抜けて書き出しが始まるだけのフレーム数
+    const COUNT: u32 = 8;
+
+    let input = frames(8, 8, ColorType::Rgba8, COUNT);
     let delay = FrameDelay::new(1, 30).unwrap();
     // シグネチャ・IHDR・acTL・fcTLは通り、IDATの途中で失敗する長さ
     let writer = FailingWriter { remaining: 100 };
-    let mut encoder = Encoder::new(writer, 8, 8, 3, config(ColorType::Rgba8)).unwrap();
+    let mut encoder = Encoder::new(writer, 8, 8, COUNT, config(ColorType::Rgba8)).unwrap();
 
-    encoder.add_frame(&input[0], delay).unwrap();
-    assert!(matches!(
-        encoder.add_frame(&input[1], delay),
-        Err(Error::Io(_))
-    ));
-    assert!(matches!(
-        encoder.add_frame(&input[2], delay),
-        Err(Error::Poisoned)
-    ));
+    let outcomes: Vec<Result<(), Error>> = input
+        .iter()
+        .map(|frame| encoder.add_frame(frame, delay))
+        .collect();
+    let failed = outcomes
+        .iter()
+        .position(|outcome| outcome.is_err())
+        .expect("列を抜けたフレームの書き出しが失敗する");
+
+    assert!(matches!(outcomes[failed], Err(Error::Io(_))));
+    assert!(
+        matches!(outcomes[failed + 1], Err(Error::Poisoned)),
+        "失敗した後も投入を受け付けている"
+    );
     assert!(matches!(encoder.finish(), Err(Error::Poisoned)));
 }
 
