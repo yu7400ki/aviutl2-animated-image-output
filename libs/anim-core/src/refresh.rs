@@ -1,4 +1,4 @@
-//! 画面に出ている値と入力の隔たりから決まる、書き直す画素
+//! 比べる相手との隔たりから決まる、書き直す画素
 
 use crate::color::ColorType;
 use crate::diff::Rect;
@@ -95,6 +95,14 @@ impl Plane {
         self.words.fill(0);
     }
 
+    /// `other` で立っているビットを立てる
+    fn merge(&mut self, other: &Plane) {
+        debug_assert!(self.width == other.width && self.height == other.height);
+        for (word, other) in self.words.iter_mut().zip(&other.words) {
+            *word |= other;
+        }
+    }
+
     /// `(x, y)` が乗る語の位置と、その中のビット
     fn at(&self, x: u32, y: u32) -> (usize, u64) {
         let x = x as usize;
@@ -182,6 +190,16 @@ impl Triggers {
         self.map.get(x, y)
     }
 
+    /// `other` の書き直す画素を取り込む
+    fn absorb(&mut self, other: &Triggers) {
+        self.map.merge(&other.map);
+        self.bounds = match (self.bounds, other.bounds) {
+            (Some(bounds), Some(other)) => Some(spanning(bounds, other)),
+            (Some(bounds), None) | (None, Some(bounds)) => Some(bounds),
+            (None, None) => None,
+        };
+    }
+
     /// `(x, y)` を書き直す画素にする
     fn mark(&mut self, x: u32, y: u32) {
         self.map.set(x, y, true);
@@ -195,6 +213,12 @@ impl Triggers {
             },
         });
     }
+}
+
+/// 2つの矩形をどちらも含む最小の矩形
+fn spanning(rect: Rect, other: Rect) -> Rect {
+    let rect = grown(rect, other.x, other.y);
+    grown(rect, other.x + other.width - 1, other.y + other.height - 1)
 }
 
 /// `(x, y)` を含むまで広げた矩形
@@ -228,6 +252,70 @@ fn differs<const BPP: usize>(a: &[u8], b: &[u8], tolerance: u8) -> bool {
         .iter()
         .zip(&b[..3])
         .any(|(a, b)| a.abs_diff(*b) > tolerance)
+}
+
+/// 投入されたフレームの並びから、書き直す画素を決める
+///
+/// 変わった画素は、その投入と次の投入で書かれる。
+pub struct Rewrite {
+    /// 直前の投入で変わった画素
+    recent: Triggers,
+    width: u32,
+    height: u32,
+    color_type: ColorType,
+}
+
+impl Rewrite {
+    /// `width` x `height` の `color_type` を追う、まだ何も投入していない状態
+    pub fn new(width: u32, height: u32, color_type: ColorType) -> Self {
+        Rewrite {
+            recent: Triggers::empty(width, height),
+            width,
+            height,
+            color_type,
+        }
+    }
+
+    /// `against` と違う画素の地図
+    ///
+    /// `src` と `against` は `color_type` の画素が隙間なく1フレームぶん並んで
+    /// いること。
+    pub fn changes(&self, src: &[u8], against: &[u8]) -> Triggers {
+        match self.color_type {
+            ColorType::Rgb8 => self.scan::<3>(src, against),
+            ColorType::Rgba8 => self.scan::<4>(src, against),
+        }
+    }
+
+    /// `changes` に、直前の投入で変わった画素を合わせた地図
+    pub fn carried(&self, changes: &Triggers) -> Triggers {
+        let mut carried = changes.clone();
+        carried.absorb(&self.recent);
+        carried
+    }
+
+    /// `changes` を、直前の投入で変わった画素として控える
+    pub fn advance(&mut self, changes: Triggers) {
+        self.recent = changes;
+    }
+
+    fn scan<const BPP: usize>(&self, src: &[u8], against: &[u8]) -> Triggers {
+        let mut triggers = Triggers::empty(self.width, self.height);
+        let stride = self.width as usize * BPP;
+        for y in 0..self.height {
+            let start = y as usize * stride;
+            let end = start + stride;
+            let row = src[start..end]
+                .chunks_exact(BPP)
+                .zip(against[start..end].chunks_exact(BPP));
+            for (column, (src, against)) in row.enumerate() {
+                if differs::<BPP>(src, against, 0) {
+                    triggers.mark(column as u32, y);
+                }
+            }
+        }
+        triggers
+    }
 }
 
 /// 入力・画面に出ている値・最後に書いた入力から、書き直す画素を決める
@@ -742,6 +830,149 @@ mod tests {
         let profile = triggers.profile(rect(0, 0, 4, 3));
         assert_eq!(profile.rows, [None; 3]);
         assert_eq!(profile.cols, [None; 4]);
+    }
+
+    /// 直前の投入で変わった画素は、次の投入でも書き直す
+    ///
+    /// 動く物の旧位置は直前の変化に入るので、新位置と同じ矩形へ収まる。
+    #[test]
+    fn the_previous_change_joins_the_next_rect() {
+        for color_type in COLOR_TYPES {
+            let bpp = color_type.bytes_per_pixel();
+            let flat = bytes(color_type, &[[100, 100, 100, 0xFF]; 5]);
+            let mut rewrite = Rewrite::new(5, 1, color_type);
+
+            // 1つ目の画素が動く
+            let mut second = flat.clone();
+            second[0] = 200;
+            let change = rewrite.changes(&second, &flat);
+            assert_eq!(change.bounds(), Some(rect(0, 0, 1, 1)), "{color_type:?}");
+            rewrite.advance(change);
+
+            // 4つ目の画素が動くと、矩形は旧位置まで戻る
+            let mut third = second.clone();
+            third[4 * bpp] = 200;
+            let change = rewrite.changes(&third, &second);
+            assert_eq!(change.bounds(), Some(rect(4, 0, 1, 1)), "{color_type:?}");
+            assert_eq!(
+                rewrite.carried(&change).bounds(),
+                Some(rect(0, 0, 5, 1)),
+                "{color_type:?}"
+            );
+        }
+    }
+
+    /// 動きが止まっても、直前の変化は書き直す
+    #[test]
+    fn a_stopped_change_is_still_rewritten() {
+        for color_type in COLOR_TYPES {
+            let flat = bytes(color_type, &[[100, 100, 100, 0xFF]; 5]);
+            let mut rewrite = Rewrite::new(5, 1, color_type);
+
+            let mut second = flat.clone();
+            second[0] = 200;
+            let change = rewrite.changes(&second, &flat);
+            rewrite.advance(change);
+
+            // 3枚目は2枚目と同じ入力で、変化そのものは空になる
+            let change = rewrite.changes(&second, &second);
+            assert_eq!(change.bounds(), None, "{color_type:?}");
+            assert_eq!(
+                rewrite.carried(&change).bounds(),
+                Some(rect(0, 0, 1, 1)),
+                "{color_type:?}"
+            );
+        }
+    }
+
+    /// 変化も持ち越しも空なら、書き直す画素は無い
+    #[test]
+    fn a_frame_after_a_still_one_has_nothing_to_rewrite() {
+        for color_type in COLOR_TYPES {
+            let flat = bytes(color_type, &[[100, 100, 100, 0xFF]; 5]);
+            let mut rewrite = Rewrite::new(5, 1, color_type);
+
+            let change = rewrite.changes(&flat, &flat);
+            rewrite.advance(change);
+
+            let change = rewrite.changes(&flat, &flat);
+            assert_eq!(rewrite.carried(&change).bounds(), None, "{color_type:?}");
+        }
+    }
+
+    /// 持ち越しは、地図を採る相手を替えても同じものが乗る
+    #[test]
+    fn the_carry_does_not_depend_on_the_face_it_is_added_to() {
+        let flat = bytes(ColorType::Rgb8, &[[100, 100, 100, 0xFF]; 5]);
+        let mut rewrite = Rewrite::new(5, 1, ColorType::Rgb8);
+
+        let mut second = flat.clone();
+        second[0] = 200;
+        let change = rewrite.changes(&second, &flat);
+        rewrite.advance(change);
+
+        // 4つ目の画素だけが違う面と比べても、持ち越しは1つ目の画素を含む
+        let mut other = second.clone();
+        other[4 * 3] = 50;
+        let change = rewrite.changes(&second, &other);
+        assert_eq!(change.bounds(), Some(rect(4, 0, 1, 1)));
+        assert_eq!(rewrite.carried(&change).bounds(), Some(rect(0, 0, 5, 1)));
+    }
+
+    /// 持ち越しを合わせた地図は、行ごと・列ごとの範囲にも入る
+    #[test]
+    fn the_carry_reads_as_rows_and_columns() {
+        const WIDTH: u32 = 4;
+
+        let flat = bytes(ColorType::Rgb8, &[[100, 100, 100, 0xFF]; 16]);
+        let mut rewrite = Rewrite::new(WIDTH, 4, ColorType::Rgb8);
+
+        let mut second = flat.clone();
+        second[(2 * WIDTH as usize + 3) * 3] = 200;
+        let change = rewrite.changes(&second, &flat);
+        rewrite.advance(change);
+
+        let mut third = second.clone();
+        for (x, y) in [(1, 0), (1, 1), (1, 2)] {
+            third[(y * WIDTH as usize + x) * 3] = 200;
+        }
+        let carried = rewrite.carried(&rewrite.changes(&third, &second));
+        assert_eq!(carried.bounds(), Some(rect(1, 0, 3, 3)));
+
+        let profile = carried.profile(rect(1, 0, 3, 3));
+        assert_eq!(profile.rows, [span(0, 0), span(0, 0), span(0, 2)]);
+        assert_eq!(profile.cols, [span(0, 2), None, span(2, 2)]);
+    }
+
+    /// 変化の外接矩形は、厳密一致で採った矩形と一致する
+    ///
+    /// 完全透過の画素のRGBが0へ潰れている入力で突き合わせる。
+    #[test]
+    fn a_change_matches_the_exact_rect() {
+        const WIDTH: u32 = 13;
+        const HEIGHT: u32 = 7;
+        const PIXELS: usize = (WIDTH * HEIGHT) as usize;
+
+        let mut random = Random(0x9E37_79B9_7F4A_7C15);
+        for color_type in COLOR_TYPES {
+            let bpp = color_type.bytes_per_pixel();
+            let rewrite = Rewrite::new(WIDTH, HEIGHT, color_type);
+            for round in 0..64 {
+                let against = noise(&mut random, color_type, PIXELS);
+                let mut src = against.clone();
+                for _ in 0..random.below(6) {
+                    let at = random.below(WIDTH * HEIGHT) as usize;
+                    src[at] = noise(&mut random, color_type, 1)[0];
+                }
+                let (src, against) = (bytes(color_type, &src), bytes(color_type, &against));
+
+                assert_eq!(
+                    rewrite.changes(&src, &against).bounds(),
+                    dirty_rect(&against, &src, WIDTH as usize * bpp, bpp),
+                    "{color_type:?} {round}回目"
+                );
+            }
+        }
     }
 
     /// 許容量0の外接矩形は、厳密一致で採った矩形と一致する
