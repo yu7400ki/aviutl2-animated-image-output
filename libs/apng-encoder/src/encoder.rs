@@ -533,13 +533,15 @@ mod tests {
         frames
     }
 
-    fn encode(input: &[Vec<u8>], config: Config) -> Vec<u8> {
-        let mut encoder = Encoder::new(
+    /// `workers` 個のワーカーでフレーム列を書き出す
+    fn encode_with_workers(input: &[Vec<u8>], config: Config, workers: usize) -> Vec<u8> {
+        let mut encoder = Encoder::with_workers(
             Cursor::new(Vec::new()),
             WIDTH,
             HEIGHT,
             input.len() as u32,
             config,
+            NonZeroUsize::new(workers).unwrap(),
         )
         .unwrap();
         for frame in input {
@@ -548,6 +550,10 @@ mod tests {
                 .unwrap();
         }
         encoder.finish().unwrap().into_inner()
+    }
+
+    fn encode(input: &[Vec<u8>], config: Config) -> Vec<u8> {
+        encode_with_workers(input, config, 1)
     }
 
     fn rgb_config() -> Config {
@@ -619,6 +625,103 @@ mod tests {
             color_type: ColorType::Rgba8,
             ..Config::default()
         }
+    }
+
+    /// 不透明な背景を四角が飛び回り、ときどき全面が閃くRGBA8の列
+    ///
+    /// 四角は離れた4点を順に移動するため、差分の外接矩形は広く取りながら
+    /// 中身のほとんどが変化せず、潰した候補が勝つ。閃光は背景ごと塗り替え、
+    /// その次のフレームで直前の内容へ戻すので、閃光を捨てたキャンバスとの
+    /// 差分が1画素になり、捨てる候補が勝つ。
+    fn jumping_frames() -> Vec<Vec<u8>> {
+        /// 四角を置く位置
+        const SPOTS: [(u32, u32); 4] = [(2, 2), (50, 36), (48, 4), (4, 34)];
+        /// 四角の一辺
+        const SIDE: u32 = 6;
+        /// 四角を動かす回数
+        const STEPS: usize = 18;
+        /// 閃光を挟む間隔
+        const FLASH_EVERY: usize = 5;
+
+        let background = with_alpha(&detailed_frame(0));
+        let flash = with_alpha(&detailed_frame(9));
+        let square = |(left, top): (u32, u32)| {
+            let mut frame = background.clone();
+            for y in top..top + SIDE {
+                for x in left..left + SIDE {
+                    let at = ((y * WIDTH + x) * 4) as usize;
+                    frame[at..at + 4].copy_from_slice(&[0xF0, 0x20, 0x40, 0xFF]);
+                }
+            }
+            frame
+        };
+
+        let mut frames: Vec<Vec<u8>> = Vec::new();
+        for step in 0..STEPS {
+            frames.push(square(SPOTS[step % SPOTS.len()]));
+            if step % FLASH_EVERY == FLASH_EVERY - 1 {
+                let restored = frames.last().expect("四角を置いたフレームがある").clone();
+                frames.push(flash.clone());
+                frames.push(restored);
+            }
+        }
+        frames
+    }
+
+    /// fcTLが並べるdispose_opとblend_op
+    fn frame_control(bytes: &[u8]) -> Vec<(u8, u8)> {
+        /// fcTLの中でdispose_opが始まる位置
+        const DISPOSE_OP: usize = 24;
+
+        let mut ops = Vec::new();
+        let mut offset = chunk::SIGNATURE.len();
+
+        while offset + 12 <= bytes.len() {
+            let len = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            if &bytes[offset + 4..offset + 8] == b"fcTL" {
+                let data = &bytes[offset + 8..offset + 8 + len];
+                ops.push((data[DISPOSE_OP], data[DISPOSE_OP + 1]));
+            }
+            offset += 12 + len;
+        }
+
+        ops
+    }
+
+    /// 並列に圧縮しても、逐次に圧縮した出力とバイト一致する
+    ///
+    /// 決定も書き出しもフレーム順に進み、待つのは投入済みの番号だけなので、
+    /// ワーカー数は出力に現れない。フレーム数を超えるワーカー数も回す。
+    #[test]
+    fn the_output_does_not_depend_on_the_number_of_workers() {
+        let input = jumping_frames();
+        let expected = encode_with_workers(&input, rgba_config(), 1);
+
+        for workers in [2, 3, 4, 8, 12, 32] {
+            let bytes = encode_with_workers(&input, rgba_config(), workers);
+            assert_eq!(bytes, expected, "ワーカー{workers}個の出力");
+        }
+    }
+
+    /// 素材が決定の経路を踏んでいることを、逐次の出力で確かめる
+    ///
+    /// 捨てる候補も潰した候補も現れない素材では、ワーカー数の比較が薄いところしか
+    /// 通らない。
+    #[test]
+    fn the_compared_material_exercises_the_decisions() {
+        let input = jumping_frames();
+        let ops = frame_control(&encode_with_workers(&input, rgba_config(), 1));
+
+        assert_eq!(ops.len(), input.len());
+        assert!(
+            ops.iter()
+                .any(|&(dispose, _)| dispose == DISPOSE_OP_PREVIOUS),
+            "捨てる候補が一度も勝っていない: {ops:?}"
+        );
+        assert!(
+            ops.iter().any(|&(_, blend)| blend == BLEND_OP_OVER),
+            "潰した候補が一度も勝っていない: {ops:?}"
+        );
     }
 
     /// 連敗が閾値に届くまでは候補を立てるのをやめない
