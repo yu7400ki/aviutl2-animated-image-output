@@ -1,15 +1,22 @@
 //! キャンバスの追跡と、フレームの載せ方の決定
 
 use crate::Config;
-use crate::codec::EncodedFrame;
 use crate::error::Error;
 use crate::layout::Layout;
 use crate::normalize::normalize;
-use crate::screen::{compose, decode};
-use anim_core::{ColorType, Rect, Refresh, TOLERANCE, Triggers, dirty_rect};
+use crate::screen::{clear_rect, compose, copy_rect, decode, overlay};
+use anim_core::{ColorType, Rect, Refresh, TOLERANCE, Triggers, crop, dirty_rect};
+use std::collections::VecDeque;
 
 /// キャンバスの1画素のバイト数
 const PIXEL: usize = 4;
+
+/// 決定が待つ復号の遅れ
+///
+/// フレーム N+1 の配置は、フレーム N−L+1 までの復号結果が届いてから決める。
+/// まだ届いていない矩形に覆われた画素は、その矩形が書いた入力を仮に置き、復号が
+/// 届いた時点でそこへ置き換える。
+const DELAY: usize = 1;
 
 /// 完全不透明を表すα
 const OPAQUE: u8 = u8::MAX;
@@ -20,6 +27,14 @@ const SINGLE_PIXEL: Rect = Rect {
     y: 0,
     width: 1,
     height: 1,
+};
+
+/// まだフレームを重ねていない面が抜く矩形
+const NOTHING: Rect = Rect {
+    x: 0,
+    y: 0,
+    width: 0,
+    height: 0,
 };
 
 /// 写した入力の載せ方と、保留中のフレームの廃棄方法
@@ -88,12 +103,32 @@ impl Sheets<'_> {
     }
 }
 
+/// 復号を待っているフレームが仮に置いた層
+struct Layer {
+    /// 符号化へ投入したときの番号
+    index: usize,
+    placement: Placement,
+    /// 矩形を埋める入力 (RGBA)
+    pixels: Vec<u8>,
+}
+
 /// 自分の出力を復号した画面から、書き直す画素を採る
+///
+/// 復号の届いたフレームまでを [`Self::settled`] が映し、そこへ仮置きの層を投入順に
+/// 重ねたものがキャンバスの2面になる。
 struct Screen {
     /// キャンバスの幅と高さ
     size: (u32, u32),
     /// 書き直す画素を追う地図。先頭フレームを全面で書いたときに張る
     refresh: Option<Refresh>,
+    /// 復号の届いたフレームまでを映した面
+    settled: Vec<u8>,
+    /// [`Self::settled`] へ最後に重ねたフレームの矩形
+    settled_rect: Rect,
+    /// 復号を待っている層。投入した順に並ぶ
+    layers: VecDeque<Layer>,
+    /// 使い回す層の受け皿
+    spare: Vec<Vec<u8>>,
 }
 
 /// 差分矩形を決めるとき比べる相手
@@ -160,38 +195,36 @@ impl Basis {
 
     /// `placement` のフレームを2面へ映す
     ///
-    /// `encoded` はその矩形を符号化した単葉を取り出す。自分の出力を追う面は
-    /// 取り出した単葉を復号して合成し、その結果を返す。
-    ///
-    /// # Errors
-    /// 単葉を取り出せなかったとき、または復号した寸法が矩形と違うとき。
-    fn draw(
-        &self,
-        sheets: &mut Sheets<'_>,
-        placement: Placement,
-        encoded: impl FnOnce() -> Result<EncodedFrame, Error>,
-    ) -> Result<Option<EncodedFrame>, Error> {
+    /// `index` はその矩形を符号化へ投入したときの番号。自分の出力を追う面は
+    /// 矩形が書いた入力を仮に置き、[`Self::settle`] がそれを復号結果へ置き換える。
+    fn draw(&mut self, sheets: &mut Sheets<'_>, placement: Placement, index: usize) {
         match self {
             Basis::Inputs => {
                 std::mem::swap(sheets.drawn, sheets.staged);
                 sheets.dispose(placement.rect);
-                Ok(None)
             }
-            Basis::Screen(_) => {
-                let encoded = encoded()?;
-                let decoded = decode(encoded.still(), placement.rect)?;
-                let len = sheets.staged.len();
-                sheets.drawn.resize(len, 0);
-                sheets.disposed.resize(len, 0);
-                compose(
-                    sheets.drawn,
-                    sheets.disposed,
-                    sheets.stride,
-                    placement,
-                    &decoded,
-                );
-                Ok(Some(encoded))
-            }
+            Basis::Screen(screen) => screen.stack(sheets, placement, index),
+        }
+    }
+
+    /// 復号の届いていない層がいちばん古いものの番号
+    ///
+    /// 遅れの限度に達している間だけ返す。
+    fn awaited(&self) -> Option<usize> {
+        match self {
+            Basis::Inputs => None,
+            Basis::Screen(screen) => screen.awaited(),
+        }
+    }
+
+    /// いちばん古い仮置きの層を、復号した画素へ置き換える
+    ///
+    /// # Errors
+    /// 単葉を復号できないとき、または復号した寸法が矩形と違うとき。
+    fn settle(&mut self, sheets: &mut Sheets<'_>, still: &[u8]) -> Result<(), Error> {
+        match self {
+            Basis::Inputs => Ok(()),
+            Basis::Screen(screen) => screen.settle(sheets, still),
         }
     }
 }
@@ -207,10 +240,119 @@ impl Screen {
     fn refresh(&mut self) -> &mut Refresh {
         self.refresh.as_mut().expect(EXPECT_STARTED)
     }
+
+    /// 復号を待っている層のうち、いちばん古いものの番号
+    fn oldest(&self) -> Option<usize> {
+        self.layers.front().map(|layer| layer.index)
+    }
+
+    /// 遅れの限度に達している間だけ、いちばん古い層の番号
+    fn awaited(&self) -> Option<usize> {
+        self.oldest().filter(|_| self.layers.len() >= DELAY)
+    }
+
+    /// いちばん新しく重ねたフレームの矩形
+    fn last_rect(&self) -> Rect {
+        self.layers
+            .back()
+            .map_or(self.settled_rect, |layer| layer.placement.rect)
+    }
+
+    /// `placement` の矩形が書いた入力を、キャンバスの2面へ仮に置く
+    fn stack(&mut self, sheets: &mut Sheets<'_>, placement: Placement, index: usize) {
+        let len = sheets.staged.len();
+        sheets.drawn.resize(len, 0);
+        sheets.disposed.resize(len, 0);
+        self.settled.resize(len, 0);
+
+        let mut pixels = self.spare.pop().unwrap_or_default();
+        pixels.clear();
+        crop(
+            sheets.staged,
+            placement.rect,
+            sheets.stride,
+            PIXEL,
+            PIXEL,
+            &mut pixels,
+        );
+        compose(
+            sheets.drawn,
+            sheets.disposed,
+            sheets.stride,
+            self.last_rect(),
+            placement,
+            &pixels,
+        );
+        self.layers.push_back(Layer {
+            index,
+            placement,
+            pixels,
+        });
+    }
+
+    /// いちばん古い仮置きの層を、復号した画素へ置き換える
+    ///
+    /// 復号した層は確定した面へ重ね、キャンバスの2面はそこから仮置きを投入順に
+    /// 重ね直して組む。組み直すのは、置き換えた矩形と残る仮置きの矩形が覆う範囲。
+    ///
+    /// # Errors
+    /// 単葉を復号できないとき、または復号した寸法が矩形と違うとき
+    /// [`Error::Decode`]。
+    fn settle(&mut self, sheets: &mut Sheets<'_>, still: &[u8]) -> Result<(), Error> {
+        let layer = self.layers.pop_front().expect(EXPECT_AWAITED);
+        let decoded = decode(still, layer.placement.rect)?;
+        overlay(
+            &mut self.settled,
+            sheets.stride,
+            self.settled_rect,
+            layer.placement,
+            &decoded,
+        );
+        self.settled_rect = layer.placement.rect;
+        self.spare.push(layer.pixels);
+
+        let region = self.layers.iter().fold(self.settled_rect, |region, layer| {
+            union(region, layer.placement.rect)
+        });
+        copy_rect(sheets.drawn, &self.settled, sheets.stride, region);
+        copy_rect(sheets.disposed, &self.settled, sheets.stride, region);
+        clear_rect(sheets.disposed, sheets.stride, self.settled_rect);
+
+        let mut previous = self.settled_rect;
+        for layer in &self.layers {
+            compose(
+                sheets.drawn,
+                sheets.disposed,
+                sheets.stride,
+                previous,
+                layer.placement,
+                &layer.pixels,
+            );
+            previous = layer.placement.rect;
+        }
+        Ok(())
+    }
 }
 
 /// 地図を読むのが先頭フレームより後であることの控え
 const EXPECT_STARTED: &str = "先頭フレームを全面で書いてから地図を読む";
+
+/// 置き換える層を指してから復号を渡すことの控え
+const EXPECT_AWAITED: &str = "復号を待っている層がある";
+
+/// 2つの矩形をどちらも含む最小の矩形
+fn union(a: Rect, b: Rect) -> Rect {
+    let x = a.x.min(b.x);
+    let y = a.y.min(b.y);
+    let right = (a.x + a.width).max(b.x + b.width);
+    let bottom = (a.y + a.height).max(b.y + b.height);
+    Rect {
+        x,
+        y,
+        width: right - x,
+        height: bottom - y,
+    }
+}
 
 /// 書く面積の小さい候補
 ///
@@ -254,6 +396,10 @@ impl Canvas {
             Basis::Screen(Screen {
                 size: (layout.width, layout.height),
                 refresh: None,
+                settled: Vec::new(),
+                settled_rect: NOTHING,
+                layers: VecDeque::new(),
+                spare: Vec::new(),
             })
         };
         Canvas {
@@ -319,20 +465,46 @@ impl Canvas {
 
     /// 据えたフレームをキャンバスへ映す
     ///
-    /// `placement` は [`Self::place`] が返した載せ方、`encoded` はその矩形を
-    /// 符号化した単葉を取り出す。自分の出力を追うキャンバスは取り出した単葉を
-    /// 復号して合成し、その結果を返す。
+    /// `placement` は [`Self::place`] が返した載せ方、`index` はその矩形を
+    /// 符号化へ投入したときの番号。自分の出力を追うキャンバスは矩形が書いた入力を
+    /// 仮に置き、[`Self::settle`] が復号結果へ置き換える。
+    pub(crate) fn commit(&mut self, placement: Placement, index: usize) {
+        let (basis, mut sheets) = self.split();
+        basis.draw(&mut sheets, placement, index);
+    }
+
+    /// 決定を進める前に復号を待つフレームの番号
+    pub(crate) fn awaited(&self) -> Option<usize> {
+        self.basis.awaited()
+    }
+
+    /// 復号を待っているいちばん古いフレームの番号
+    #[cfg(test)]
+    pub(crate) fn oldest(&self) -> Option<usize> {
+        match &self.basis {
+            Basis::Inputs => None,
+            Basis::Screen(screen) => screen.oldest(),
+        }
+    }
+
+    /// 復号を待っているフレームの数
+    pub(crate) fn awaiting(&self) -> usize {
+        match &self.basis {
+            Basis::Inputs => 0,
+            Basis::Screen(screen) => screen.layers.len(),
+        }
+    }
+
+    /// 復号した矩形を画面へ映し、いちばん古い仮置きを置き換える
+    ///
+    /// `still` は復号を待っているいちばん古いフレームを符号化した単葉。
     ///
     /// # Errors
-    /// 単葉を取り出せなかったとき、または復号した寸法が矩形と違うとき
+    /// 単葉を復号できないとき、または復号した寸法が矩形と違うとき
     /// [`Error::Decode`]。
-    pub(crate) fn commit(
-        &mut self,
-        placement: Placement,
-        encoded: impl FnOnce() -> Result<EncodedFrame, Error>,
-    ) -> Result<Option<EncodedFrame>, Error> {
+    pub(crate) fn settle(&mut self, still: &[u8]) -> Result<(), Error> {
         let (basis, mut sheets) = self.split();
-        basis.draw(&mut sheets, placement, encoded)
+        basis.settle(&mut sheets, still)
     }
 
     /// 自分の出力を復号した結果を比べる相手にしているか
@@ -396,13 +568,13 @@ mod tests {
             .collect()
     }
 
-    /// 透過の面に不透明な四角を1つ置いたRGBA
-    fn sprite(width: u32, height: u32, at: (u32, u32), size: u32) -> Vec<u8> {
+    /// 透過の面に、αが `alpha` の四角を1つ置いたRGBA
+    fn sprite(width: u32, height: u32, at: (u32, u32), size: u32, alpha: u8) -> Vec<u8> {
         (0..height)
             .flat_map(|y| {
                 (0..width).flat_map(move |x| {
                     if x.wrapping_sub(at.0) < size && y.wrapping_sub(at.1) < size {
-                        [0x20, 0x40, 0x60, 0xFF]
+                        [0x20, 0x40, 0x60, alpha]
                     } else {
                         [0, 0, 0, 0]
                     }
@@ -441,12 +613,8 @@ mod tests {
 
     /// 据えたフレームを可逆のキャンバスへ映す
     fn draw(canvas: &mut Canvas, placement: Placement) {
-        let held = canvas
-            .commit(placement, || {
-                unreachable!("可逆が符号化した結果を求めている")
-            })
-            .expect("可逆は復号しない");
-        assert!(held.is_none(), "可逆が符号化した結果を抱えている");
+        canvas.commit(placement, 0);
+        assert_eq!(canvas.oldest(), None, "可逆が復号を待っている");
     }
 
     /// フレームを1つ据えたキャンバス
@@ -552,7 +720,8 @@ mod tests {
 
         // 透過の面を不透明な四角が重なりながら動く。奇数の縦位置が矩形を1行上へ
         // 広げ、四角の外の完全透過な画素を巻き込む
-        let frames = [(2, 2), (6, 5), (10, 8)].map(|at| sprite(layout.width, layout.height, at, 8));
+        let frames =
+            [(2, 2), (6, 5), (10, 8)].map(|at| sprite(layout.width, layout.height, at, 8, OPAQUE));
 
         let mut judged = 0;
         for (index, frame) in frames.iter().enumerate() {
@@ -560,7 +729,8 @@ mod tests {
             let placement = canvas.place(index > 0).expect("四角が動いている");
             let job = Job::crop(canvas.staged(), &layout, placement.rect, None, Vec::new());
             let encoded = codec.encode(&job).unwrap();
-            canvas.commit(placement, || Ok(encoded)).unwrap();
+            canvas.commit(placement, index);
+            canvas.settle(encoded.still()).unwrap();
 
             if placement.dispose {
                 assert!(placement.blend, "フレーム{index} {placement:?}");
@@ -598,7 +768,8 @@ mod tests {
             let placement = canvas.place(index > 0).expect("フレームごとに画素が変わる");
             let job = Job::crop(canvas.staged(), &layout, placement.rect, None, Vec::new());
             let encoded = codec.encode(&job).unwrap();
-            canvas.commit(placement, || Ok(encoded)).unwrap();
+            canvas.commit(placement, index);
+            canvas.settle(encoded.still()).unwrap();
 
             assert_eq!(
                 canvas.base(true),
@@ -606,6 +777,125 @@ mod tests {
                 "フレーム{index} {placement:?}"
             );
         }
+    }
+
+    /// 1フレームぶんの層。載せ方と、復号した画素・矩形が書いた入力
+    struct Stacked {
+        placement: Placement,
+        decoded: Vec<u8>,
+        staged: Vec<u8>,
+    }
+
+    /// 層を投入順に重ねた2面
+    ///
+    /// 先頭から `settled` 枚は復号した画素、残りは矩形が書いた入力を載せる。
+    fn stack(layout: &Layout, layers: &[Stacked], settled: usize) -> (Vec<u8>, Vec<u8>) {
+        let mut shown = vec![0u8; layout.frame_len];
+        let mut disposed = vec![0u8; layout.frame_len];
+        let mut previous = NOTHING;
+        for (index, layer) in layers.iter().enumerate() {
+            let pixels = match index < settled {
+                true => &layer.decoded,
+                false => &layer.staged,
+            };
+            compose(
+                &mut shown,
+                &mut disposed,
+                layout.stride,
+                previous,
+                layer.placement,
+                pixels,
+            );
+            previous = layer.placement.rect;
+        }
+        (shown, disposed)
+    }
+
+    /// 復号の届いた層は、後から重ねた仮置きの下へ入る
+    ///
+    /// 矩形の重なる列を仮置きしたまま並べ、1枚ずつ復号を届ける。そのつどキャンバスの
+    /// 2面が「届いた層は復号した画素、届いていない層は矩形が書いた入力」を投入順に
+    /// 重ねたものと一致すること。届いた層をそのまま貼ると、その上に載っていた
+    /// 仮置きが消える。
+    #[test]
+    fn a_decoded_layer_lands_under_the_ones_stacked_over_it() {
+        let layout = Layout::new(24, 20, ColorType::Rgba8).unwrap();
+        let config = settings(layout.color_type, false);
+        let codec = Codec::new(&config).unwrap();
+        let (width, height) = (layout.width, layout.height);
+
+        let materials = [
+            // 不透明な面の中を四角が重なりながら動く
+            (0..5)
+                .map(|index| {
+                    let at = (index * 2 + 1, index * 3 + 1);
+                    repainted(
+                        &noise(width, height, 0x5EED),
+                        width,
+                        at,
+                        6,
+                        [9, 9, 9, OPAQUE],
+                    )
+                })
+                .collect::<Vec<_>>(),
+            // 透過の面を不透明な四角が重なりながら動く。抜く廃棄方法が現れる
+            (0..5)
+                .map(|index| sprite(width, height, (index * 3 + 1, index * 2 + 1), 8, OPAQUE))
+                .collect(),
+            // 半透明の四角が重なりながら動く。重ねる形の土台が復号で動く
+            (0..5)
+                .map(|index| sprite(width, height, (index * 3 + 1, index * 2 + 1), 8, 0x80))
+                .collect(),
+        ];
+
+        let mut seen = std::collections::BTreeSet::new();
+        for frames in materials {
+            let mut canvas = Canvas::new(&layout, &config);
+            let mut stills = Vec::new();
+            let mut layers: Vec<Stacked> = Vec::new();
+
+            for (index, frame) in frames.iter().enumerate() {
+                canvas.stage(frame, ColorType::Rgba8);
+                let placement = canvas.place(index > 0).expect("四角が動いている");
+                let job = Job::crop(canvas.staged(), &layout, placement.rect, None, Vec::new());
+                let encoded = codec.encode(&job).unwrap();
+                let mut staged = Vec::new();
+                crop(
+                    canvas.staged(),
+                    placement.rect,
+                    layout.stride,
+                    PIXEL,
+                    PIXEL,
+                    &mut staged,
+                );
+                let decoded = decode(encoded.still(), placement.rect).unwrap().to_vec();
+                canvas.commit(placement, index);
+
+                seen.insert((placement.blend, placement.dispose));
+                layers.push(Stacked {
+                    placement,
+                    decoded,
+                    staged,
+                });
+                stills.push(encoded);
+
+                let (shown, disposed) = stack(&layout, &layers, 0);
+                assert_eq!(canvas.base(false), shown, "仮置き{index}を重ねた面");
+                assert_eq!(canvas.base(true), disposed, "仮置き{index}を抜いた面");
+            }
+
+            for (settled, still) in stills.iter().enumerate() {
+                canvas.settle(still.still()).unwrap();
+                let (shown, disposed) = stack(&layout, &layers, settled + 1);
+                assert_eq!(canvas.base(false), shown, "復号{settled}を映した面");
+                assert_eq!(canvas.base(true), disposed, "復号{settled}を抜いた面");
+            }
+        }
+
+        assert!(
+            seen.contains(&(true, true)) && seen.contains(&(true, false)),
+            "重ねる形と抜く廃棄方法が揃っていない {seen:?}"
+        );
     }
 
     #[test]
@@ -761,9 +1051,9 @@ mod tests {
     #[test]
     fn clearing_the_previous_rect_wins_when_it_shrinks_the_next_one() {
         let layout = Layout::new(16, 16, ColorType::Rgba8).unwrap();
-        let mut canvas = canvas_with(&layout, &sprite(16, 16, (0, 0), 4));
+        let mut canvas = canvas_with(&layout, &sprite(16, 16, (0, 0), 4, OPAQUE));
 
-        canvas.stage(&sprite(16, 16, (10, 10), 4), ColorType::Rgba8);
+        canvas.stage(&sprite(16, 16, (10, 10), 4, OPAQUE), ColorType::Rgba8);
         assert_eq!(
             canvas.place(true),
             Some(Placement {
@@ -783,9 +1073,9 @@ mod tests {
     #[test]
     fn without_a_pending_frame_the_rect_is_taken_from_the_drawn_canvas() {
         let layout = Layout::new(16, 16, ColorType::Rgba8).unwrap();
-        let mut canvas = canvas_with(&layout, &sprite(16, 16, (0, 0), 4));
+        let mut canvas = canvas_with(&layout, &sprite(16, 16, (0, 0), 4, OPAQUE));
 
-        canvas.stage(&sprite(16, 16, (10, 10), 4), ColorType::Rgba8);
+        canvas.stage(&sprite(16, 16, (10, 10), 4, OPAQUE), ColorType::Rgba8);
         assert_eq!(
             canvas.place(false),
             Some(Placement {
@@ -806,10 +1096,10 @@ mod tests {
     fn a_frame_equal_to_the_disposed_canvas_takes_a_single_pixel() {
         let layout = Layout::new(16, 16, ColorType::Rgba8).unwrap();
         let mut canvas = Canvas::new(&layout, &lossless(layout.color_type));
-        canvas.stage(&sprite(16, 16, (0, 0), 16), ColorType::Rgba8);
+        canvas.stage(&sprite(16, 16, (0, 0), 16, OPAQUE), ColorType::Rgba8);
         let placement = canvas.place(false).expect("先頭フレームは全面を持つ");
         draw(&mut canvas, placement);
-        canvas.stage(&sprite(16, 16, (4, 4), 4), ColorType::Rgba8);
+        canvas.stage(&sprite(16, 16, (4, 4), 4, OPAQUE), ColorType::Rgba8);
         let placement = canvas.place(false).expect("四角が縮んでいる");
         draw(&mut canvas, placement);
 

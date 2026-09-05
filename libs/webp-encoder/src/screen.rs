@@ -22,8 +22,6 @@ const OPAQUE: u8 = u8::MAX;
 pub(crate) struct Decoded {
     pixels: NonNull<u8>,
     len: usize,
-    /// 画素が埋める矩形
-    rect: Rect,
 }
 
 impl Deref for Decoded {
@@ -59,11 +57,6 @@ pub(crate) fn decode(still: &[u8], rect: Rect) -> Result<Decoded, Error> {
     let decoded = Decoded {
         pixels,
         len: actual.0 as usize * actual.1 as usize * PIXEL,
-        rect: Rect {
-            width: actual.0,
-            height: actual.1,
-            ..rect
-        },
     };
     if actual != (rect.width, rect.height) {
         return Err(Error::Decode(DecodingError::SizeMismatch {
@@ -75,35 +68,53 @@ pub(crate) fn decode(still: &[u8], rect: Rect) -> Result<Decoded, Error> {
     Ok(decoded)
 }
 
-/// 復号した矩形をキャンバスへ合成する
-///
-/// `shown` は前のフレームを表示した面、`disposed` はそこから前のフレームの矩形を
-/// 抜いた面で、どちらも `stride` バイトの行が隙間なく並ぶRGBA。
-///
-/// 戻ったとき `shown` は `placement` のフレームを表示した面、`disposed` は
-/// そこから `decoded` の矩形を抜いた面になる。
-pub(crate) fn compose(
-    shown: &mut [u8],
-    disposed: &mut [u8],
-    stride: usize,
-    placement: Placement,
-    decoded: &Decoded,
-) {
-    debug_assert_eq!(
-        placement.rect, decoded.rect,
-        "載せる矩形と復号した矩形は同じフレームのもの"
-    );
-
-    if placement.dispose {
-        shown.copy_from_slice(disposed);
-    }
-
-    let rect = decoded.rect;
+/// `rect` の中を完全透過で埋める
+pub(crate) fn clear_rect(face: &mut [u8], stride: usize, rect: Rect) {
     let row_len = rect.width as usize * PIXEL;
     let head = rect.y as usize * stride + rect.x as usize * PIXEL;
-    for (y, row) in decoded.chunks_exact(row_len).enumerate() {
+    for y in 0..rect.height as usize {
         let at = head + y * stride;
-        let target = &mut shown[at..at + row_len];
+        face[at..at + row_len].fill(0);
+    }
+}
+
+/// `rect` の中を `src` から写す
+pub(crate) fn copy_rect(face: &mut [u8], src: &[u8], stride: usize, rect: Rect) {
+    let row_len = rect.width as usize * PIXEL;
+    let head = rect.y as usize * stride + rect.x as usize * PIXEL;
+    for y in 0..rect.height as usize {
+        let at = head + y * stride;
+        face[at..at + row_len].copy_from_slice(&src[at..at + row_len]);
+    }
+}
+
+/// `placement` のフレームを面へ重ねる
+///
+/// `face` は前のフレームを表示した `stride` バイトの行が隙間なく並ぶRGBA、
+/// `previous` はその前のフレームの矩形、`pixels` は `placement` の矩形を埋める
+/// 走査順のRGBA。戻ったとき `face` は `placement` のフレームを表示した面になる。
+pub(crate) fn overlay(
+    face: &mut [u8],
+    stride: usize,
+    previous: Rect,
+    placement: Placement,
+    pixels: &[u8],
+) {
+    if placement.dispose {
+        clear_rect(face, stride, previous);
+    }
+
+    let rect = placement.rect;
+    let row_len = rect.width as usize * PIXEL;
+    debug_assert_eq!(
+        pixels.len(),
+        row_len * rect.height as usize,
+        "載せる画素は矩形を埋める"
+    );
+    let head = rect.y as usize * stride + rect.x as usize * PIXEL;
+    for (y, row) in pixels.chunks_exact(row_len).enumerate() {
+        let at = head + y * stride;
+        let target = &mut face[at..at + row_len];
         if placement.blend {
             for (base, source) in target.chunks_exact_mut(PIXEL).zip(row.chunks_exact(PIXEL)) {
                 base.copy_from_slice(&over(source, base));
@@ -112,12 +123,26 @@ pub(crate) fn compose(
             target.copy_from_slice(row);
         }
     }
+}
 
-    disposed.copy_from_slice(shown);
-    for y in 0..rect.height as usize {
-        let at = head + y * stride;
-        disposed[at..at + row_len].fill(0);
-    }
+/// `placement` のフレームをキャンバスの2面へ合成する
+///
+/// `shown` は前のフレームを表示した面、`disposed` はそこから前のフレームの矩形
+/// `previous` を抜いた面。
+///
+/// 戻ったとき `shown` は `placement` のフレームを表示した面、`disposed` は
+/// そこから `placement` の矩形を抜いた面になる。
+pub(crate) fn compose(
+    shown: &mut [u8],
+    disposed: &mut [u8],
+    stride: usize,
+    previous: Rect,
+    placement: Placement,
+    pixels: &[u8],
+) {
+    overlay(shown, stride, previous, placement, pixels);
+    copy_rect(disposed, shown, stride, previous);
+    clear_rect(disposed, stride, placement.rect);
 }
 
 /// `source` を `base` の上へ重ねた画素
@@ -331,6 +356,12 @@ mod tests {
         let mut canvas = Canvas::new(layout, &settings(true, 100.0));
         let mut shown = vec![0u8; layout.frame_len];
         let mut disposed = vec![0u8; layout.frame_len];
+        let mut previous = Rect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        };
         let mut placements = Vec::new();
 
         for (index, frame) in frames.iter().enumerate() {
@@ -340,20 +371,18 @@ mod tests {
                 .then(|| canvas.base(placement.dispose));
             let job = Job::crop(canvas.staged(), layout, placement.rect, base, Vec::new());
             let encoded = codec.encode(&job).unwrap();
-            canvas
-                .commit(placement, || {
-                    unreachable!("可逆が符号化した結果を求めている")
-                })
-                .unwrap();
+            canvas.commit(placement, index);
 
             let decoded = decode(encoded.still(), placement.rect).unwrap();
             compose(
                 &mut shown,
                 &mut disposed,
                 layout.stride,
+                previous,
                 placement,
                 &decoded,
             );
+            previous = placement.rect;
 
             let mut expected = frame.clone();
             normalize(&mut expected);

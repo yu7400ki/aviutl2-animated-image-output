@@ -69,26 +69,42 @@ impl<W: Write + Seek> Animation<W> {
 
     /// フレームを列の末尾へ足し、仕掛かりが上限を超えたぶんを書き出す
     ///
-    /// `dispose` はそれまで末尾にいたフレームの廃棄方法。
+    /// `dispose` はそれまで末尾にいたフレームの廃棄方法。`awaiting` は復号を
+    /// 待っているフレーム数で、その結果は画面を組むために要るので、列に残す数は
+    /// 仕掛かりの上限とこの数の大きい方になる。
     fn push(
         &mut self,
         pending: Pending,
         dispose: bool,
         pipeline: &mut Pipeline,
+        awaiting: usize,
     ) -> Result<(), Error> {
         if let Some(previous) = self.pending.back_mut() {
             previous.dispose = dispose;
         }
         self.pending.push_back(pending);
 
+        let held = pipeline.capacity().max(awaiting);
         debug_assert!(
-            pipeline.capacity() >= 2,
+            held >= 2,
             "排出する先頭は、廃棄方法の決まっていない末尾と別のフレームであること"
         );
-        while self.pending.len() > pipeline.capacity() {
+        while self.pending.len() > held {
             self.write(pipeline)?;
         }
         Ok(())
+    }
+
+    /// 符号化の結果を、それを投入したフレームへ渡す
+    fn hold(&mut self, index: usize, encoded: EncodedFrame) {
+        let pending = self
+            .pending
+            .iter_mut()
+            .find(
+                |pending| matches!(pending.encoded, Encoded::Waiting(waiting) if waiting == index),
+            )
+            .expect("復号したフレームは書き出しを待っている");
+        pending.encoded = Encoded::Ready(encoded);
     }
 
     /// 差分の無いフレームを、末尾のフレームの表示時間へ併合する
@@ -205,7 +221,7 @@ enum Sink<W: Write + Seek> {
 /// アニメーションにせず、単葉の .webp をそのまま書く。
 ///
 /// フレームの載せ方の決定は投入した場で済ませ、符号化はワーカーへ回す。
-/// 非可逆は決定が自分の出力の復号結果に依るので、1フレームぶんの符号化を
+/// 非可逆は決定が自分の出力の復号結果に依るので、決まった枚数だけ先の符号化を
 /// 待ってから次のフレームへ進む。落としたエンコーダはワーカーを畳んでから返る。
 pub struct Encoder<W: Write + Seek> {
     sink: Sink<W>,
@@ -399,8 +415,8 @@ impl<W: Write + Seek> Encoder<W> {
 
     /// フレームを符号化して行き先へ渡す
     ///
-    /// 自分の出力を追うキャンバスは、載せ方を決めた矩形の符号化を待って復号し、
-    /// 次のフレームの決定より前に画面を組み直す。
+    /// 自分の出力を追うキャンバスは、遅れの限度に達した矩形の符号化を待って
+    /// 復号し、載せ方を決めるより前に画面を組み直す。
     fn write_frame(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
         // 写した画素を読むのは、差分を取るときと、RGBAを符号化へ渡すとき
         if self.layout.color_type == ColorType::Rgba8 || !matches!(self.sink, Sink::Still(_)) {
@@ -416,6 +432,12 @@ impl<W: Write + Seek> Encoder<W> {
             }
             Sink::Animation(animation) => animation,
         };
+
+        while let Some(index) = self.canvas.awaited() {
+            let encoded = self.pipeline.take(index)?;
+            self.canvas.settle(encoded.still())?;
+            animation.hold(index, encoded);
+        }
 
         let duration = animation.milliseconds.next(delay);
         let Some(placement) = self.canvas.place(animation.disposable()) else {
@@ -436,13 +458,11 @@ impl<W: Write + Seek> Encoder<W> {
         );
 
         let index = self.pipeline.submit(job);
-        let held = self
-            .canvas
-            .commit(placement, || self.pipeline.take(index))?;
+        self.canvas.commit(placement, index);
 
         animation.push(
             Pending {
-                encoded: held.map_or(Encoded::Waiting(index), Encoded::Ready),
+                encoded: Encoded::Waiting(index),
                 rect: placement.rect,
                 blend: placement.blend,
                 dispose: false,
@@ -450,7 +470,22 @@ impl<W: Write + Seek> Encoder<W> {
             },
             placement.dispose,
             &mut self.pipeline,
+            self.canvas.awaiting(),
         )
+    }
+
+    /// 復号を待っている層をすべて画面へ映す
+    #[cfg(test)]
+    fn settle_all(&mut self) -> Result<(), Error> {
+        let Sink::Animation(animation) = &mut self.sink else {
+            return Ok(());
+        };
+        while let Some(index) = self.canvas.oldest() {
+            let encoded = self.pipeline.take(index)?;
+            self.canvas.settle(encoded.still())?;
+            animation.hold(index, encoded);
+        }
+        Ok(())
     }
 }
 
@@ -669,7 +704,7 @@ mod tests {
             .collect()
     }
 
-    /// フレームを1枚ずつ投入し、そのつどキャンバスを控える
+    /// フレームを1枚ずつ投入し、復号を待たせずにキャンバスを控える
     fn encode_watching_the_canvas(
         width: u32,
         height: u32,
@@ -690,6 +725,7 @@ mod tests {
         for (index, frame) in frames.iter().enumerate() {
             let delay = FrameDelay::new(index as u32 * 7 + 20, 1000).unwrap();
             encoder.add_frame(frame, delay).unwrap();
+            encoder.settle_all().unwrap();
             canvases.push(encoder.canvas.base(false).to_vec());
         }
         let (writer, _) = encoder.finish().unwrap();
