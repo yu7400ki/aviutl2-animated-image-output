@@ -413,10 +413,7 @@ impl<W: Write> Encoder<W> {
     ///
     /// 捨てるときの候補を駆動スレッドで圧縮してから、投入した候補を受け取る。
     fn choose_dispose(&mut self, data: &[u8], index: u32, kept: Rect, job: usize) -> Disposal {
-        let disposable = self.writing.open.is_some();
-        let restored = self
-            .delta
-            .restored_rect(&self.layout, data, kept, index, disposable);
+        let restored = self.delta.restored_rect(&self.layout, data, kept, index);
 
         let restored = restored.map(|rect| (rect, self.compress_rect(data, rect)));
         let kept_candidate = self.pipeline.take(job);

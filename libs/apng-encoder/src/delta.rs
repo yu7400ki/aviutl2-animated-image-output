@@ -97,13 +97,10 @@ impl Delta {
 
     /// 保留中のフレームをdispose_op=PREVIOUSで捨てるときの、投入されたフレームの矩形
     ///
-    /// `index` は投入された順の位置、`disposable` は捨てられる保留中のフレームが
-    /// あることを表す。次の場合は捨てても割に合わないため、候補にせず `None` を返す。
-    /// - 書き出しを待っているフレームが無いとき。捨てる先が無く、
-    ///   [`Self::canvas`] もまだ埋まっていない
-    /// - 保留中のフレームが先頭フレームのとき。先頭のfcTLの
-    ///   dispose_op=PREVIOUSはBACKGROUNDとして扱われてキャンバスが復元されず、
-    ///   [`Self::canvas`] もまだ埋まっていない
+    /// `index` は投入された順の位置。次の場合は捨てても割に合わないため、候補にせず
+    /// `None` を返す。
+    /// - `index` が2に満たないとき。[`Self::canvas`] がまだ埋まっておらず、先頭の
+    ///   fcTLのdispose_op=PREVIOUSもBACKGROUNDとして扱われてキャンバスを復元しない
     /// - 矩形が捨てない場合より小さくならないとき。圧縮すれば小さくなることは
     ///   あるが、それを測る圧縮の方が高くつく
     pub(crate) fn restored_rect(
@@ -112,9 +109,8 @@ impl Delta {
         data: &[u8],
         kept: Rect,
         index: u32,
-        disposable: bool,
     ) -> Option<Rect> {
-        if !disposable || index < 2 {
+        if index < 2 {
             return None;
         }
 
