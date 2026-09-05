@@ -10,6 +10,7 @@ use crate::layout::Layout;
 use crate::over;
 use crate::pipeline::Pipeline;
 use anim_core::{ColorType, FrameDelay, Pacing, Rect, crop};
+use std::collections::VecDeque;
 use std::io::Write;
 use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
@@ -82,11 +83,10 @@ struct Staged {
     job: usize,
 }
 
-/// 書き出しを待っているフレーム
+/// 決定を終えたフレーム
 ///
-/// フレームのdispose_opは次のフレームの圧縮後サイズを見るまで決まらないため、
-/// fcTLを書けるようになるまで1つぶんを保持する。
-struct Pending {
+/// dispose_opは次のフレームの決定で確定する。
+struct Decided {
     rect: Rect,
     delay: FrameDelay,
     /// キャンバスへ重ねる方法
@@ -95,10 +95,21 @@ struct Pending {
     body: Vec<u8>,
 }
 
+/// 書き出しを待っているフレーム
+///
+/// dispose_opが確定したフレームだけがこの形を取る。
+struct Pending {
+    frame: Decided,
+    /// 確定したdispose_op
+    dispose: u8,
+}
+
 /// 書き出しが持ち越す状態
 struct Writing {
     /// 書き出しを待っているフレーム
-    pending: Option<Pending>,
+    pending: VecDeque<Pending>,
+    /// dispose_opがまだ決まっていない、直前に決定したフレーム
+    open: Option<Decided>,
     /// blend_op=OVERの候補を立てるかどうかの間合い
     blend_pacing: Pacing,
 }
@@ -107,19 +118,52 @@ impl Writing {
     /// まだ何も保留していない状態
     fn new() -> Self {
         Writing {
-            pending: None,
+            pending: VecDeque::new(),
+            open: None,
             blend_pacing: Pacing::new(BLEND_LOSS_STREAK, BLEND_REST_FRAMES),
         }
+    }
+
+    /// 決定済み・未書き出しのフレーム数
+    fn depth(&self) -> usize {
+        self.pending.len() + usize::from(self.open.is_some())
+    }
+
+    /// 直前に決定したフレームのdispose_opを `dispose` に確定させる
+    fn settle(&mut self, dispose: u8) {
+        if let Some(frame) = self.open.take() {
+            self.pending.push_back(Pending { frame, dispose });
+        }
+    }
+
+    /// 直前に決定したフレームを `dispose` で確定させ、`decided` を保留にする
+    fn advance(&mut self, dispose: u8, decided: Decided) {
+        self.settle(dispose);
+        self.open = Some(decided);
+    }
+
+    /// 深さが `depth` を超えていれば、書き出せる先頭のフレームを取り出す
+    fn overflowing(&mut self, depth: usize) -> Option<Pending> {
+        if self.depth() <= depth {
+            return None;
+        }
+
+        Some(
+            self.pending
+                .pop_front()
+                .expect("あふれたぶんは確定している"),
+        )
     }
 }
 
 /// APNGエンコーダ
 ///
 /// [`Encoder::add_frame`] でフレームを1つずつ書き出し、[`Encoder::finish`] で終端する。
-/// dispose_opは次のフレームの圧縮後サイズを見て決めるため、書き出しは1フレーム遅れる。
+/// 投入されたフレームは決定と書き出しの列を通ってから出るため、書き出しは投入から
+/// 遅れる。
 ///
-/// 生のフレームを3面抱える (1920x1080のRGBA8で約24.9MB)。フレームは投入された順に
-/// そのまま書き出す。
+/// 生のフレームを3面抱える (1920x1080のRGBA8で約24.9MB)。加えて、書き出しを待つ
+/// フレームの圧縮した本体を抱える。フレームは投入された順にそのまま書き出す。
 ///
 /// 落としたエンコーダはワーカーを畳んでから返る。
 pub struct Encoder<W: Write> {
@@ -131,8 +175,14 @@ pub struct Encoder<W: Write> {
     pipeline: Pipeline,
     /// 直前のフレームとキャンバスの追跡
     delta: Delta,
+    /// 投入済み・未決定のフレーム
+    staged: VecDeque<Staged>,
+    /// [`Self::staged`] に置いたまま決定を待たせるフレーム数
+    staged_depth: usize,
     /// 書き出しの状態
     writing: Writing,
+    /// 決定済みのまま書き出しを待たせるフレーム数
+    pending_depth: NonZeroUsize,
     num_frames: u32,
     /// [`Self::add_frame`] が受け付けたフレーム数
     frames_accepted: u32,
@@ -195,7 +245,10 @@ impl<W: Write> Encoder<W> {
             layout,
             pipeline,
             delta: Delta::new(),
+            staged: VecDeque::new(),
+            staged_depth: 0,
             writing: Writing::new(),
+            pending_depth: NonZeroUsize::MIN,
             num_frames,
             frames_accepted: 0,
             poisoned: false,
@@ -228,14 +281,14 @@ impl<W: Write> Encoder<W> {
     ///
     /// `data` は上から下・左から右の順に並んだ `幅 * 高さ * 1画素のバイト数` バイトであること。
     ///
-    /// 投入されたフレームはその場では書き出さず、dispose_opが決まる次の呼び出し、
-    /// または [`Encoder::finish`] で書き出す。
+    /// 投入されたフレームはその場では書き出さず、以降の呼び出し、または
+    /// [`Encoder::finish`] で書き出す。
     ///
     /// # Errors
     /// `data` の長さが合わないとき、宣言したフレーム数を超えたとき、書き出しに
     /// 失敗したとき、または過去の失敗でエンコーダが使用不能なとき。
     ///
-    /// 書き出しの失敗は1つ前に投入されたフレームのものになる。最後に投入したフレームの
+    /// 書き出しの失敗は先に投入されたフレームのものになる。列に残ったフレームの
     /// 書き出しは [`Encoder::finish`] で報告される。
     pub fn add_frame(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
         if self.poisoned {
@@ -263,53 +316,62 @@ impl<W: Write> Encoder<W> {
         Ok(())
     }
 
-    /// フレームを投入し、決定へ回す
+    /// フレームを投入し、列からあふれたぶんを決定へ回す
     fn accept(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
-        let staged = self.stage(data, delay);
-        self.decide(staged)
+        self.stage(data, delay);
+        while self.staged.len() > self.staged_depth {
+            self.decide()?;
+        }
+        Ok(())
     }
 
     /// フレームを写し取り、捨てないときの矩形の圧縮を投入する
     ///
     /// 矩形は直前に投入されたフレームとの差分で決まるため、写し取るより先に求める。
-    fn stage(&mut self, data: &[u8], delay: FrameDelay) -> Staged {
+    fn stage(&mut self, data: &[u8], delay: FrameDelay) {
         let index = self.frames_accepted;
         let kept = self.delta.kept_rect(&self.layout, data, index);
         let data = self.delta.stage(data);
         let job = self.submit_rect(&data, kept);
 
-        Staged {
+        self.staged.push_back(Staged {
             index,
             data,
             delay,
             kept,
             job,
-        }
+        });
     }
 
-    /// 保留中のフレームを書き出し、投入されたフレームを保留にする
-    fn decide(&mut self, staged: Staged) -> Result<(), Error> {
+    /// 投入された最も古いフレームを決定し、列からあふれたぶんを書き出す
+    fn decide(&mut self) -> Result<(), Error> {
         let Staged {
             index,
             data,
             delay,
             kept,
             job,
-        } = staged;
+        } = self.staged.pop_front().expect("決めるフレームがある");
 
         let disposal = self.choose_dispose(&data, index, kept, job);
         let (dispose, rect) = (disposal.op, disposal.rect);
         let (blend, candidate) = self.choose_blend(&data, index, disposal);
         let body = candidate.into_body();
 
-        self.flush_pending(dispose)?;
-        self.writing.pending = Some(Pending {
-            rect,
-            delay,
-            blend,
-            body,
-        });
+        self.writing.advance(
+            dispose,
+            Decided {
+                rect,
+                delay,
+                blend,
+                body,
+            },
+        );
         self.delta.advance(data, dispose);
+
+        while let Some(pending) = self.writing.overflowing(self.pending_depth.get()) {
+            self.write(pending)?;
+        }
         Ok(())
     }
 
@@ -329,8 +391,14 @@ impl<W: Write> Encoder<W> {
             });
         }
 
+        while !self.staged.is_empty() {
+            self.decide()?;
+        }
         // 次のフレームが無いため、最後のフレームは捨てても復元される先が無い
-        self.flush_pending(DISPOSE_OP_NONE)?;
+        self.writing.settle(DISPOSE_OP_NONE);
+        while let Some(pending) = self.writing.overflowing(0) {
+            self.write(pending)?;
+        }
 
         self.chunks.write(*b"IEND", &[])?;
         Ok(self.chunks.into_inner())
@@ -345,7 +413,7 @@ impl<W: Write> Encoder<W> {
     ///
     /// 捨てるときの候補を駆動スレッドで圧縮してから、投入した候補を受け取る。
     fn choose_dispose(&mut self, data: &[u8], index: u32, kept: Rect, job: usize) -> Disposal {
-        let disposable = self.writing.pending.is_some();
+        let disposable = self.writing.open.is_some();
         let restored = self
             .delta
             .restored_rect(&self.layout, data, kept, index, disposable);
@@ -422,20 +490,13 @@ impl<W: Write> Encoder<W> {
         }
     }
 
-    /// 保留中のフレームを `dispose` で書き出す
-    fn flush_pending(&mut self, dispose: u8) -> Result<(), Error> {
-        let Some(pending) = self.writing.pending.take() else {
-            return Ok(());
-        };
+    /// 確定したフレームを書き出す
+    fn write(&mut self, pending: Pending) -> Result<(), Error> {
+        let Pending { frame, dispose } = pending;
 
-        self.chunks.write_frame(
-            pending.rect,
-            pending.delay,
-            dispose,
-            pending.blend,
-            &pending.body,
-        )?;
-        self.pipeline.recycle(pending.body);
+        self.chunks
+            .write_frame(frame.rect, frame.delay, dispose, frame.blend, &frame.body)?;
+        self.pipeline.recycle(frame.body);
         Ok(())
     }
 
