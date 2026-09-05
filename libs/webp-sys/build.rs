@@ -1,11 +1,11 @@
-//! libwebp のうち、符号化と復号に要る翻訳単位をコンパイルする
+//! libwebp のうち、エンコードに要る翻訳単位をコンパイルする
 
 use std::env;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 /// コンパイルする翻訳単位を集める、libwebp 直下のディレクトリ
-const SOURCE_DIRS: [&str; 5] = ["src/enc", "src/dec", "src/dsp", "src/utils", "sharpyuv"];
+const SOURCE_DIRS: [&str; 4] = ["src/enc", "src/dsp", "src/utils", "sharpyuv"];
 
 fn main() {
     let manifest_dir =

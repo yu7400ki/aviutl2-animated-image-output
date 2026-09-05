@@ -1,8 +1,7 @@
-//! libwebp の符号化と復号への FFI
+//! libwebp のエンコード経路への FFI
 //!
-//! 宣言は同梱した libwebp v1.6.0 の `src/webp/encode.h`・`src/webp/decode.h`・
-//! `src/webp/types.h` に対応する。安全な抽象は置かず、`WebPPicture` の入力経路の
-//! 選択だけを型で閉じる。
+//! 宣言は同梱した libwebp v1.6.0 の `src/webp/encode.h` に対応する。安全な抽象は
+//! 置かず、`WebPPicture` の入力経路の選択だけを型で閉じる。
 
 #![allow(non_snake_case)]
 
@@ -172,18 +171,6 @@ unsafe extern "C" {
 
     /// 主・副・改訂を各8bitに詰めた版数
     pub fn WebPGetEncoderVersion() -> c_int;
-
-    /// 単葉の .webp を復号し、走査順に並べた RGBA と寸法を返す。失敗すれば NULL。
-    /// 返った領域は [`WebPFree`] で解放する
-    pub fn WebPDecodeRGBA(
-        data: *const u8,
-        data_size: usize,
-        width: *mut c_int,
-        height: *mut c_int,
-    ) -> *mut u8;
-
-    /// [`WebPDecodeRGBA`] が返した領域を解放する
-    pub fn WebPFree(ptr: *mut c_void);
 }
 
 /// `config` を既定値で初期化する。版数が合わなければ 0
@@ -390,63 +377,6 @@ mod tests {
         assert_eq!(picture.use_argb, 0);
 
         unsafe {
-            WebPMemoryWriterClear(&mut memory);
-            WebPPictureFree(&mut picture);
-        }
-    }
-
-    /// 可逆なら復号が寸法・行の並び・チャネルの並びまで戻す
-    #[test]
-    fn a_lossless_encode_comes_back_through_the_decoder() {
-        let (width, height) = (5, 3);
-        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-        for y in 0..height {
-            for x in 0..width {
-                rgba.extend_from_slice(&[x as u8, y as u8, (x ^ y) as u8, 0xFF]);
-            }
-        }
-
-        let mut config = MaybeUninit::<WebPConfig>::uninit();
-        assert_ne!(unsafe { WebPConfigInit(config.as_mut_ptr()) }, 0);
-        let mut config = unsafe { config.assume_init() };
-        config.lossless = 1;
-
-        let mut picture = MaybeUninit::<WebPPicture>::uninit();
-        assert_ne!(unsafe { WebPPictureInitARGB(picture.as_mut_ptr()) }, 0);
-        let mut picture = unsafe { picture.assume_init() };
-        picture.width = width;
-        picture.height = height;
-        assert_ne!(
-            unsafe { WebPPictureImportRGBA(&mut picture, rgba.as_ptr(), width * 4) },
-            0
-        );
-
-        let mut memory = MaybeUninit::<WebPMemoryWriter>::uninit();
-        unsafe { WebPMemoryWriterInit(memory.as_mut_ptr()) };
-        let mut memory = unsafe { memory.assume_init() };
-        picture.writer = Some(WebPMemoryWrite);
-        picture.custom_ptr = (&raw mut memory).cast::<c_void>();
-
-        assert_ne!(unsafe { WebPEncode(&config, &mut picture) }, 0);
-
-        let (mut decoded_width, mut decoded_height) = (0, 0);
-        let decoded = unsafe {
-            WebPDecodeRGBA(
-                memory.mem,
-                memory.size,
-                &mut decoded_width,
-                &mut decoded_height,
-            )
-        };
-        assert!(!decoded.is_null());
-        assert_eq!((decoded_width, decoded_height), (width, height));
-        assert_eq!(
-            unsafe { std::slice::from_raw_parts(decoded, rgba.len()) },
-            rgba
-        );
-
-        unsafe {
-            WebPFree(decoded.cast::<c_void>());
             WebPMemoryWriterClear(&mut memory);
             WebPPictureFree(&mut picture);
         }
