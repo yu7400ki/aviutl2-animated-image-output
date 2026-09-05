@@ -13,6 +13,7 @@ use anim_core::{ColorType, FrameDelay, Pacing, Rect, crop};
 use std::io::Write;
 use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 
 /// [`Config::compression_level`] に指定できる範囲
 pub const COMPRESSION_LEVELS: RangeInclusive<u32> = 1..=9;
@@ -66,6 +67,21 @@ struct Disposal {
     candidate: Candidate,
 }
 
+/// 投入済み・未決定のフレーム
+///
+/// 決定点はここから、保留中のフレームのdispose_opとキャンバスへ重ねる方法を決める。
+struct Staged {
+    /// 投入された順の位置
+    index: u32,
+    /// 投入されたフレームの画素
+    data: Arc<Vec<u8>>,
+    delay: FrameDelay,
+    /// 保留中のフレームを捨てないときの矩形
+    kept: Rect,
+    /// `kept` をblend_op=SOURCEで圧縮する投入の番号
+    job: usize,
+}
+
 /// 書き出しを待っているフレーム
 ///
 /// フレームのdispose_opは次のフレームの圧縮後サイズを見るまで決まらないため、
@@ -102,8 +118,8 @@ impl Writing {
 /// [`Encoder::add_frame`] でフレームを1つずつ書き出し、[`Encoder::finish`] で終端する。
 /// dispose_opは次のフレームの圧縮後サイズを見て決めるため、書き出しは1フレーム遅れる。
 ///
-/// 直前のフレームとそれを描く前のキャンバスの2面を常に抱える
-/// (1920x1080のRGBA8で約16.6MB)。フレームは投入された順にそのまま書き出す。
+/// 生のフレームを3面抱える (1920x1080のRGBA8で約24.9MB)。フレームは投入された順に
+/// そのまま書き出す。
 ///
 /// 落としたエンコーダはワーカーを畳んでから返る。
 pub struct Encoder<W: Write> {
@@ -247,11 +263,43 @@ impl<W: Write> Encoder<W> {
         Ok(())
     }
 
-    /// 保留中のフレームを書き出し、投入されたフレームを保留にする
+    /// フレームを投入し、決定へ回す
     fn accept(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
-        let disposal = self.choose_dispose(data);
+        let staged = self.stage(data, delay);
+        self.decide(staged)
+    }
+
+    /// フレームを写し取り、捨てないときの矩形の圧縮を投入する
+    ///
+    /// 矩形は直前に投入されたフレームとの差分で決まるため、写し取るより先に求める。
+    fn stage(&mut self, data: &[u8], delay: FrameDelay) -> Staged {
+        let index = self.frames_accepted;
+        let kept = self.delta.kept_rect(&self.layout, data, index);
+        let data = self.delta.stage(data);
+        let job = self.submit_rect(&data, kept);
+
+        Staged {
+            index,
+            data,
+            delay,
+            kept,
+            job,
+        }
+    }
+
+    /// 保留中のフレームを書き出し、投入されたフレームを保留にする
+    fn decide(&mut self, staged: Staged) -> Result<(), Error> {
+        let Staged {
+            index,
+            data,
+            delay,
+            kept,
+            job,
+        } = staged;
+
+        let disposal = self.choose_dispose(&data, index, kept, job);
         let (dispose, rect) = (disposal.op, disposal.rect);
-        let (blend, candidate) = self.choose_blend(data, disposal);
+        let (blend, candidate) = self.choose_blend(&data, index, disposal);
         let body = candidate.into_body();
 
         self.flush_pending(dispose)?;
@@ -295,17 +343,13 @@ impl<W: Write> Encoder<W> {
     /// 採った側を戻り値へ残して、退けた側のバッファは配り直す先へ返す。同じ大きさなら
     /// 捨てない。
     ///
-    /// 捨てないときの候補は投入し、捨てるときの候補を駆動スレッドで圧縮してから
-    /// 受け取る。
-    fn choose_dispose(&mut self, data: &[u8]) -> Disposal {
-        let frame = self.frames_accepted;
+    /// 捨てるときの候補を駆動スレッドで圧縮してから、投入した候補を受け取る。
+    fn choose_dispose(&mut self, data: &[u8], index: u32, kept: Rect, job: usize) -> Disposal {
         let disposable = self.writing.pending.is_some();
-        let kept = self.delta.kept_rect(&self.layout, data, frame);
         let restored = self
             .delta
-            .restored_rect(&self.layout, data, kept, frame, disposable);
+            .restored_rect(&self.layout, data, kept, index, disposable);
 
-        let job = self.submit_rect(data, kept);
         let restored = restored.map(|rect| (rect, self.compress_rect(data, rect)));
         let kept_candidate = self.pipeline.take(job);
 
@@ -340,7 +384,7 @@ impl<W: Write> Encoder<W> {
     ///
     /// 潰した画素を書けない出力では候補が立たない。先頭フレームはキャンバスがまだ空で、
     /// 重ねる先が無い。負けが続く間は [`Pacing`] が候補を立てるのを休ませる。
-    fn choose_blend(&mut self, data: &[u8], disposal: Disposal) -> (u8, Candidate) {
+    fn choose_blend(&mut self, data: &[u8], index: u32, disposal: Disposal) -> (u8, Candidate) {
         let Disposal {
             op: dispose,
             rect,
@@ -351,16 +395,11 @@ impl<W: Write> Encoder<W> {
         if !matches!(self.layout.input, ColorType::Rgba8) {
             return (BLEND_OP_SOURCE, source);
         }
-        if self.frames_accepted == 0 || !self.writing.blend_pacing.should_try() {
+        if index == 0 || !self.writing.blend_pacing.should_try() {
             return (BLEND_OP_SOURCE, source);
         }
 
-        // 保留中のフレームを捨てると、キャンバスはそれを描く直前の内容へ戻る
-        let base = if dispose == DISPOSE_OP_NONE {
-            &self.delta.previous
-        } else {
-            &self.delta.canvas
-        };
+        let base = self.delta.base(dispose);
         let stride = self.layout.stride;
         let mut over = self.pipeline.buffer();
         if !over::pack_over(base, data, stride, rect, &mut over) {
@@ -735,6 +774,40 @@ mod tests {
                 ops.iter().any(|&(_, blend)| blend == BLEND_OP_OVER),
                 matches!(color, ColorType::Rgba8),
                 "{color:?}: 潰した候補の立ち方が色種別と合わない: {ops:?}"
+            );
+        }
+    }
+
+    /// 生のフレームの写し先は使い回され、フレームごとに面を増やさない
+    ///
+    /// 決定を終えて指す先を失った面が1つずつ戻るため、配り直しを待つ面はフレームを
+    /// 受け付けるたびに1つで、その容量は次の1面を写すのに足りている。
+    #[test]
+    fn the_frame_buffer_is_handed_back_for_the_next_copy() {
+        for (config, input) in jumping_material() {
+            let color = config.color_type;
+            let delay = FrameDelay::new(1, 30).unwrap();
+            let mut encoder = Encoder::new(
+                Cursor::new(Vec::new()),
+                WIDTH,
+                HEIGHT,
+                input.len() as u32,
+                config,
+            )
+            .unwrap();
+
+            for (index, frame) in input.iter().enumerate() {
+                encoder.add_frame(frame, delay).unwrap();
+                let spare = encoder.delta.spare();
+                assert_eq!(
+                    spare.len(),
+                    1,
+                    "{color:?} フレーム {index}: 配り直しを待つ面"
+                );
+            }
+            assert!(
+                encoder.delta.spare()[0].capacity() >= input[0].len(),
+                "{color:?}: 写し先の容量が1面に足りない"
             );
         }
     }
