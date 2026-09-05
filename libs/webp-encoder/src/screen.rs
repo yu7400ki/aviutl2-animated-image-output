@@ -371,7 +371,7 @@ mod tests {
                 .then(|| canvas.base(placement.dispose));
             let job = Job::crop(canvas.staged(), layout, placement.rect, base, Vec::new());
             let encoded = codec.encode(&job).unwrap();
-            canvas.commit(placement, index);
+            canvas.commit(placement);
 
             let decoded = decode(encoded.still(), placement.rect).unwrap();
             compose(

@@ -17,17 +17,10 @@ use std::thread::available_parallelism;
 /// キャンバスを書き換えないフレームが載せる画素 (RGBA)
 const FILLER_PIXEL: [u8; 4] = [0, 0, 0, 0];
 
-/// 保留中のフレームが待っている符号化の結果
-enum Encoded {
-    /// パイプラインが預かっているジョブの番号
-    Waiting(usize),
-    /// 画面を組むために受け取り済みの結果
-    Ready(EncodedFrame),
-}
-
 /// 書き出しを待っているフレーム
 struct Pending {
-    encoded: Encoded,
+    /// パイプラインが預かっているジョブの番号
+    job: usize,
     /// キャンバス上の矩形
     rect: Rect,
     /// 透過画素を下のキャンバスへ重ねるか
@@ -69,22 +62,19 @@ impl<W: Write + Seek> Animation<W> {
 
     /// フレームを列の末尾へ足し、仕掛かりが上限を超えたぶんを書き出す
     ///
-    /// `dispose` はそれまで末尾にいたフレームの廃棄方法。`awaiting` は復号を
-    /// 待っているフレーム数で、その結果は画面を組むために要るので、列に残す数は
-    /// 仕掛かりの上限とこの数の大きい方になる。
+    /// `dispose` はそれまで末尾にいたフレームの廃棄方法。
     fn push(
         &mut self,
         pending: Pending,
         dispose: bool,
         pipeline: &mut Pipeline,
-        awaiting: usize,
     ) -> Result<(), Error> {
         if let Some(previous) = self.pending.back_mut() {
             previous.dispose = dispose;
         }
         self.pending.push_back(pending);
 
-        let held = pipeline.capacity().max(awaiting);
+        let held = pipeline.capacity();
         debug_assert!(
             held >= 2,
             "排出する先頭は、廃棄方法の決まっていない末尾と別のフレームであること"
@@ -93,18 +83,6 @@ impl<W: Write + Seek> Animation<W> {
             self.write(pipeline)?;
         }
         Ok(())
-    }
-
-    /// 符号化の結果を、それを投入したフレームへ渡す
-    fn hold(&mut self, index: usize, encoded: EncodedFrame) {
-        let pending = self
-            .pending
-            .iter_mut()
-            .find(
-                |pending| matches!(pending.encoded, Encoded::Waiting(waiting) if waiting == index),
-            )
-            .expect("復号したフレームは書き出しを待っている");
-        pending.encoded = Encoded::Ready(encoded);
     }
 
     /// 差分の無いフレームを、末尾のフレームの表示時間へ併合する
@@ -134,10 +112,7 @@ impl<W: Write + Seek> Animation<W> {
         let Some(pending) = self.pending.pop_front() else {
             return Ok(());
         };
-        let encoded = match pending.encoded {
-            Encoded::Waiting(index) => pipeline.take(index)?,
-            Encoded::Ready(encoded) => encoded,
-        };
+        let encoded = pipeline.take(pending.job)?;
         let dispose = pending.dispose;
 
         let mut durations = Durations::new(pending.duration);
@@ -221,8 +196,7 @@ enum Sink<W: Write + Seek> {
 /// アニメーションにせず、単葉の .webp をそのまま書く。
 ///
 /// フレームの載せ方の決定は投入した場で済ませ、符号化はワーカーへ回す。
-/// 非可逆は決定が自分の出力の復号結果に依るので、決まった枚数だけ先の符号化を
-/// 待ってから次のフレームへ進む。落としたエンコーダはワーカーを畳んでから返る。
+/// 落としたエンコーダはワーカーを畳んでから返る。
 pub struct Encoder<W: Write + Seek> {
     sink: Sink<W>,
     layout: Layout,
@@ -414,9 +388,6 @@ impl<W: Write + Seek> Encoder<W> {
     }
 
     /// フレームを符号化して行き先へ渡す
-    ///
-    /// 自分の出力を追うキャンバスは、遅れの限度に達した矩形の符号化を待って
-    /// 復号し、載せ方を決めるより前に画面を組み直す。
     fn write_frame(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
         // 写した画素を読むのは、差分を取るときと、RGBAを符号化へ渡すとき
         if self.layout.color_type == ColorType::Rgba8 || !matches!(self.sink, Sink::Still(_)) {
@@ -432,12 +403,6 @@ impl<W: Write + Seek> Encoder<W> {
             }
             Sink::Animation(animation) => animation,
         };
-
-        while let Some(index) = self.canvas.awaited() {
-            let encoded = self.pipeline.take(index)?;
-            self.canvas.settle(encoded.still())?;
-            animation.hold(index, encoded);
-        }
 
         let duration = animation.milliseconds.next(delay);
         let Some(placement) = self.canvas.place(animation.disposable()) else {
@@ -458,11 +423,11 @@ impl<W: Write + Seek> Encoder<W> {
         );
 
         let index = self.pipeline.submit(job);
-        self.canvas.commit(placement, index);
+        self.canvas.commit(placement);
 
         animation.push(
             Pending {
-                encoded: Encoded::Waiting(index),
+                job: index,
                 rect: placement.rect,
                 blend: placement.blend,
                 dispose: false,
@@ -470,22 +435,7 @@ impl<W: Write + Seek> Encoder<W> {
             },
             placement.dispose,
             &mut self.pipeline,
-            self.canvas.awaiting(),
         )
-    }
-
-    /// 復号を待っている層をすべて画面へ映す
-    #[cfg(test)]
-    fn settle_all(&mut self) -> Result<(), Error> {
-        let Sink::Animation(animation) = &mut self.sink else {
-            return Ok(());
-        };
-        while let Some(index) = self.canvas.oldest() {
-            let encoded = self.pipeline.take(index)?;
-            self.canvas.settle(encoded.still())?;
-            animation.hold(index, encoded);
-        }
-        Ok(())
     }
 }
 
@@ -601,6 +551,14 @@ mod tests {
         for (index, frame) in frames.iter().enumerate() {
             let delay = FrameDelay::new(index as u32 * 7 + 20, 1000).unwrap();
             encoder.add_frame(frame, delay).unwrap();
+            if let Sink::Animation(a) = &encoder.sink {
+                let q: Vec<String> = a
+                    .pending
+                    .iter()
+                    .map(|p| format!("{:?} b{} d{}", p.rect, p.blend, p.dispose))
+                    .collect();
+                println!("after {index}: {q:?}");
+            }
         }
         let (writer, report) = encoder.finish().unwrap();
         (writer.into_inner(), report)
@@ -660,11 +618,9 @@ mod tests {
         assert_eq!(sprite.merged_frames, 0, "動く四角が併合されている");
     }
 
-    /// 可逆のエンコーダは復号器を組み立てない
-    ///
-    /// 比べる相手が入力どうしなので、書き直す画素の地図も復号した矩形も要らない。
+    /// 直前の投入で変わった画素を持ち越すのは非可逆だけ
     #[test]
-    fn a_lossless_encoder_builds_no_decoder() {
+    fn only_a_lossy_encoder_carries_the_previous_change() {
         for color_type in [ColorType::Rgb8, ColorType::Rgba8] {
             for lossless in [true, false] {
                 let config = Config {
@@ -673,7 +629,7 @@ mod tests {
                 };
                 let encoder = Encoder::new(Cursor::new(Vec::new()), 16, 16, 2, config).unwrap();
                 assert_eq!(
-                    encoder.canvas.tracks_the_screen(),
+                    encoder.canvas.carries_the_previous_change(),
                     !lossless,
                     "{color_type:?} 可逆{lossless}"
                 );
@@ -704,7 +660,7 @@ mod tests {
             .collect()
     }
 
-    /// フレームを1枚ずつ投入し、復号を待たせずにキャンバスを控える
+    /// フレームを1枚ずつ投入し、そのつどキャンバスを控える
     fn encode_watching_the_canvas(
         width: u32,
         height: u32,
@@ -725,7 +681,6 @@ mod tests {
         for (index, frame) in frames.iter().enumerate() {
             let delay = FrameDelay::new(index as u32 * 7 + 20, 1000).unwrap();
             encoder.add_frame(frame, delay).unwrap();
-            encoder.settle_all().unwrap();
             canvases.push(encoder.canvas.base(false).to_vec());
         }
         let (writer, _) = encoder.finish().unwrap();
@@ -737,67 +692,61 @@ mod tests {
         rgba.iter().skip(3).step_by(4).copied().collect()
     }
 
-    /// 非可逆でも、キャンバスのαは入力と一致する
-    ///
-    /// αは可逆で格納されるので、離れるとしたら合成の規則を取り違えたときになる。
-    /// 矩形の外にも及ぶので、抜いた跡と重ねる形の両方がここを通る。
-    #[test]
-    fn the_lossy_canvas_carries_the_alpha_of_the_input() {
-        let (width, height) = (48, 36);
-        for frames in [
-            skewed_frames(width, height, 8),
-            sprite_frames(width, height, 8),
-            panel_frames(width, height, 8),
-        ] {
-            let (_, canvases) = encode_watching_the_canvas(width, height, &frames, config(false));
-            for (index, (canvas, frame)) in canvases.iter().zip(&frames).enumerate() {
-                let mut expected = frame.clone();
-                crate::normalize::normalize(&mut expected);
-                assert_eq!(alpha_of(canvas), alpha_of(&expected), "フレーム{index}のα");
-            }
-        }
+    /// 独立したデコーダで合成する
+    fn compose(bytes: &[u8], frames: usize) -> Vec<Vec<u8>> {
+        let mut decoder =
+            image_webp::WebPDecoder::new(Cursor::new(bytes)).expect("image-webp が読めない");
+        decoder
+            .set_background_color([0, 0, 0, 0])
+            .expect("背景色を透明にする");
+        assert_eq!(decoder.num_frames() as usize, frames, "書いたフレーム数");
+
+        let size = decoder.output_buffer_size().expect("出力の大きさ");
+        (0..frames)
+            .map(|_| {
+                let mut composed = vec![0u8; size];
+                decoder
+                    .read_frame(&mut composed)
+                    .expect("image-webp のデコード");
+                composed
+            })
+            .collect()
     }
 
-    /// キャンバスは、独立したデコーダが合成した画面と揃う
+    /// 非可逆の出力は、独立したデコーダで合成すると入力へ戻る
+    ///
+    /// αは可逆で格納されるので、合成後も入力と1も違わない。これが重ねる形を
+    /// 入力のキャンバスで判定してよい根拠になる。RGBは非可逆の量子化ぶん離れる。
     ///
     /// 素材は半透明の背景を上書きで載せるので、`image-webp` の重ねる合成の
-    /// 逸脱にも廃棄の逸脱にも当たらない。残るのはYUVからRGBへの変換の違いだけで、
-    /// 矩形がずれるか重ねる向きが逆になれば桁で外れる。素材のANMFはどれも
-    /// 上書きで矩形を抜かないので、重ね方と廃棄方法の取り違えは別の歯が問う。
+    /// 逸脱にも廃棄の逸脱にも当たらない。矩形がずれるか重ねる向きが逆になれば
+    /// 桁で外れる。
     #[test]
-    fn the_lossy_canvas_matches_an_independent_decoder() {
-        /// 画素ごとの差の平均の上限。デコーダ間の変換の違いを見込む
+    fn a_lossy_output_decodes_back_to_the_input() {
+        /// 画素ごとの差の平均の上限。非可逆の量子化とデコーダ間の変換の違いを見込む
         const LIMIT: f64 = 3.0;
 
         let (width, height) = (48, 36);
         let frames = panel_frames(width, height, 8);
-        let (bytes, canvases) = encode_watching_the_canvas(width, height, &frames, config(false));
+        let (bytes, _) = encode_watching_the_canvas(width, height, &frames, config(false));
 
-        let mut decoder =
-            image_webp::WebPDecoder::new(Cursor::new(&bytes)).expect("image-webp が読めない");
-        decoder
-            .set_background_color([0, 0, 0, 0])
-            .expect("背景色を透明にする");
-        assert_eq!(
-            decoder.num_frames() as usize,
-            frames.len(),
-            "書いたフレーム数"
-        );
+        for (index, (frame, composed)) in
+            frames.iter().zip(compose(&bytes, frames.len())).enumerate()
+        {
+            let mut expected = frame.clone();
+            crate::normalize::normalize(&mut expected);
+            assert_eq!(
+                alpha_of(&composed),
+                alpha_of(&expected),
+                "フレーム{index}のα"
+            );
 
-        let size = decoder.output_buffer_size().expect("出力の大きさ");
-        for (index, canvas) in canvases.iter().enumerate() {
-            let mut composed = vec![0u8; size];
-            decoder
-                .read_frame(&mut composed)
-                .expect("image-webp のデコード");
-
-            assert_eq!(alpha_of(canvas), alpha_of(&composed), "フレーム{index}のα");
-            let error: f64 = canvas
+            let error: f64 = expected
                 .iter()
                 .zip(&composed)
                 .map(|(a, b)| f64::from(a.abs_diff(*b)))
                 .sum::<f64>()
-                / canvas.len() as f64;
+                / expected.len() as f64;
             assert!(error < LIMIT, "フレーム{index}の平均絶対誤差 {error}");
         }
     }

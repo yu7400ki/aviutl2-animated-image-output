@@ -1378,36 +1378,59 @@ fn flat_rgba(width: u32, height: u32, level: u8) -> Vec<u8> {
         .collect()
 }
 
-/// 入力が変わらなくても、画面が許容量を超えて離れていれば書き直す
+/// 静止した投入は矩形を立てない
 ///
-/// 24枚とも同じ入力で、離れているのは量子化の誤差を負った画面だけ。決定は復号の
-/// 届いたフレームを相手にするので書き直しはその遅れのぶん後になり、入力が変わらない
-/// 限り1回で止まる。残りは表示時間へ畳まれ、総再生時間は保たれる。
+/// 24枚とも同じ入力で、直前の投入で変わった画素も無い。総再生時間は保たれる。
 #[test]
-fn an_unchanged_input_is_rewritten_once_while_the_screen_stays_apart() {
+fn a_still_input_stands_no_rect() {
     let (width, height) = (48, 32);
     const FRAMES: usize = 24;
     let frames = vec![noisy_rgba(width, height); FRAMES];
 
     let (bytes, report) = encode(width, height, lossy_config(ColorType::Rgba8), &frames).unwrap();
 
-    assert_eq!(placements(&bytes).len(), 2, "画面と比べていない");
     assert_eq!(
-        report.merged_frames as usize,
-        FRAMES - 2,
-        "書き直しが1回で止まっていない"
+        placements(&bytes).len(),
+        1,
+        "静止した投入が矩形を立てている"
     );
+    assert_eq!(report.merged_frames as usize, FRAMES - 1);
 
     let durations = decode_with_image_webp(&bytes, width, height).durations;
-    assert_eq!(durations.len(), 2, "畳んだフレーム数");
+    assert_eq!(durations.len(), 1, "畳んだフレーム数");
+    let total: u32 = (0..FRAMES).map(|index| index as u32 * 7 + 20).sum();
+    assert_eq!(durations.iter().sum::<u32>(), total, "畳んだ表示時間の合計");
+}
+
+/// 変わった画素は次の投入でもう一度書かれ、そこで止まる
+///
+/// 3枚目で変わり、4枚目は同じ入力のまま跡を書き直す。5枚目からは持ち越しが
+/// 空になるので表示時間へ畳まれる。
+#[test]
+fn a_change_is_written_twice_and_stops() {
+    /// 平らな面の高さ
+    const LEVEL: u8 = 0x60;
+
+    let (width, height) = (48, 32);
+    const FRAMES: usize = 8;
+    let mut frames = vec![flat_rgba(width, height, LEVEL); FRAMES];
+    for frame in &mut frames[2..] {
+        *frame = flat_rgba(width, height, LEVEL + 40);
+    }
+
+    let (bytes, report) = encode(width, height, lossy_config(ColorType::Rgba8), &frames).unwrap();
+
+    assert_eq!(placements(&bytes).len(), 3, "書き直しが1回で止まっていない");
+    assert_eq!(report.merged_frames as usize, FRAMES - 3);
+
+    let durations = decode_with_image_webp(&bytes, width, height).durations;
     let total: u32 = (0..FRAMES).map(|index| index as u32 * 7 + 20).sum();
     assert_eq!(durations.iter().sum::<u32>(), total, "畳んだ表示時間の合計");
 }
 
 /// 1刻みの変化でも矩形を立てる
 ///
-/// 刻みが1でも40でも同じだけ書く。書き直すかどうかは変化の大きさではなく、
-/// 画面が入力に届いているかで決まる。
+/// 刻みが1でも40でも同じだけ書く。矩形が立つかどうかは変化の大きさに依らない。
 #[test]
 fn a_single_step_of_change_stands_a_rect() {
     /// 平らな面の高さ

@@ -10,6 +10,7 @@ mod normalize;
 mod picture;
 mod pipeline;
 mod riff;
+#[cfg_attr(not(test), expect(dead_code))]
 mod screen;
 
 pub use anim_core::{ColorType, FrameDelay};
