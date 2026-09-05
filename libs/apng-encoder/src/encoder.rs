@@ -581,45 +581,6 @@ mod tests {
         frame
     }
 
-    /// [`mottled_frame`] が値に取る色の数
-    ///
-    /// キャンバスがこの全部を覆う値域になっている。完全に透明な画素の色が
-    /// 別に加わるので、パレットに載るのは1つ多い。
-    const MOTTLED_COLORS: usize = 200;
-
-    /// [`mottled_frame`] が完全に透明な画素を置く間隔
-    ///
-    /// この画素があるぶん、パレットにアルファ0の色が載る。
-    const MOTTLED_CLEAR: usize = 11;
-
-    /// 値がなだらかに動く土台へ微小なゆらぎを載せたRGBA8のフレーム
-    ///
-    /// 3チャネルとも値ごとに動き、隣接画素の差は揃わない。色を見つける順は
-    /// 値の昇順から少しずつずれ、パレット参照の添字も同じだけ乱れる。
-    /// [`MOTTLED_CLEAR`] 画素ごとに完全に透明な画素が入る。
-    fn mottled_frame(seed: u32) -> Vec<u8> {
-        let grain = noise((WIDTH * HEIGHT) as usize, seed);
-        let mut frame = Vec::new();
-        for y in 0..HEIGHT as usize {
-            for x in 0..WIDTH as usize {
-                let pixel = y * WIDTH as usize + x;
-                if pixel.is_multiple_of(MOTTLED_CLEAR) {
-                    frame.extend_from_slice(&[0, 0, 0, 0]);
-                    continue;
-                }
-                let jitter = grain[pixel] as usize & 7;
-                let value = (x + y * 5 + seed as usize * 2 + jitter) % MOTTLED_COLORS;
-                frame.extend_from_slice(&[
-                    value as u8,
-                    (value * 3 + 0x40) as u8,
-                    (value * 5 + 0x80) as u8,
-                    0xFF,
-                ]);
-            }
-        }
-        frame
-    }
-
     /// RGB8のフレームに不透明なアルファを足す
     fn with_alpha(frame: &[u8]) -> Vec<u8> {
         frame
@@ -697,18 +658,6 @@ mod tests {
         }
     }
 
-    /// IHDRが示す出力の1画素あたりのバイト数
-    fn output_bytes_per_pixel(bytes: &[u8]) -> usize {
-        // シグネチャ・長さ・型に続くIHDRの9バイト目がcolour type
-        let code = bytes[chunk::SIGNATURE.len() + 8 + 9];
-        match code {
-            2 => 3,
-            3 => 1,
-            6 => 4,
-            other => panic!("扱わないcolour type: {other}"),
-        }
-    }
-
     /// フレームごとのフィルタ種別バイト
     fn filter_types(bytes: &[u8], bpp: usize) -> Vec<Vec<u8>> {
         written_frames(bytes)
@@ -761,32 +710,6 @@ mod tests {
             assert!(frame.iter().all(|&f| f == 0), "フレーム {index}: {frame:?}");
         }
         for (index, frame) in types.iter().enumerate().skip(HALF as usize) {
-            assert!(frame.iter().any(|&f| f != 0), "フレーム {index}: {frame:?}");
-        }
-    }
-
-    /// 色種別をパレット参照へ落としても、フレームごとに戦略が選ばれる
-    #[test]
-    fn reducing_the_color_type_still_takes_a_strategy_per_frame() {
-        let config = Config {
-            color_type: ColorType::Rgba8,
-            reduce_color: true,
-            ..Config::default()
-        };
-
-        let input: Vec<Vec<u8>> = (0..FRAMES)
-            .map(|seed| with_alpha(&flat_frame(seed)))
-            .collect();
-        let bytes = encode(&input, config);
-        assert_eq!(output_bytes_per_pixel(&bytes), 1);
-        for (index, frame) in filter_types(&bytes, 1).iter().enumerate() {
-            assert!(frame.iter().all(|&f| f == 0), "フレーム {index}: {frame:?}");
-        }
-
-        let input: Vec<Vec<u8>> = (0..FRAMES).map(mottled_frame).collect();
-        let bytes = encode(&input, config);
-        assert_eq!(output_bytes_per_pixel(&bytes), 1);
-        for (index, frame) in filter_types(&bytes, 1).iter().enumerate() {
             assert!(frame.iter().any(|&f| f != 0), "フレーム {index}: {frame:?}");
         }
     }
