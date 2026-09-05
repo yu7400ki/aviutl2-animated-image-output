@@ -129,6 +129,7 @@ mod tests {
     use apng_encoder::{Error as EncoderError, delay_parts};
     use std::fs::File;
     use std::io::Write;
+    use std::num::NonZeroUsize;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -177,7 +178,8 @@ mod tests {
     fn an_io_failure_while_writing_a_frame_leaves_no_file() {
         /// 先頭フレームの書き出しまで届くフレーム数
         ///
-        /// 列を抜けるのに要る数より余裕を持たせている。
+        /// 列を抜けるのに要る数より余裕を持たせている。ワーカー数は列の深さを決めるので
+        /// 1つに固定する。
         const COUNT: u32 = 8;
         // シグネチャ(8) + IHDR(25) + acTL(20) + fcTL(38)
         const BUDGET: usize = 8 + 25 + 20 + 38;
@@ -189,7 +191,7 @@ mod tests {
         let result = write_or_discard(&path, |file| {
             let probe = file.try_clone().map_err(|e| e.to_string())?;
 
-            let mut encoder = Encoder::new(
+            let mut encoder = Encoder::with_workers(
                 FailingWriter {
                     file,
                     remaining: BUDGET,
@@ -201,6 +203,7 @@ mod tests {
                     color_format: ColorFormat::Rgba32,
                     ..Config::default()
                 }),
+                NonZeroUsize::MIN,
             )
             .map_err(|e| e.to_string())?;
 

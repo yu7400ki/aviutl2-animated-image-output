@@ -159,6 +159,8 @@ pub(crate) struct Pipeline {
     ready: HashMap<usize, Outcome>,
     /// 配り直すバッファ
     buffers: Vec<Vec<u8>>,
+    /// 圧縮を回すワーカー数
+    workers: NonZeroUsize,
 }
 
 impl Pipeline {
@@ -178,7 +180,13 @@ impl Pipeline {
             submitted: 0,
             ready: HashMap::new(),
             buffers: Vec::new(),
+            workers,
         })
+    }
+
+    /// 圧縮を回すワーカー数
+    pub(crate) fn workers(&self) -> NonZeroUsize {
+        self.workers
     }
 
     /// 空のバッファを1つ借りる

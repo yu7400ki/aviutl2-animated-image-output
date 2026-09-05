@@ -15,6 +15,7 @@ use std::io::Write;
 use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
+use std::thread::available_parallelism;
 
 /// [`Config::compression_level`] に指定できる範囲
 pub const COMPRESSION_LEVELS: RangeInclusive<u32> = 1..=9;
@@ -175,10 +176,11 @@ impl Writing {
 /// 投入されたフレームは決定と書き出しの列を通ってから出るため、書き出しは投入から
 /// 遅れる。
 ///
-/// 生のフレームを `ワーカー数 × 2 + 3` 面抱える (ワーカーが1つのとき、1920x1080の
-/// RGBA8で約41.5MB)。加えて、書き出しを待つフレームごとに、圧縮した本体と、
-/// キャンバスへ重ねる候補の詰め直した領域および圧縮した本体を抱える。
-/// フレームは投入された順にそのまま書き出す。
+/// 生のフレームを `ワーカー数 × 2 + 3` 面抱える。[`Encoder::new`] はワーカー数を
+/// 機械の並列度に合わせるため、抱える面数もそれに比例する
+/// ([`Encoder::with_workers`] で指せば固定できる)。加えて、書き出しを待つ
+/// フレームごとに、圧縮した本体と、キャンバスへ重ねる候補の詰め直した領域および
+/// 圧縮した本体を抱える。フレームは投入された順にそのまま書き出す。
 ///
 /// 落としたエンコーダはワーカーを畳んでから返る。
 pub struct Encoder<W: Write> {
@@ -209,7 +211,9 @@ impl<W: Write> Encoder<W> {
     /// `num_frames` フレームを受け付ける状態にする
     ///
     /// この時点でシグネチャと、画素データより前に置くチャンクを書き出す。
-    /// 圧縮を回すワーカーは1つ。
+    ///
+    /// 圧縮を回すワーカー数は機械の並列度になる。実際に起こした数は
+    /// [`Encoder::workers`] が返す。
     ///
     /// # Errors
     /// 幅・高さ・フレーム数が0のとき、1フレームのバイト数が `usize` で表現できないとき、
@@ -221,7 +225,8 @@ impl<W: Write> Encoder<W> {
         num_frames: u32,
         config: Config,
     ) -> Result<Self, Error> {
-        Self::with_workers(writer, width, height, num_frames, config, NonZeroUsize::MIN)
+        let workers = available_parallelism().unwrap_or(NonZeroUsize::MIN);
+        Self::with_workers(writer, width, height, num_frames, config, workers)
     }
 
     /// ワーカー数を指してエンコーダを作る
@@ -268,6 +273,11 @@ impl<W: Write> Encoder<W> {
             frames_accepted: 0,
             poisoned: false,
         })
+    }
+
+    /// 圧縮を回すワーカー数
+    pub fn workers(&self) -> NonZeroUsize {
+        self.pipeline.workers()
     }
 
     /// 画素データより前に置くチャンクを書き出す
@@ -1073,6 +1083,8 @@ mod tests {
     ///
     /// 仕掛かりの上限を超えるバッファを先に満たしておく。確保が入れば最後の数がそのぶん
     /// 増える。
+    ///
+    /// ワーカーは1つに固定し、投入した場で圧縮が済んで領域がその場で戻る経路で数える。
     #[test]
     fn every_compression_buffer_comes_back() {
         /// 先に満たしておくバッファの数
@@ -1084,12 +1096,13 @@ mod tests {
         for (config, input) in materials {
             let color = config.color_type;
             let delay = FrameDelay::new(1, 30).unwrap();
-            let mut encoder = Encoder::new(
+            let mut encoder = Encoder::with_workers(
                 Cursor::new(Vec::new()),
                 WIDTH,
                 HEIGHT,
                 input.len() as u32,
                 config,
+                NonZeroUsize::MIN,
             )
             .unwrap();
             for _ in 0..PREFILLED {
@@ -1158,6 +1171,7 @@ mod tests {
                     NonZeroUsize::new(workers).unwrap(),
                 )
                 .unwrap();
+                assert_eq!(encoder.workers().get(), workers, "起こしたワーカー数");
 
                 let warm_up = encoder.staged_depth + 2;
                 let mut allocated = 0;

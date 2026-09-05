@@ -2,6 +2,7 @@
 
 use apng_encoder::{ColorType, Config, Encoder, Error, FrameDelay};
 use std::io::{self, Cursor, Write};
+use std::num::NonZeroUsize;
 
 /// 決定的な擬似乱数でフレームの内容を作る
 fn frame_data(len: usize, seed: u32) -> Vec<u8> {
@@ -330,14 +331,23 @@ impl Write for FailingWriter {
 fn a_failed_write_poisons_the_encoder() {
     /// 書き出しの失敗と、その次の投入まで届くフレーム数
     ///
-    /// 列を抜けるのに要る数より余裕を持たせている。
+    /// 列を抜けるのに要る数より余裕を持たせている。ワーカー数は列の深さを決めるので
+    /// 1つに固定する。
     const COUNT: u32 = 8;
 
     let input = frames(8, 8, ColorType::Rgba8, COUNT);
     let delay = FrameDelay::new(1, 30).unwrap();
     // シグネチャ・IHDR・acTL・fcTLは通り、IDATの途中で失敗する長さ
     let writer = FailingWriter { remaining: 100 };
-    let mut encoder = Encoder::new(writer, 8, 8, COUNT, config(ColorType::Rgba8)).unwrap();
+    let mut encoder = Encoder::with_workers(
+        writer,
+        8,
+        8,
+        COUNT,
+        config(ColorType::Rgba8),
+        NonZeroUsize::MIN,
+    )
+    .unwrap();
 
     let outcomes: Vec<Result<(), Error>> = input
         .iter()
