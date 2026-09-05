@@ -3,13 +3,15 @@
 use crate::chunk::{
     BLEND_OP_OVER, BLEND_OP_SOURCE, ChunkWriter, DISPOSE_OP_NONE, DISPOSE_OP_PREVIOUS,
 };
-use crate::codec::{Candidate, Codec};
+use crate::codec::Candidate;
 use crate::delta::Delta;
 use crate::error::Error;
 use crate::layout::Layout;
 use crate::over;
+use crate::pipeline::Pipeline;
 use anim_core::{ColorType, FrameDelay, Pacing, Rect, crop};
 use std::io::Write;
+use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
 
 /// [`Config::compression_level`] に指定できる範囲
@@ -102,13 +104,15 @@ impl Writing {
 ///
 /// 直前のフレームとそれを描く前のキャンバスの2面を常に抱える
 /// (1920x1080のRGBA8で約16.6MB)。フレームは投入された順にそのまま書き出す。
+///
+/// 落としたエンコーダはワーカーを畳んでから返る。
 pub struct Encoder<W: Write> {
     /// チャンクを並べる書き出し先
     chunks: ChunkWriter<W>,
     /// キャンバスの大きさと入力フレームのバイト並び
     layout: Layout,
-    /// 領域のフィルタと圧縮
-    codec: Codec,
+    /// 圧縮の投入口と、番号を指す結果の受け取り
+    pipeline: Pipeline,
     /// 直前のフレームとキャンバスの追跡
     delta: Delta,
     /// 書き出しの状態
@@ -124,6 +128,7 @@ impl<W: Write> Encoder<W> {
     /// `num_frames` フレームを受け付ける状態にする
     ///
     /// この時点でシグネチャと、画素データより前に置くチャンクを書き出す。
+    /// 圧縮を回すワーカーは1つ。
     ///
     /// # Errors
     /// 幅・高さ・フレーム数が0のとき、1フレームのバイト数が `usize` で表現できないとき、
@@ -134,6 +139,25 @@ impl<W: Write> Encoder<W> {
         height: u32,
         num_frames: u32,
         config: Config,
+    ) -> Result<Self, Error> {
+        Self::with_workers(writer, width, height, num_frames, config, NonZeroUsize::MIN)
+    }
+
+    /// ワーカー数を指してエンコーダを作る
+    ///
+    /// 渡した数をそのまま起こす。ワーカーが1つなら群れを起こさず、投入した場で
+    /// 圧縮する。決定も書き出しの順序もワーカー数に依らないので、出力はどの数でも
+    /// 同じになる。
+    ///
+    /// # Errors
+    /// [`Encoder::new`] と同じ。加えてスレッドを起こせないとき。
+    pub fn with_workers(
+        writer: W,
+        width: u32,
+        height: u32,
+        num_frames: u32,
+        config: Config,
+        workers: NonZeroUsize,
     ) -> Result<Self, Error> {
         if width == 0 || height == 0 {
             return Err(Error::InvalidDimensions { width, height });
@@ -148,11 +172,13 @@ impl<W: Write> Encoder<W> {
         let layout = Layout::new(width, height, config.color_type)?;
         let mut chunks = ChunkWriter::new(writer);
         Self::open(&mut chunks, &layout, num_frames, config)?;
+        // 書き出し先がヘッダを受け取ってから起こす
+        let pipeline = Pipeline::new(config.compression_level, workers)?;
 
         Ok(Encoder {
             chunks,
             layout,
-            codec: Codec::new(config.compression_level),
+            pipeline,
             delta: Delta::new(),
             writing: Writing::new(),
             num_frames,
@@ -267,7 +293,11 @@ impl<W: Write> Encoder<W> {
     ///
     /// 保留中のフレームをdispose_op=PREVIOUSで捨てると、投入されたフレームは
     /// それを描く直前のキャンバスとの差分になる。両方の候補を圧縮して小さい方を採り、
-    /// 採った側を戻り値へ残して、退けた側のバッファはプールへ返す。同じ大きさなら捨てない。
+    /// 採った側を戻り値へ残して、退けた側のバッファは配り直す先へ返す。同じ大きさなら
+    /// 捨てない。
+    ///
+    /// 捨てないときの候補はワーカーへ回し、捨てるときの候補を駆動スレッドで圧縮する
+    /// あいだに進む。
     fn choose_dispose(&mut self, data: &[u8]) -> Disposal {
         let frame = self.frames_accepted;
         let disposable = self.writing.pending.is_some();
@@ -276,27 +306,28 @@ impl<W: Write> Encoder<W> {
             .delta
             .restored_rect(&self.layout, data, kept, frame, disposable);
 
-        let kept_candidate = self.compress_rect(data, kept);
+        let job = self.submit_rect(data, kept);
+        let restored = restored.map(|rect| (rect, self.compress_rect(data, rect)));
+        let kept_candidate = self.pipeline.take(job);
+
         let keep = |candidate| Disposal {
             op: DISPOSE_OP_NONE,
             rect: kept,
             candidate,
         };
-        let Some(restored) = restored else {
+        let Some((rect, restored_candidate)) = restored else {
             return keep(kept_candidate);
         };
 
-        let restored_candidate = self.compress_rect(data, restored);
-
         if restored_candidate.len() < kept_candidate.len() {
-            kept_candidate.discard(&mut self.codec);
+            self.pipeline.recycle(kept_candidate.into_body());
             Disposal {
                 op: DISPOSE_OP_PREVIOUS,
-                rect: restored,
+                rect,
                 candidate: restored_candidate,
             }
         } else {
-            restored_candidate.discard(&mut self.codec);
+            self.pipeline.recycle(restored_candidate.into_body());
             keep(kept_candidate)
         }
     }
@@ -306,7 +337,7 @@ impl<W: Write> Encoder<W> {
     /// 矩形の中で変化した画素がすべて不透明なら、変化していない画素を完全な透明へ
     /// 潰した候補が立つ。blend_op=OVERはその画素でキャンバスを残すため、潰しても
     /// 元の値に戻る。`disposal` の候補と両方を圧縮して小さい方を採り、採った側を
-    /// 戻り値へ残して、退けた側のバッファはプールへ返す。同じ大きさならSOURCEを採る。
+    /// 戻り値へ残して、退けた側のバッファは配り直す先へ返す。同じ大きさならSOURCEを採る。
     ///
     /// 潰した画素を書けない出力では候補が立たない。先頭フレームはキャンバスがまだ空で、
     /// 重ねる先が無い。負けが続く間は [`Pacing`] が候補を立てるのを休ませる。
@@ -332,23 +363,23 @@ impl<W: Write> Encoder<W> {
             &self.delta.canvas
         };
         let stride = self.layout.stride;
-        let mut over = self.codec.take();
+        let mut over = self.pipeline.buffer();
         if !over::pack_over(base, data, stride, rect, &mut over) {
-            self.codec.give(over);
+            self.pipeline.recycle(over);
             return (BLEND_OP_SOURCE, source);
         }
 
         let bpp = self.layout.bytes_per_pixel;
-        let over_candidate = self.codec.compress(&over, rect.width as usize * bpp, bpp);
-        self.codec.give(over);
+        let job = self.pipeline.submit(over, rect.width as usize * bpp, bpp);
+        let over_candidate = self.pipeline.take(job);
 
         let taken = over_candidate.len() < source.len();
         self.writing.blend_pacing.record(taken);
         if taken {
-            source.discard(&mut self.codec);
+            self.pipeline.recycle(source.into_body());
             (BLEND_OP_OVER, over_candidate)
         } else {
-            over_candidate.discard(&mut self.codec);
+            self.pipeline.recycle(over_candidate.into_body());
             (BLEND_OP_SOURCE, source)
         }
     }
@@ -366,27 +397,33 @@ impl<W: Write> Encoder<W> {
             pending.blend,
             &pending.body,
         )?;
-        self.codec.give(pending.body);
+        self.pipeline.recycle(pending.body);
         Ok(())
     }
 
-    /// フレームから `rect` を切り出し、フィルタして圧縮する
-    fn compress_rect(&mut self, data: &[u8], rect: Rect) -> Candidate {
-        let stride = self.layout.stride;
+    /// フレームから `rect` を切り出す
+    fn crop_rect(&mut self, data: &[u8], rect: Rect) -> Vec<u8> {
         let bpp = self.layout.bytes_per_pixel;
-        let row_len = rect.width as usize * bpp;
-        let head = rect.y as usize * stride + rect.x as usize * bpp;
+        let mut region = self.pipeline.buffer();
+        crop(data, rect, self.layout.stride, bpp, bpp, &mut region);
+        region
+    }
 
-        if row_len == stride {
-            // 全幅の矩形は `data` 上で既に連続している
-            let len = row_len * rect.height as usize;
-            return self.codec.compress(&data[head..head + len], row_len, bpp);
-        }
+    /// フレームから `rect` を切り出し、圧縮を投入する
+    fn submit_rect(&mut self, data: &[u8], rect: Rect) -> usize {
+        let region = self.crop_rect(data, rect);
+        let bpp = self.layout.bytes_per_pixel;
+        self.pipeline.submit(region, rect.width as usize * bpp, bpp)
+    }
 
-        let mut cropped = self.codec.take();
-        crop(data, rect, stride, bpp, bpp, &mut cropped);
-        let candidate = self.codec.compress(&cropped, row_len, bpp);
-        self.codec.give(cropped);
+    /// フレームから `rect` を切り出し、駆動スレッドで圧縮する
+    fn compress_rect(&mut self, data: &[u8], rect: Rect) -> Candidate {
+        let region = self.crop_rect(data, rect);
+        let bpp = self.layout.bytes_per_pixel;
+        let candidate = self
+            .pipeline
+            .compress(&region, rect.width as usize * bpp, bpp);
+        self.pipeline.recycle(region);
         candidate
     }
 }

@@ -31,7 +31,7 @@ impl BufferPool {
 
 /// 圧縮した候補1つ
 ///
-/// 本体を包んで持ち回り、退けたときにバッファをプールへ返す口を分けて持つ。
+/// 本体を包んで持ち回る。
 #[must_use]
 pub(crate) struct Candidate {
     /// フィルタして圧縮した本体
@@ -44,27 +44,22 @@ impl Candidate {
         self.body.len()
     }
 
-    /// 書き出す候補として本体を取り出す
+    /// 本体を取り出す
     pub(crate) fn into_body(self) -> Vec<u8> {
         self.body
-    }
-
-    /// 退けた候補としてバッファをプールへ返す
-    pub(crate) fn discard(self, codec: &mut Codec) {
-        codec.give(self.body);
     }
 }
 
 /// 領域をフィルタして圧縮する
 ///
-/// 圧縮に使うバッファはプールから借り、使い終わったら返す。
+/// 対のもう一方に使うバッファはプールから借り、退けた側を返す。
 pub(crate) struct Codec {
     compressor: Compressor,
     /// 行ごとのフィルタ選択に使う作業領域
     scratch: filter::Scratch,
     /// フィルタ後のバイト列を組み立てる領域
     filtered: Vec<u8>,
-    /// 切り出した領域と圧縮した本体を回すバッファ
+    /// 対のもう一方の本体を回すバッファ
     pool: BufferPool,
 }
 
@@ -79,35 +74,39 @@ impl Codec {
         }
     }
 
-    /// 空のバッファを1つ借りる
-    pub(crate) fn take(&mut self) -> Vec<u8> {
-        self.pool.take()
-    }
-
-    /// 借りたバッファを返す
-    pub(crate) fn give(&mut self, buffer: Vec<u8>) {
-        self.pool.give(buffer);
-    }
-
     /// プールが抱えているバッファの数
     #[cfg(test)]
     pub(crate) fn pooled(&self) -> usize {
         self.pool.free.len()
     }
 
-    /// 連続した領域をフィルタして圧縮する
+    /// 連続した領域をフィルタし、`body` へ圧縮する
     ///
     /// 両方の戦略で圧縮し、短い方を採る。同じ大きさなら
-    /// [`filter::Strategy::Unfiltered`] を残す。
+    /// [`filter::Strategy::Unfiltered`] を残す。もう一方に使ったバッファは
+    /// プールへ残る。
     pub(crate) fn compress(
         &mut self,
         region: &[u8],
         region_stride: usize,
         bpp: usize,
+        body: Vec<u8>,
     ) -> Candidate {
-        let unfiltered =
-            self.compress_with(region, region_stride, bpp, filter::Strategy::Unfiltered);
-        let adaptive = self.compress_with(region, region_stride, bpp, filter::Strategy::Adaptive);
+        let unfiltered = self.compress_with(
+            region,
+            region_stride,
+            bpp,
+            filter::Strategy::Unfiltered,
+            body,
+        );
+        let spare = self.pool.take();
+        let adaptive = self.compress_with(
+            region,
+            region_stride,
+            bpp,
+            filter::Strategy::Adaptive,
+            spare,
+        );
         Candidate {
             body: self.shorter(adaptive, unfiltered),
         }
@@ -124,13 +123,14 @@ impl Codec {
         }
     }
 
-    /// `strategy` でフィルタして圧縮する
+    /// `strategy` でフィルタし、`body` へ圧縮する
     fn compress_with(
         &mut self,
         region: &[u8],
         region_stride: usize,
         bpp: usize,
         strategy: filter::Strategy,
+        mut body: Vec<u8>,
     ) -> Vec<u8> {
         self.filtered.clear();
         filter::filter_image(
@@ -142,7 +142,7 @@ impl Codec {
             &mut self.filtered,
         );
 
-        let mut body = self.pool.take();
+        body.clear();
         self.compressor.compress_into(&self.filtered, &mut body);
         body
     }
@@ -166,8 +166,15 @@ mod tests {
     fn a_tie_keeps_the_unfiltered_body() {
         let region = noise(WIDTH * HEIGHT * BPP, 0);
         let mut codec = Codec::new(6);
-        let adaptive = codec.compress_with(&region, STRIDE, BPP, filter::Strategy::Adaptive);
-        let unfiltered = codec.compress_with(&region, STRIDE, BPP, filter::Strategy::Unfiltered);
+        let adaptive =
+            codec.compress_with(&region, STRIDE, BPP, filter::Strategy::Adaptive, Vec::new());
+        let unfiltered = codec.compress_with(
+            &region,
+            STRIDE,
+            BPP,
+            filter::Strategy::Unfiltered,
+            Vec::new(),
+        );
         assert_eq!(
             adaptive.len(),
             unfiltered.len(),
@@ -175,26 +182,24 @@ mod tests {
         );
         assert_ne!(adaptive, unfiltered, "戦略ごとに中身が違うこと");
 
-        let candidate = codec.compress(&region, STRIDE, BPP);
+        let candidate = codec.compress(&region, STRIDE, BPP, Vec::new());
         assert_eq!(candidate.body, unfiltered);
     }
 
-    /// 退けた候補のバッファはプールへ返り、書き出す候補のバッファは出ていく
+    /// 退けた側のバッファはプールへ残り、圧縮のたびに配り直される
+    ///
+    /// 出ていくのは採った本体だけなので、渡すバッファが1つでも対を圧縮できる。
     #[test]
-    fn a_discarded_candidate_returns_its_buffer_to_the_pool() {
+    fn the_losing_strategy_leaves_its_buffer_in_the_pool() {
         let region = noise(WIDTH * HEIGHT * BPP, 1);
         let mut codec = Codec::new(6);
+        assert_eq!(codec.pooled(), 0);
 
-        let candidate = codec.compress(&region, STRIDE, BPP);
-        let held = codec.pooled();
-        candidate.discard(&mut codec);
-        assert_eq!(codec.pooled(), held + 1);
+        let mut body = codec.compress(&region, STRIDE, BPP, Vec::new()).into_body();
+        assert_eq!(codec.pooled(), 1);
 
-        let candidate = codec.compress(&region, STRIDE, BPP);
-        let held = codec.pooled();
-        let body = candidate.into_body();
-        assert_eq!(codec.pooled(), held);
-        codec.give(body);
-        assert_eq!(codec.pooled(), held + 1);
+        body = codec.compress(&region, STRIDE, BPP, body).into_body();
+        assert_eq!(codec.pooled(), 1);
+        assert!(!body.is_empty());
     }
 }

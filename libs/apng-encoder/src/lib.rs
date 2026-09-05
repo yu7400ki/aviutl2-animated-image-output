@@ -9,6 +9,7 @@ mod error;
 mod filter;
 mod layout;
 mod over;
+mod pipeline;
 mod zlib;
 
 pub use anim_core::{ColorType, FrameDelay};
