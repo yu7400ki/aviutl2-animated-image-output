@@ -15,8 +15,9 @@ const PIXEL: usize = 4;
 ///
 /// フレーム N+1 の配置は、フレーム N−L+1 までの復号結果が届いてから決める。
 /// まだ届いていない矩形に覆われた画素は、その矩形が書いた入力を仮に置き、復号が
-/// 届いた時点でそこへ置き換える。
-const DELAY: usize = 1;
+/// 届いた時点でそこへ置き換える。この数が、同時に符号化へ掛かるフレーム数の
+/// 上限にもなる。
+const DELAY: usize = 4;
 
 /// 完全不透明を表すα
 const OPAQUE: u8 = u8::MAX;
@@ -107,6 +108,8 @@ impl Sheets<'_> {
 struct Layer {
     /// 符号化へ投入したときの番号
     index: usize,
+    /// その矩形を書いたフレームの番号
+    frame: u64,
     placement: Placement,
     /// 矩形を埋める入力 (RGBA)
     pixels: Vec<u8>,
@@ -129,6 +132,8 @@ struct Screen {
     layers: VecDeque<Layer>,
     /// 使い回す層の受け皿
     spare: Vec<Vec<u8>>,
+    /// 写した入力の枚数
+    frames: u64,
 }
 
 /// 差分矩形を決めるとき比べる相手
@@ -140,6 +145,15 @@ enum Basis {
 }
 
 impl Basis {
+    /// 写した入力を1枚数える
+    ///
+    /// 決定の遅れはフレームで数えるので、写した入力ごとに進める。
+    fn advance(&mut self) {
+        if let Basis::Screen(screen) = self {
+            screen.frames += 1;
+        }
+    }
+
     /// 先頭フレームを全面で書いた後の状態へ進める
     fn start(&mut self, staged: &[u8]) {
         if let Basis::Screen(screen) = self {
@@ -242,13 +256,19 @@ impl Screen {
     }
 
     /// 復号を待っている層のうち、いちばん古いものの番号
+    #[cfg(test)]
     fn oldest(&self) -> Option<usize> {
         self.layers.front().map(|layer| layer.index)
     }
 
     /// 遅れの限度に達している間だけ、いちばん古い層の番号
+    ///
+    /// 遅れはフレームで数えるので、矩形を書かないフレームも限度へ近づける。
     fn awaited(&self) -> Option<usize> {
-        self.oldest().filter(|_| self.layers.len() >= DELAY)
+        self.layers
+            .front()
+            .filter(|layer| layer.frame + (DELAY as u64) < self.frames)
+            .map(|layer| layer.index)
     }
 
     /// いちばん新しく重ねたフレームの矩形
@@ -285,6 +305,7 @@ impl Screen {
         );
         self.layers.push_back(Layer {
             index,
+            frame: self.frames - 1,
             placement,
             pixels,
         });
@@ -400,6 +421,7 @@ impl Canvas {
                 settled_rect: NOTHING,
                 layers: VecDeque::new(),
                 spare: Vec::new(),
+                frames: 0,
             })
         };
         Canvas {
@@ -430,6 +452,7 @@ impl Canvas {
                 }
             }
         }
+        self.basis.advance();
     }
 
     /// 写した入力 (RGBA)

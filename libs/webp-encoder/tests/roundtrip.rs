@@ -1380,23 +1380,28 @@ fn flat_rgba(width: u32, height: u32, level: u8) -> Vec<u8> {
 
 /// 入力が変わらなくても、画面が許容量を超えて離れていれば書き直す
 ///
-/// 4枚とも同じ入力で、離れているのは量子化の誤差を負った画面だけ。書き直しは
-/// 入力が変わらない限り1回で止まるので、3枚目からは表示時間へ畳まれる。
+/// 24枚とも同じ入力で、離れているのは量子化の誤差を負った画面だけ。決定は復号の
+/// 届いたフレームを相手にするので書き直しはその遅れのぶん後になり、入力が変わらない
+/// 限り1回で止まる。残りは表示時間へ畳まれ、総再生時間は保たれる。
 #[test]
 fn an_unchanged_input_is_rewritten_once_while_the_screen_stays_apart() {
     let (width, height) = (48, 32);
-    let frame = noisy_rgba(width, height);
-    let frames = vec![frame.clone(), frame.clone(), frame.clone(), frame];
+    const FRAMES: usize = 24;
+    let frames = vec![noisy_rgba(width, height); FRAMES];
 
     let (bytes, report) = encode(width, height, lossy_config(ColorType::Rgba8), &frames).unwrap();
 
     assert_eq!(placements(&bytes).len(), 2, "画面と比べていない");
-    assert_eq!(report.merged_frames, 2, "書き直しが1回で止まっていない");
     assert_eq!(
-        decode_with_image_webp(&bytes, width, height).durations,
-        [20, 27 + 34 + 41],
-        "畳んだ表示時間"
+        report.merged_frames as usize,
+        FRAMES - 2,
+        "書き直しが1回で止まっていない"
     );
+
+    let durations = decode_with_image_webp(&bytes, width, height).durations;
+    assert_eq!(durations.len(), 2, "畳んだフレーム数");
+    let total: u32 = (0..FRAMES).map(|index| index as u32 * 7 + 20).sum();
+    assert_eq!(durations.iter().sum::<u32>(), total, "畳んだ表示時間の合計");
 }
 
 /// 1刻みの変化でも矩形を立てる
