@@ -7,15 +7,13 @@ extern crate self as jxl_encoder;
 mod delta;
 mod encoder;
 mod error;
-#[cfg_attr(not(test), expect(dead_code))]
-mod layers;
 mod layout;
 mod split;
 #[cfg(test)]
 mod tests;
 
 pub use encoder::Encoder;
-pub use error::{DecodingError, EncodingError, Error, ErrorCode};
+pub use error::{EncodingError, Error, ErrorCode};
 pub use layout::ColorType;
 
 use std::ops::RangeInclusive;

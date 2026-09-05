@@ -4,7 +4,6 @@
 
 #![allow(dead_code)]
 
-use anim_core::Rect;
 use jxl::api::{self, states::Initialized};
 use jxl::bit_reader::BitReader;
 use jxl::headers::encodings::UnconditionalCoder;
@@ -528,70 +527,6 @@ pub fn sequences(color_type: ColorType) -> Vec<Sequence> {
 /// `sequence` のフレームを符号化する
 pub fn encode_sequence(config: Config, sequence: &Sequence) -> Vec<u8> {
     encode_frames(config, WIDTH, HEIGHT, &sequence.frames, sequence.durations)
-}
-
-/// 矩形を `Layers` へ渡す形へ写す
-pub fn rect_of((x, y, width, height): (u32, u32, u32, u32)) -> Rect {
-    Rect {
-        x,
-        y,
-        width,
-        height,
-    }
-}
-
-/// `rect` の範囲を連続したバイト列として切り出す
-pub fn crop(frame: &[u8], color_type: ColorType, rect: Rect) -> Vec<u8> {
-    let bytes_per_pixel = color_type.bytes_per_pixel();
-    let row_len = rect.width as usize * bytes_per_pixel;
-    let mut out = Vec::with_capacity(row_len * rect.height as usize);
-    for row in 0..rect.height as usize {
-        let start = ((rect.y as usize + row) * WIDTH as usize + rect.x as usize) * bytes_per_pixel;
-        out.extend_from_slice(&frame[start..start + row_len]);
-    }
-    out
-}
-
-/// 連続したバイト列を `rect` の範囲へ書き込む
-pub fn paste(canvas: &mut [u8], color_type: ColorType, rect: Rect, layer: &[u8]) {
-    let bytes_per_pixel = color_type.bytes_per_pixel();
-    let row_len = rect.width as usize * bytes_per_pixel;
-    for row in 0..rect.height as usize {
-        let start = ((rect.y as usize + row) * WIDTH as usize + rect.x as usize) * bytes_per_pixel;
-        canvas[start..start + row_len].copy_from_slice(&layer[row * row_len..(row + 1) * row_len]);
-    }
-}
-
-/// 各層を切り出した投入フレームの番号
-///
-/// 副フレームは、続く表示フレームと同じ投入フレームから切り出される。
-pub fn sources(headers: &[FrameHeader]) -> Vec<usize> {
-    let mut shown = 0;
-    headers
-        .iter()
-        .map(|header| {
-            let at = shown;
-            if header.duration != 0 || header.is_last {
-                shown += 1;
-            }
-            at
-        })
-        .collect()
-}
-
-/// 書き出しの1回ぶんずつバイト列を控える writer
-#[derive(Default)]
-pub struct Chunks(pub Vec<Vec<u8>>);
-
-impl Write for Chunks {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.push(buf.to_vec());
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 /// プラグインの既定に当たる品質
