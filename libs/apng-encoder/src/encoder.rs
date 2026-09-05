@@ -813,6 +813,69 @@ mod tests {
         [(rgb_config(), rgb), (rgba_config(), rgba)]
     }
 
+    /// 潰した候補が負け続ける前半のフレーム数
+    ///
+    /// 一様な面から始め、まだらな半透明の面と一様な面を [`BLEND_LOSS_STREAK`] 回
+    /// 繰り返す。最後のフレームで連敗が閾値に届く。
+    const LOSING_FRAMES: usize = 1 + 2 * BLEND_LOSS_STREAK as usize;
+
+    /// [`resting_frames`] で潰した候補が初めて採られるフレームの位置
+    const REST_ENDS_AT: usize = LOSING_FRAMES + BLEND_REST_FRAMES as usize;
+
+    /// 休みが明けてから潰した候補が採られるフレーム数
+    const WINNING_FRAMES: usize = 5;
+
+    /// RGBA8の1画素を、色を反転した不透明な値へ書き換える
+    fn invert_rgba(frame: &mut [u8], x: usize, y: usize) {
+        let at = (y * WIDTH as usize + x) * 4;
+        for channel in &mut frame[at..at + 3] {
+            *channel ^= 0xFF;
+        }
+        frame[at + 3] = 0xFF;
+    }
+
+    /// 潰した候補が負け続けてから勝ちに変わるRGBA8の列
+    ///
+    /// 前半は一様な面とまだらな半透明の面を交互に置く。まだらへ変わるフレームは
+    /// 変化した画素が不透明でないため詰め直せず、一様へ戻るフレームは1画素の矩形を
+    /// 詰め直して必ず負ける。
+    ///
+    /// 後半は画素ごとに違う不透明な色を敷き、そこへ離れた2画素ずつ印を書き足す。
+    /// 矩形は2つの印を囲んで広がり、その中のほとんどが変化しないため、潰した候補が
+    /// 必ず勝つ。印は消さずに足すので、捨てた場合の矩形は捨てない場合より広くなる。
+    fn resting_frames() -> Vec<Vec<u8>> {
+        const PIXELS: usize = (WIDTH * HEIGHT) as usize;
+        /// まだらに置き換える画素の間隔
+        const STEP: usize = 7;
+
+        let uniform = with_alpha(&vec![0x30u8; PIXELS * 3]);
+        let mut speckled = uniform.clone();
+        for pixel in (0..PIXELS).step_by(STEP) {
+            speckled[pixel * 4..pixel * 4 + 4].copy_from_slice(&[0xC0, 0xB0, 0xA0, 0x80]);
+        }
+
+        let mut frames = vec![uniform.clone()];
+        for _ in 0..BLEND_LOSS_STREAK {
+            frames.push(speckled.clone());
+            frames.push(uniform.clone());
+        }
+
+        let mut dense = with_alpha(&noise(PIXELS * 3, 5));
+        frames.push(dense.clone());
+        while frames.len() < REST_ENDS_AT + WINNING_FRAMES {
+            let step = frames.len() - LOSING_FRAMES - 1;
+            invert_rgba(&mut dense, 1 + step, 1);
+            invert_rgba(&mut dense, WIDTH as usize - 2 - step, HEIGHT as usize - 2);
+            frames.push(dense.clone());
+        }
+        frames
+    }
+
+    /// [`resting_frames`] を色種別と揃えた素材
+    fn resting_material() -> (Config, Vec<Vec<u8>>) {
+        (rgba_config(), resting_frames())
+    }
+
     /// fcTLの並びから、フレームごとの値を1つ取り出す
     fn frame_control<T>(bytes: &[u8], pick: impl Fn(&[u8]) -> T) -> Vec<T> {
         let mut values = Vec::new();
@@ -837,6 +900,16 @@ mod tests {
         frame_control(bytes, |data| (data[DISPOSE_OP], data[DISPOSE_OP + 1]))
     }
 
+    /// blend_op=OVERで書かれたフレームの位置
+    fn over_frames(bytes: &[u8]) -> Vec<usize> {
+        frame_ops(bytes)
+            .iter()
+            .enumerate()
+            .filter(|&(_, &(_, blend))| blend == BLEND_OP_OVER)
+            .map(|(index, _)| index)
+            .collect()
+    }
+
     /// fcTLが並べる遅延の分子と分母
     fn frame_delays(bytes: &[u8]) -> Vec<(u16, u16)> {
         /// fcTLの中でdelay_numが始まる位置
@@ -854,7 +927,8 @@ mod tests {
     /// ワーカー数は出力に現れない。フレーム数を超えるワーカー数も回す。
     #[test]
     fn the_output_does_not_depend_on_the_number_of_workers() {
-        for (config, input) in jumping_material() {
+        let materials = jumping_material().into_iter().chain([resting_material()]);
+        for (config, input) in materials {
             let color = config.color_type;
             let expected = encode_with_workers(&input, config, 1);
 
@@ -888,6 +962,34 @@ mod tests {
                 "{color:?}: 潰した候補の立ち方が色種別と合わない: {ops:?}"
             );
         }
+    }
+
+    /// 潰した候補は、休みが明けたフレームから採られ始める
+    ///
+    /// 連敗を積む前半を外した後半だけの列では、先頭を除くすべてのフレームで潰した
+    /// 候補が採られる。前半を戻すと同じフレームがblend_op=SOURCEで書かれるので、
+    /// 休みの最中に投入した候補を捨てていることと、休みが明ける位置の両方が出る。
+    #[test]
+    fn the_over_candidate_is_taken_once_the_rest_ends() {
+        const {
+            assert!(
+                LOSING_FRAMES + 1 < REST_ENDS_AT,
+                "休みの最中に潰した候補が勝つフレームがある"
+            );
+        }
+
+        let (config, input) = resting_material();
+        let winning = input[LOSING_FRAMES..].to_vec();
+        assert_eq!(
+            over_frames(&encode_with_workers(&winning, config, 1)),
+            (1..winning.len()).collect::<Vec<_>>(),
+            "後半だけの列で潰した候補が採られるフレーム"
+        );
+        assert_eq!(
+            over_frames(&encode_with_workers(&input, config, 1)),
+            (REST_ENDS_AT..input.len()).collect::<Vec<_>>(),
+            "素材全体で潰した候補が採られるフレーム"
+        );
     }
 
     /// 生のフレームの写し先は使い回され、暖機を過ぎると面を確保しない
