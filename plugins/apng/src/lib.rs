@@ -128,7 +128,7 @@ mod tests {
     use super::*;
     use apng_encoder::{Error as EncoderError, delay_parts};
     use std::fs::File;
-    use std::io::{Seek, SeekFrom, Write};
+    use std::io::Write;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -164,12 +164,6 @@ mod tests {
 
         fn flush(&mut self) -> std::io::Result<()> {
             self.file.flush()
-        }
-    }
-
-    impl Seek for FailingWriter {
-        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-            self.file.seek(pos)
         }
     }
 

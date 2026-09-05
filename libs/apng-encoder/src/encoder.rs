@@ -9,7 +9,7 @@ use crate::error::Error;
 use crate::layout::Layout;
 use crate::over;
 use anim_core::{ColorType, FrameDelay, Pacing, Rect, crop};
-use std::io::{Seek, Write};
+use std::io::Write;
 use std::ops::RangeInclusive;
 
 /// [`Config::compression_level`] に指定できる範囲
@@ -102,7 +102,7 @@ impl Writing {
 ///
 /// 直前のフレームとそれを描く前のキャンバスの2面を常に抱える
 /// (1920x1080のRGBA8で約16.6MB)。フレームは投入された順にそのまま書き出す。
-pub struct Encoder<W: Write + Seek> {
+pub struct Encoder<W: Write> {
     /// チャンクを並べる書き出し先
     chunks: ChunkWriter<W>,
     /// キャンバスの大きさと入力フレームのバイト並び
@@ -120,7 +120,7 @@ pub struct Encoder<W: Write + Seek> {
     poisoned: bool,
 }
 
-impl<W: Write + Seek> Encoder<W> {
+impl<W: Write> Encoder<W> {
     /// `num_frames` フレームを受け付ける状態にする
     ///
     /// この時点でシグネチャと、画素データより前に置くチャンクを書き出す。
@@ -603,7 +603,7 @@ mod tests {
     }
 
     /// フレームを受け付けたエンコーダが持つ間合い
-    fn pacing_of<W: Write + Seek>(encoder: &Encoder<W>) -> &Pacing {
+    fn pacing_of<W: Write>(encoder: &Encoder<W>) -> &Pacing {
         &encoder.writing.blend_pacing
     }
 

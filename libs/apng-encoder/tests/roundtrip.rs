@@ -1,7 +1,7 @@
 //! 出力したAPNGを`png`クレートでデコードし、入力フレームと一致することを確認する
 
 use apng_encoder::{ColorType, Config, Encoder, Error, FrameDelay};
-use std::io::{self, Cursor, Seek, SeekFrom, Write};
+use std::io::{self, Cursor, Write};
 
 /// 決定的な擬似乱数でフレームの内容を作る
 fn frame_data(len: usize, seed: u32) -> Vec<u8> {
@@ -305,7 +305,6 @@ fn compression_level_changes_the_output_size() {
 /// 一定バイト数まで受け付け、それ以降は必ず失敗する書き出し先
 struct FailingWriter {
     remaining: usize,
-    position: u64,
 }
 
 impl Write for FailingWriter {
@@ -315,26 +314,11 @@ impl Write for FailingWriter {
             return Err(io::Error::other("書き出し失敗"));
         }
         self.remaining -= buf.len();
-        self.position += buf.len() as u64;
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
-    }
-}
-
-/// 書き出した位置だけを追う。戻った先を書き換えても内容は残らない
-impl Seek for FailingWriter {
-    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        self.position = match pos {
-            SeekFrom::Start(at) => at,
-            SeekFrom::Current(offset) | SeekFrom::End(offset) => self
-                .position
-                .checked_add_signed(offset)
-                .ok_or_else(|| io::Error::other("位置が範囲外"))?,
-        };
-        Ok(self.position)
     }
 }
 
@@ -346,10 +330,7 @@ fn a_failed_write_poisons_the_encoder() {
     let input = frames(8, 8, ColorType::Rgba8, 3);
     let delay = FrameDelay::new(1, 30).unwrap();
     // シグネチャ・IHDR・acTL・fcTLは通り、IDATの途中で失敗する長さ
-    let writer = FailingWriter {
-        remaining: 100,
-        position: 0,
-    };
+    let writer = FailingWriter { remaining: 100 };
     let mut encoder = Encoder::new(writer, 8, 8, 3, config(ColorType::Rgba8)).unwrap();
 
     encoder.add_frame(&input[0], delay).unwrap();
