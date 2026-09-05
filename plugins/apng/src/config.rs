@@ -2,12 +2,22 @@ use apng_encoder::COMPRESSION_LEVELS;
 pub use aviutl2::ColorFormat;
 use aviutl2::IniConfig;
 use aviutl2::ini::{Ini, Properties};
+use std::num::NonZeroUsize;
+use std::thread::available_parallelism;
+
+/// 設定が採れるスレッド数の上限
+///
+/// この機械の論理CPU数。読めなければ1を返す。
+pub fn max_threads() -> usize {
+    available_parallelism().map_or(1, NonZeroUsize::get)
+}
 
 #[derive(Clone)]
 pub struct Config {
     pub repeat: u32,
     pub color_format: ColorFormat,
     pub compression_level: u32,
+    pub threads: usize,
 }
 
 impl Default for Config {
@@ -16,6 +26,7 @@ impl Default for Config {
             repeat: 0,
             color_format: ColorFormat::default(),
             compression_level: 6,
+            threads: (max_threads() / 2).max(1),
         }
     }
 }
@@ -42,10 +53,17 @@ impl IniConfig for Config {
             .filter(|level| COMPRESSION_LEVELS.contains(level))
             .unwrap_or(default.compression_level);
 
+        let threads = section
+            .and_then(|s| s.get("threads"))
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(default.threads)
+            .clamp(1, max_threads());
+
         Self {
             repeat,
             color_format,
             compression_level,
+            threads,
         }
     }
 
@@ -53,7 +71,8 @@ impl IniConfig for Config {
         ini.with_section(Some(Self::SECTION))
             .set("repeat", self.repeat.to_string())
             .set("color_format", self.color_format.to_index().to_string())
-            .set("compression_level", self.compression_level.to_string());
+            .set("compression_level", self.compression_level.to_string())
+            .set("threads", self.threads.to_string());
     }
 }
 
@@ -81,6 +100,7 @@ mod tests {
         assert_eq!(config.repeat, default.repeat);
         assert!(config.color_format == default.color_format);
         assert_eq!(config.compression_level, default.compression_level);
+        assert_eq!(config.threads, default.threads);
     }
 
     #[test]
@@ -89,6 +109,7 @@ mod tests {
             repeat: 3,
             color_format: ColorFormat::Rgba32,
             compression_level: 9,
+            threads: max_threads(),
         };
 
         let mut ini = Ini::new();
@@ -98,6 +119,7 @@ mod tests {
         assert_eq!(loaded.repeat, saved.repeat);
         assert!(loaded.color_format == saved.color_format);
         assert_eq!(loaded.compression_level, saved.compression_level);
+        assert_eq!(loaded.threads, saved.threads);
     }
 
     #[test]
@@ -111,6 +133,36 @@ mod tests {
         }
     }
 
+    /// 値域の外のスレッド数は、走らせる機械の並列度の内側へ収まる
+    ///
+    /// 別の機械で書いた ini をそのまま読んでも、この機械で意味のある数になる。
+    #[test]
+    fn out_of_range_threads_are_clamped() {
+        let over = (max_threads() + 1).to_string();
+
+        assert_eq!(load(&[("threads", "0")]).threads, 1);
+        assert_eq!(load(&[("threads", &over)]).threads, max_threads());
+    }
+
+    /// 既定のスレッド数は上限の内側で控えめに採る
+    ///
+    /// 上限をそのまま採ると、書き出しが機械を独り占めする。上限が1の機械では
+    /// 1つしか採れないので、そこだけ上限と一致する。
+    #[test]
+    fn the_default_threads_stay_inside_the_ceiling() {
+        let default = Config::default().threads;
+        let ceiling = max_threads();
+
+        assert!(default >= 1, "{default}");
+        assert!(default <= ceiling, "{default} / {ceiling}");
+        if ceiling >= 2 {
+            assert!(
+                default < ceiling,
+                "上限をそのまま採っている: {default} / {ceiling}"
+            );
+        }
+    }
+
     /// 認識しないキーだけのセクションは既定値になる
     #[test]
     fn unknown_keys_are_ignored() {
@@ -119,5 +171,6 @@ mod tests {
         assert_eq!(config.repeat, default.repeat);
         assert!(config.color_format == default.color_format);
         assert_eq!(config.compression_level, default.compression_level);
+        assert_eq!(config.threads, default.threads);
     }
 }

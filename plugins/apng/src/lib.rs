@@ -9,6 +9,7 @@ use aviutl2::{
 use config::{ColorFormat, Config};
 use dialog::show_config_dialog;
 use std::io::BufWriter;
+use std::num::NonZeroUsize;
 use win32_ui::MessageBox;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
 
@@ -29,6 +30,11 @@ fn encoder_config(config: &Config) -> EncoderConfig {
     }
 }
 
+/// 設定のスレッド数をエンコーダのワーカー数へ渡す形にする
+fn encoder_workers(config: &Config) -> NonZeroUsize {
+    NonZeroUsize::new(config.threads).unwrap_or(NonZeroUsize::MIN)
+}
+
 /// 1フレームの表示時間 (scale / rate 秒) を求める
 fn frame_delay(scale: i32, rate: i32) -> std::result::Result<FrameDelay, String> {
     let scale = to_u32(scale, "フレームレートのスケール")?;
@@ -43,12 +49,13 @@ fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Re
     let num_frames = to_u32(info.num_frames(), "フレーム数")?;
 
     write_or_discard(&info.savefile(), |output_file| {
-        let mut encoder = Encoder::new(
+        let mut encoder = Encoder::with_workers(
             BufWriter::new(output_file),
             width,
             height,
             num_frames,
             encoder_config(config),
+            encoder_workers(config),
         )
         .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
 
@@ -274,5 +281,32 @@ mod tests {
         });
         assert_eq!(encoder_config.num_plays, 5);
         assert_eq!(encoder_config.compression_level, 3);
+    }
+
+    #[test]
+    fn threads_are_passed_through_as_the_number_to_wake() {
+        for threads in [1, 2, 7] {
+            assert_eq!(
+                encoder_workers(&Config {
+                    threads,
+                    ..Config::default()
+                })
+                .get(),
+                threads
+            );
+        }
+    }
+
+    /// 0 は起こせないので1へ寄る
+    #[test]
+    fn a_zero_worker_count_becomes_one() {
+        assert_eq!(
+            encoder_workers(&Config {
+                threads: 0,
+                ..Config::default()
+            })
+            .get(),
+            1
+        );
     }
 }

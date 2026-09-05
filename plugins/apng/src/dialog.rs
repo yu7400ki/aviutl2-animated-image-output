@@ -1,5 +1,6 @@
-use crate::config::{ColorFormat, Config};
+use crate::config::{ColorFormat, Config, max_threads};
 use apng_encoder::COMPRESSION_LEVELS;
+use std::ops::RangeInclusive;
 use win32_ui::{
     Dialog, MessageBox,
     layout::{FlexLayout, JustifyContent, SizeValue, labeled},
@@ -7,72 +8,137 @@ use win32_ui::{
 };
 use windows::Win32::Foundation::HWND;
 
-fn new_repeat_input(repeat: u32) -> Number {
-    Number::new().value(repeat as i32).range(0, i32::MAX)
+/// 入力欄が扱う圧縮レベルの値域
+fn compression_range() -> RangeInclusive<i32> {
+    *COMPRESSION_LEVELS.start() as i32..=*COMPRESSION_LEVELS.end() as i32
 }
 
-fn new_compression_input(level: u32) -> Number {
-    Number::new().value(level as i32).range(
-        *COMPRESSION_LEVELS.start() as i32,
-        *COMPRESSION_LEVELS.end() as i32,
-    )
-}
-
-/// 入力欄の値を設定へ組む
+/// 値域を検める入力欄。
 ///
-/// # Errors
-/// 読めない欄か値域の外の欄があるとき、画面へ出す文言。
-fn collect_config(
-    repeat_input: &Number,
-    color_combobox: &ComboBox,
-    compression_input: &Number,
-) -> Result<Config, String> {
-    let repeat = repeat_input
-        .validate()
-        .map_err(|_| "ループ回数の値が無効です。0以上の数値を入力してください。".to_string())?;
-    let compression_level = compression_input
-        .validate()
-        .map_err(|_| compression_error_message())?;
-
-    Ok(Config {
-        repeat: repeat as u32,
-        color_format: match color_combobox.selected_index() {
-            0 => ColorFormat::Rgb24,
-            1 => ColorFormat::Rgba32,
-            _ => Default::default(),
-        },
-        compression_level: compression_level as u32,
-    })
+/// 画面へ出す項目名も、弾いたときの文言も、読む値の判定も、
+/// ここが持つ名前と値域から決まる。
+#[derive(Clone)]
+struct RangedInput {
+    name: &'static str,
+    range: RangeInclusive<i32>,
+    input: Number,
 }
 
-/// 設定項目を縦へ並べる
-fn settings_layout(
-    repeat_input: &Number,
-    color_combobox: &ComboBox,
-    compression_input: &Number,
-) -> FlexLayout {
-    FlexLayout::column()
-        .with_width(SizeValue::Points(300.0))
-        .with_padding(15.0)
-        .with_gap(10.0)
-        .with_layout(labeled("ループ回数 (0=無限ループ)", repeat_input.clone()))
-        .with_layout(labeled("カラーフォーマット", color_combobox.clone()))
-        .with_layout(labeled(&compression_label(), compression_input.clone()))
+impl RangedInput {
+    fn new(name: &'static str, range: RangeInclusive<i32>, value: i32) -> Self {
+        let input = Number::new()
+            .value(value)
+            .range(*range.start(), *range.end());
+        RangedInput { name, range, input }
+    }
+
+    /// 名乗る値域
+    fn span(&self) -> String {
+        format!("{}-{}", self.range.start(), self.range.end())
+    }
+
+    /// 値域を添えた項目名
+    fn label(&self) -> String {
+        format!("{} ({})", self.name, self.span())
+    }
+
+    /// 値域の外を弾いたことを伝える文言
+    fn error(&self) -> String {
+        format!(
+            "{}の値が無効です。{}の値を入力してください。",
+            self.name,
+            self.span()
+        )
+    }
+
+    /// 入力欄の値を読む
+    ///
+    /// # Errors
+    /// 読めない値か値域の外の値のとき、画面へ出す文言。
+    fn read(&self) -> Result<i32, String> {
+        self.input.validate().map_err(|_| self.error())
+    }
+}
+
+/// ダイアログの入力欄
+#[derive(Clone)]
+struct Inputs {
+    repeat: Number,
+    color: ComboBox,
+    compression: RangedInput,
+    threads: RangedInput,
+}
+
+impl Inputs {
+    fn new(default_config: &Config) -> Self {
+        Inputs {
+            repeat: Number::new()
+                .value(default_config.repeat as i32)
+                .range(0, i32::MAX),
+            color: ComboBox::new(vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()])
+                .selected(match default_config.color_format {
+                    ColorFormat::Rgb24 => 0,
+                    ColorFormat::Rgba32 => 1,
+                }),
+            compression: RangedInput::new(
+                "圧縮レベル",
+                compression_range(),
+                default_config.compression_level as i32,
+            ),
+            threads: RangedInput::new(
+                "スレッド数",
+                // 上限は走らせる機械の並列度で決まる
+                1..=max_threads() as i32,
+                default_config.threads as i32,
+            ),
+        }
+    }
+
+    /// 設定項目を縦へ並べる
+    fn layout(&self) -> FlexLayout {
+        FlexLayout::column()
+            .with_width(SizeValue::Points(300.0))
+            .with_padding(15.0)
+            .with_gap(10.0)
+            .with_layout(labeled("ループ回数 (0=無限ループ)", self.repeat.clone()))
+            .with_layout(labeled("カラーフォーマット", self.color.clone()))
+            .with_layout(labeled(
+                &self.compression.label(),
+                self.compression.input.clone(),
+            ))
+            .with_layout(labeled(&self.threads.label(), self.threads.input.clone()))
+    }
+
+    /// 入力欄の値を設定へ組む
+    ///
+    /// # Errors
+    /// 読めない欄か値域の外の欄があるとき、画面へ出す文言。
+    fn collect(&self) -> Result<Config, String> {
+        let repeat = self
+            .repeat
+            .validate()
+            .map_err(|_| "ループ回数の値が無効です。0以上の数値を入力してください。".to_string())?;
+        let compression_level = self.compression.read()?;
+        let threads = self.threads.read()?;
+
+        Ok(Config {
+            repeat: repeat as u32,
+            color_format: match self.color.selected_index() {
+                0 => ColorFormat::Rgb24,
+                1 => ColorFormat::Rgba32,
+                _ => Default::default(),
+            },
+            compression_level: compression_level as u32,
+            threads: threads as usize,
+        })
+    }
 }
 
 pub fn show_config_dialog(
     parent_hwnd: HWND,
     default_config: Config,
 ) -> std::result::Result<Option<Config>, ()> {
-    let repeat_input = new_repeat_input(default_config.repeat);
-
-    let color_options = vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()];
-    let color_combobox = ComboBox::new(color_options).selected(match default_config.color_format {
-        ColorFormat::Rgb24 => 0,
-        ColorFormat::Rgba32 => 1,
-    });
-
-    let compression_input = new_compression_input(default_config.compression_level);
+    let inputs = Inputs::new(&default_config);
 
     let dialog = Dialog::new("APNG出力設定");
     let handle = dialog.handle();
@@ -80,10 +146,8 @@ pub fn show_config_dialog(
     // 入力値を検証してからダイアログを閉じる。無効ならダイアログは開いたまま
     let ok_button = Button::primary("OK").on_click({
         let handle = handle.clone();
-        let repeat_input = repeat_input.clone();
-        let color_combobox = color_combobox.clone();
-        let compression_input = compression_input.clone();
-        move || match collect_config(&repeat_input, &color_combobox, &compression_input) {
+        let inputs = inputs.clone();
+        move || match inputs.collect() {
             Ok(_) => handle.accept(),
             Err(message) => MessageBox::error(handle.hwnd(), &message, "エラー"),
         }
@@ -94,7 +158,7 @@ pub fn show_config_dialog(
         move || handle.cancel()
     });
 
-    let layout = settings_layout(&repeat_input, &color_combobox, &compression_input).with_layout(
+    let layout = inputs.layout().with_layout(
         FlexLayout::row()
             .with_gap(10.0)
             .with_padding_rect(0.0, 0.0, 5.0, 0.0)
@@ -111,82 +175,128 @@ pub fn show_config_dialog(
         return Ok(None);
     }
 
-    collect_config(&repeat_input, &color_combobox, &compression_input)
-        .map(Some)
-        .map_err(|_| ())
-}
-
-fn compression_label() -> String {
-    format!(
-        "圧縮レベル ({}-{})",
-        COMPRESSION_LEVELS.start(),
-        COMPRESSION_LEVELS.end()
-    )
-}
-
-fn compression_error_message() -> String {
-    format!(
-        "圧縮レベルの値が無効です。{}-{}の値を入力してください。",
-        COMPRESSION_LEVELS.start(),
-        COMPRESSION_LEVELS.end()
-    )
+    inputs.collect().map(Some).map_err(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn color_combobox() -> ComboBox {
-        ComboBox::new(vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()])
+    fn inputs() -> Inputs {
+        Inputs::new(&Config::default())
+    }
+
+    /// 値域を検める2つの入力欄
+    fn ranged_inputs(inputs: &Inputs) -> [RangedInput; 2] {
+        [inputs.compression.clone(), inputs.threads.clone()]
+    }
+
+    /// 数値を打ち込む3つの入力欄
+    fn number_inputs(inputs: &Inputs) -> [(&'static str, Number); 3] {
+        [
+            ("ループ回数", inputs.repeat.clone()),
+            ("圧縮レベル", inputs.compression.input.clone()),
+            ("スレッド数", inputs.threads.input.clone()),
+        ]
     }
 
     /// 値域の内側の入力は、そのまま設定になる
     #[test]
     fn values_inside_the_range_become_the_config() {
-        let repeat = new_repeat_input(0);
-        let color = color_combobox();
-        let compression = new_compression_input(6);
+        let inputs = inputs();
+        inputs.repeat.set_value(3);
+        inputs.color.set_selected_index(1);
+        inputs
+            .compression
+            .input
+            .set_value(*COMPRESSION_LEVELS.end() as i32);
+        inputs.threads.input.set_value(max_threads() as i32);
 
-        repeat.set_value(3);
-        color.set_selected_index(1);
-        compression.set_value(*COMPRESSION_LEVELS.end());
-
-        let config = collect_config(&repeat, &color, &compression).expect("値域の内側なので組める");
+        let config = inputs.collect().expect("値域の内側なので組める");
 
         assert_eq!(config.repeat, 3);
         assert!(config.color_format == ColorFormat::Rgba32);
         assert_eq!(config.compression_level, *COMPRESSION_LEVELS.end());
+        assert_eq!(config.threads, max_threads());
     }
 
-    /// 値域の外の圧縮レベルは、値域を名乗る文言で弾かれる
+    /// 圧縮レベルの値域も、打ち込みに対して効く
     #[test]
     fn an_out_of_range_compression_level_is_refused() {
-        let repeat = new_repeat_input(0);
-        let color = color_combobox();
-        let compression = new_compression_input(6);
+        let inputs = inputs();
+        let range = inputs.compression.range.clone();
 
-        for level in [
-            *COMPRESSION_LEVELS.start() as i32 - 1,
-            *COMPRESSION_LEVELS.end() as i32 + 1,
-        ] {
-            compression.set_value(level);
-            let Err(message) = collect_config(&repeat, &color, &compression) else {
-                panic!("圧縮レベル{level}は値域の外なので弾かれる");
+        inputs.compression.input.set_value(*range.start() - 1);
+        assert!(inputs.collect().is_err(), "下限より下");
+        inputs.compression.input.set_value(*range.end() + 1);
+        assert!(inputs.collect().is_err(), "上限より上");
+        inputs.compression.input.set_value(*range.end());
+        assert!(inputs.collect().is_ok(), "上限そのもの");
+    }
+
+    /// スレッド数の値域も、打ち込みに対して効く
+    #[test]
+    fn an_out_of_range_worker_count_is_refused() {
+        let inputs = inputs();
+        let range = inputs.threads.range.clone();
+
+        inputs.threads.input.set_value(*range.start() - 1);
+        assert!(inputs.collect().is_err(), "下限より下");
+        inputs.threads.input.set_value(*range.end() + 1);
+        assert!(inputs.collect().is_err(), "上限より上");
+        inputs.threads.input.set_value(*range.end());
+        assert!(inputs.collect().is_ok(), "上限そのもの");
+    }
+
+    /// 項目名も、値域の外を弾いたときの文言も、検める値域をそのまま名乗る
+    #[test]
+    fn every_field_names_the_range_that_is_checked() {
+        for name in ["圧縮レベル", "スレッド数"] {
+            let inputs = inputs();
+            let field = ranged_inputs(&inputs)
+                .into_iter()
+                .find(|field| field.name == name)
+                .expect("名前の一致する欄がある");
+            // 画面へ出す文字列を、入力欄が実際に検める値域と突き合わせる
+            let (min, max) = field.input.range_bounds().expect("値域を持つ入力欄");
+            assert_eq!(field.label(), format!("{name} ({min}-{max})"));
+
+            field.input.set_value(max + 1);
+            let Err(message) = inputs.collect() else {
+                panic!("{name}: 値域の外なので弾かれる");
             };
-            assert_eq!(message, compression_error_message());
+            assert_eq!(
+                message,
+                format!("{name}の値が無効です。{min}-{max}の値を入力してください。")
+            );
+        }
+    }
+
+    /// どの数値欄も、前後に空白のある入力を等しく受け取る
+    #[test]
+    fn every_number_field_accepts_surrounding_whitespace() {
+        for name in ["ループ回数", "圧縮レベル", "スレッド数"] {
+            let inputs = inputs();
+            let (_, input) = number_inputs(&inputs)
+                .into_iter()
+                .find(|(field, _)| *field == name)
+                .expect("名前の一致する欄がある");
+
+            let (min, _) = input.range_bounds().expect("値域を持つ入力欄");
+            input.set_text(&format!(" {min} "));
+
+            assert!(inputs.collect().is_ok(), "{name}: 前後の空白");
         }
     }
 
     /// 読めないループ回数も、0より小さいループ回数も、受け付ける値を名乗る文言で弾かれる
     #[test]
     fn an_invalid_repeat_count_is_refused() {
-        let repeat = new_repeat_input(0);
-        let color = color_combobox();
-        let compression = new_compression_input(6);
+        let inputs = inputs();
 
         for text in ["abc", "", "2147483648", "-1"] {
-            repeat.set_text(text);
-            let Err(message) = collect_config(&repeat, &color, &compression) else {
+            inputs.repeat.set_text(text);
+            let Err(message) = inputs.collect() else {
                 panic!("ループ回数{text:?}は弾かれる");
             };
             assert_eq!(
