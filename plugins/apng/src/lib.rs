@@ -175,7 +175,9 @@ mod tests {
     /// までに実ファイルへ書き出されたバイト数も確かめ、書きかけの状態を経ることを示す。
     #[test]
     fn an_io_failure_while_writing_a_frame_leaves_no_file() {
-        /// 先頭フレームが列を抜けるだけのフレーム数
+        /// 先頭フレームの書き出しまで届くフレーム数
+        ///
+        /// 列を抜けるのに要る数より余裕を持たせている。
         const COUNT: u32 = 8;
         // シグネチャ(8) + IHDR(25) + acTL(20) + fcTL(38)
         const BUDGET: usize = 8 + 25 + 20 + 38;

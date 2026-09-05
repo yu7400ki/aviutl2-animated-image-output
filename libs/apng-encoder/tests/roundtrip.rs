@@ -328,7 +328,9 @@ impl Write for FailingWriter {
 /// 先に投入したフレームのものになる。
 #[test]
 fn a_failed_write_poisons_the_encoder() {
-    /// 列を抜けて書き出しが始まるだけのフレーム数
+    /// 書き出しの失敗と、その次の投入まで届くフレーム数
+    ///
+    /// 列を抜けるのに要る数より余裕を持たせている。
     const COUNT: u32 = 8;
 
     let input = frames(8, 8, ColorType::Rgba8, COUNT);
