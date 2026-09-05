@@ -26,7 +26,6 @@ fn config(color_type: ColorType) -> Config {
         color_type,
         compression_level: 6,
         num_plays: 0,
-        ..Config::default()
     }
 }
 

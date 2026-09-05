@@ -1,49 +1,7 @@
-//! 入力フレームの並びと、選べる画素表現
+//! 入力フレームの並び
 
 use crate::error::Error;
 use anim_core::{ColorType, Rect};
-
-/// 出力の画素表現 (ビット深度8固定)
-///
-/// 入力に取れる色種別のほか、パレットを引く添字を持つ。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Output {
-    /// 8bit/chのRGB
-    Rgb8,
-    /// 8bit/chのRGBA
-    Rgba8,
-    /// PLTEを引く1バイトの添字
-    Indexed8,
-}
-
-impl Output {
-    /// 1画素あたりのバイト数
-    pub(crate) fn bytes_per_pixel(self) -> usize {
-        match self {
-            Output::Rgb8 => 3,
-            Output::Rgba8 => 4,
-            Output::Indexed8 => 1,
-        }
-    }
-
-    /// IHDRのcolour type
-    pub(crate) fn code(self) -> u8 {
-        match self {
-            Output::Rgb8 => 2,
-            Output::Rgba8 => 6,
-            Output::Indexed8 => 3,
-        }
-    }
-}
-
-impl From<ColorType> for Output {
-    fn from(color_type: ColorType) -> Self {
-        match color_type {
-            ColorType::Rgb8 => Output::Rgb8,
-            ColorType::Rgba8 => Output::Rgba8,
-        }
-    }
-}
 
 /// キャンバスの大きさと、入力フレームのバイト並び
 #[derive(Debug, Clone, Copy)]
@@ -82,6 +40,14 @@ impl Layout {
             stride,
             frame_len,
         })
+    }
+
+    /// 入力の色種別が対応するIHDRのcolour type
+    pub(crate) fn color_type_code(&self) -> u8 {
+        match self.input {
+            ColorType::Rgb8 => 2,
+            ColorType::Rgba8 => 6,
+        }
     }
 
     /// キャンバス全体を覆う矩形

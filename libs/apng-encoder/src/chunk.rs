@@ -3,7 +3,7 @@
 use crate::delay::delay_parts;
 use crate::error::Error;
 use anim_core::{FrameDelay, Rect};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::Write;
 
 /// PNGシグネチャ
 pub(crate) const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
@@ -106,30 +106,6 @@ impl<W: Write> ChunkWriter<W> {
     /// 書き出し先を返す
     pub(crate) fn into_inner(self) -> W {
         self.writer
-    }
-}
-
-impl<W: Write + Seek> ChunkWriter<W> {
-    /// 次に書き出す位置
-    pub(crate) fn position(&mut self) -> Result<u64, Error> {
-        Ok(self.writer.stream_position()?)
-    }
-
-    /// 場所を確保しておいたチャンクを書き直し、元の位置へ戻る
-    ///
-    /// `data` の長さは確保したときと同じであること。長さが変わると後続のチャンクを
-    /// 潰す。
-    pub(crate) fn rewrite(
-        &mut self,
-        at: u64,
-        chunk_type: [u8; 4],
-        data: &[u8],
-    ) -> Result<(), Error> {
-        let resume = self.writer.stream_position()?;
-        self.writer.seek(SeekFrom::Start(at))?;
-        write(&mut self.writer, chunk_type, data)?;
-        self.writer.seek(SeekFrom::Start(resume))?;
-        Ok(())
     }
 }
 

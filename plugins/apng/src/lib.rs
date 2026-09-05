@@ -26,7 +26,6 @@ fn encoder_config(config: &Config) -> EncoderConfig {
         },
         compression_level: config.compression_level,
         num_plays: config.repeat,
-        reduce_color: false,
     }
 }
 
