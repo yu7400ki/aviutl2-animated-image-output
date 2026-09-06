@@ -190,9 +190,9 @@ impl Writing {
 /// 遅れる。
 ///
 /// 投入された生のフレームの面を `ワーカー数 × 2 + 3` 枚まで抱え、決定が進んだ
-/// ところで落とす。[`Encoder::new`] はワーカー数を
-/// 機械の並列度に合わせるため、抱える面数もそれに比例する
-/// ([`Encoder::with_workers`] で指せば固定できる)。加えて、書き出しを待つ
+/// ところで落とす。[`Encoder::new`] はワーカー数を機械の並列度に合わせるため、
+/// 抱える面数もそれに比例する ([`Encoder::with_workers`] で指せば固定できる)。
+/// 加えて、書き出しを待つ
 /// フレームごとに、圧縮した本体と、キャンバスへ重ねる候補の詰め直した領域および
 /// 圧縮した本体を抱える。フレームは投入された順にそのまま書き出す。
 ///
@@ -1017,6 +1017,23 @@ mod tests {
     ///
     /// 決定も書き出しもフレーム順に進み、待つのは投入済みの番号だけなので、
     /// ワーカー数は出力に現れない。フレーム数を超えるワーカー数も回す。
+    /// 指したワーカー数がそのまま起きる
+    #[test]
+    fn the_encoder_starts_the_number_of_workers_it_was_given() {
+        for workers in [1, 2, 3, 8] {
+            let encoder = Encoder::with_workers(
+                Cursor::new(Vec::new()),
+                WIDTH,
+                HEIGHT,
+                1,
+                rgb_config(),
+                NonZeroUsize::new(workers).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(encoder.workers().get(), workers, "起こしたワーカー数");
+        }
+    }
+
     #[test]
     fn the_output_does_not_depend_on_the_number_of_workers() {
         let materials = jumping_material().into_iter().chain([resting_material()]);
@@ -1197,8 +1214,8 @@ mod tests {
     /// 生のフレームの面は決定が進むと落ち、同時に生きる数が列の深さで頭打ちになる
     ///
     /// 投入されたフレームを指すのは、決定を待つ列と、直前に決定したフレームおよびその
-    /// キャンバス。ワーカーは結末を返す前に面を手放すので、列が満ちた後に生きているのは
-    /// この3つぶんに落ち着く。終端まで流し切ると、どの面も残らない。
+    /// キャンバス。列が満ちた後に生きているのはこの3つぶんに落ち着き、ジョブを終えた
+    /// ワーカーが面を抱え続ければここを超える。終端まで流し切ると、どの面も残らない。
     #[test]
     fn the_raw_frames_are_released_as_the_queue_drains() {
         for (config, input) in jumping_material() {
