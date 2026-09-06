@@ -1,5 +1,7 @@
 //! 出力プラグインの安全なAPI
 
+use crate::config::IniConfig;
+use crate::logger;
 use crate::pixel::ColorFormat;
 use crate::sys;
 use anim_core::FrameDelay;
@@ -7,6 +9,7 @@ use std::ffi::c_void;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use widestring::U16CStr;
+use win32_ui::MessageBox;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
 
 /// u32に収まらない値を、名前を添えたエラーにする
@@ -263,13 +266,27 @@ pub struct PluginInfo {
     pub information: String,
 }
 
+/// 設定ダイアログの結末
+pub enum ConfigDialog<C> {
+    /// 利用者がOKを押し、入力から設定が組み上がった。この設定が保存される
+    Accepted(C),
+    /// 利用者がキャンセルを押した。設定は元のまま残る
+    Cancelled,
+    /// ダイアログを出せなかった、または入力から設定を組み上げられなかった。
+    /// 設定は元のまま残り、利用者にはエラーが報される
+    Failed,
+}
+
 /// 出力プラグインの実装トレイト
 ///
 /// 実装した型を [`crate::register_output_plugin!`] に渡すことで
 /// DLLエクスポート (`DllMain` / `GetOutputPluginTable`) が生成される。
 pub trait OutputPlugin {
-    /// 出力エラー型。`Err` はマクロ側がメッセージボックス表示してホストへ `false` を返す
-    type Error: std::fmt::Display;
+    /// iniへ永続化する設定
+    type Config: IniConfig;
+
+    /// エラー文言に載せる形式名 (「GIF出力エラー」の「GIF」)
+    const FORMAT_NAME: &'static str;
 
     /// 設定ダイアログを持つ場合 `true` (falseなら `func_config` は登録されない)
     const HAS_CONFIG_DIALOG: bool = false;
@@ -279,12 +296,42 @@ pub trait OutputPlugin {
     /// プラグイン情報 (`GetOutputPluginTable` 初回呼び出し時に一度だけ評価される)
     fn info() -> PluginInfo;
 
-    /// 出力処理本体
-    fn output(info: &OutputInfo) -> Result<(), Self::Error>;
+    /// 設定に従って保存先へ書き出す
+    fn encode(info: &OutputInfo, config: &Self::Config) -> Result<(), String>;
 
-    /// 設定ダイアログ表示 (`HAS_CONFIG_DIALOG = true` の時のみ呼ばれる)
-    fn config(hwnd: HWND, dll_hinst: HINSTANCE) -> bool {
-        let _ = (hwnd, dll_hinst);
+    /// 設定ダイアログを表示する (`HAS_CONFIG_DIALOG = true` の時のみ呼ばれる)
+    fn show_config_dialog(hwnd: HWND, config: Self::Config) -> ConfigDialog<Self::Config> {
+        let _ = (hwnd, config);
+        ConfigDialog::Cancelled
+    }
+
+    /// 出力処理本体
+    ///
+    /// `Err` はマクロ側がメッセージボックス表示してホストへ `false` を返す。
+    fn output(info: &OutputInfo) -> Result<(), String> {
+        let config = Self::Config::load();
+        Self::encode(info, &config).map_err(|e| format!("{}出力エラー: {}", Self::FORMAT_NAME, e))
+    }
+
+    /// 設定ダイアログを表示して、決まった設定を保存する
+    ///
+    /// 戻り値は設定が決まったかどうか。`HAS_CONFIG_DIALOG = true` の時のみ呼ばれる。
+    fn config(hwnd: HWND, _dll_hinst: HINSTANCE) -> bool {
+        let config = match Self::show_config_dialog(hwnd, Self::Config::load()) {
+            ConfigDialog::Accepted(config) => config,
+            ConfigDialog::Cancelled => return false,
+            ConfigDialog::Failed => {
+                logger::error("設定の取得に失敗しました。");
+                MessageBox::error(Some(hwnd), "設定の取得に失敗しました。", "エラー");
+                return false;
+            }
+        };
+
+        if let Err(e) = config.save() {
+            let error_msg = format!("設定保存エラー: {}", e);
+            logger::warn(&error_msg);
+            MessageBox::warning(Some(hwnd), &error_msg, "警告");
+        }
         true
     }
 

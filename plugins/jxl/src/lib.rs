@@ -2,17 +2,15 @@ mod config;
 mod dialog;
 
 use aviutl2::{
-    FileFilter, IniConfig, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
-    register_logger, register_output_plugin, write_or_discard,
+    ConfigDialog, FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, register_logger,
+    register_output_plugin, write_or_discard,
 };
 use config::{ColorFormat, Config};
-use dialog::show_config_dialog;
 use jxl_encoder::{ColorType, Config as EncoderConfig, Encoder};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
-use win32_ui::MessageBox;
-use windows::Win32::Foundation::{HINSTANCE, HWND};
+use windows::Win32::Foundation::HWND;
 
 /// 符号化器へ渡す、素材の枚数と時間の刻み
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,30 +90,12 @@ where
     })
 }
 
-fn create_jxl_from_video(info: &OutputInfo, config: &Config) -> Result<(), String> {
-    let width = info.width()?;
-    let height = info.height()?;
-    let sequence = Sequence::new(info.num_frames()?, info.scale()?, info.rate()?);
-
-    write_frames(
-        &info.savefile(),
-        width,
-        height,
-        sequence,
-        config,
-        |encoder| {
-            info.encode_frames(config.color_format, |frame_data| {
-                encoder.add_frame(&frame_data, sequence.duration)
-            })
-            .map_err(|e| e.to_string())
-        },
-    )
-}
-
 struct JxlOutputPlugin;
 
 impl OutputPlugin for JxlOutputPlugin {
-    type Error = String;
+    type Config = Config;
+
+    const FORMAT_NAME: &'static str = "JPEG XL";
 
     const HAS_CONFIG_DIALOG: bool = true;
 
@@ -133,32 +113,28 @@ impl OutputPlugin for JxlOutputPlugin {
         }
     }
 
-    fn output(info: &OutputInfo) -> Result<(), String> {
-        let config = Config::load();
-        create_jxl_from_video(info, &config).map_err(|e| format!("JPEG XL出力エラー: {}", e))
+    fn encode(info: &OutputInfo, config: &Config) -> Result<(), String> {
+        let width = info.width()?;
+        let height = info.height()?;
+        let sequence = Sequence::new(info.num_frames()?, info.scale()?, info.rate()?);
+
+        write_frames(
+            &info.savefile(),
+            width,
+            height,
+            sequence,
+            config,
+            |encoder| {
+                info.encode_frames(config.color_format, |frame_data| {
+                    encoder.add_frame(&frame_data, sequence.duration)
+                })
+                .map_err(|e| e.to_string())
+            },
+        )
     }
 
-    fn config(hwnd: HWND, _dll_hinst: HINSTANCE) -> bool {
-        let default_config = Config::load();
-
-        if let Ok(result) = show_config_dialog(hwnd, default_config) {
-            match result {
-                Some(config) => {
-                    // 設定を保存
-                    if let Err(e) = config.save() {
-                        let error_msg = format!("設定保存エラー: {}", e);
-                        logger::warn(&error_msg);
-                        MessageBox::warning(Some(hwnd), &error_msg, "警告");
-                    }
-                    true
-                }
-                None => false,
-            }
-        } else {
-            logger::error("設定の取得に失敗しました。");
-            MessageBox::error(Some(hwnd), "設定の取得に失敗しました。", "エラー");
-            false
-        }
+    fn show_config_dialog(hwnd: HWND, config: Config) -> ConfigDialog<Config> {
+        dialog::show_config_dialog(hwnd, config)
     }
 }
 

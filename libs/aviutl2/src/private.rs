@@ -138,8 +138,7 @@ extern "C" fn output_shim<T: OutputPlugin>(oip: *mut sys::OUTPUT_INFO) -> bool {
                 ));
                 true
             }
-            Err(e) => {
-                let message = e.to_string();
+            Err(message) => {
                 logger::error(&format!("{name}: {message}"));
                 show_error_message_box(&message);
                 false

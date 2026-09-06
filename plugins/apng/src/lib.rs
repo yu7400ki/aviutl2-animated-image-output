@@ -3,15 +3,13 @@ mod dialog;
 
 use apng_encoder::{ColorType, Config as EncoderConfig, Encoder};
 use aviutl2::{
-    FileFilter, IniConfig, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
-    register_logger, register_output_plugin, write_or_discard,
+    ConfigDialog, FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, register_logger,
+    register_output_plugin, write_or_discard,
 };
 use config::{ColorFormat, Config};
-use dialog::show_config_dialog;
 use std::io::BufWriter;
 use std::num::NonZeroUsize;
-use win32_ui::MessageBox;
-use windows::Win32::Foundation::{HINSTANCE, HWND};
+use windows::Win32::Foundation::HWND;
 
 /// プラグイン設定をエンコーダの設定へ対応付ける
 fn encoder_config(config: &Config) -> EncoderConfig {
@@ -30,44 +28,12 @@ fn encoder_workers(config: &Config) -> NonZeroUsize {
     NonZeroUsize::new(config.threads).unwrap_or(NonZeroUsize::MIN)
 }
 
-fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
-    let delay = info.frame_delay()?;
-    let width = info.width()?;
-    let height = info.height()?;
-    let num_frames = info.num_frames()?;
-
-    write_or_discard(&info.savefile(), |output_file| {
-        let mut encoder = Encoder::with_workers(
-            BufWriter::new(output_file),
-            width,
-            height,
-            num_frames,
-            encoder_config(config),
-            encoder_workers(config),
-        )
-        .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
-
-        info.encode_frames(config.color_format, |frame_data| {
-            encoder
-                .add_frame(&frame_data, delay)
-                .map_err(|e| e.to_string())
-        })
-        .map_err(|e| e.to_string())?;
-
-        encoder
-            .finish()
-            .map_err(|e| format!("エンコーダー終了エラー: {}", e))?
-            .into_inner()
-            .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
-
-        Ok(())
-    })
-}
-
 struct ApngOutputPlugin;
 
 impl OutputPlugin for ApngOutputPlugin {
-    type Error = String;
+    type Config = Config;
+
+    const FORMAT_NAME: &'static str = "APNG";
 
     const HAS_CONFIG_DIALOG: bool = true;
 
@@ -85,33 +51,42 @@ impl OutputPlugin for ApngOutputPlugin {
         }
     }
 
-    fn output(info: &OutputInfo) -> std::result::Result<(), String> {
-        // 設定を読み込み
-        let config = Config::load();
-        create_apng_from_video(info, &config).map_err(|e| format!("APNG出力エラー: {}", e))
+    fn encode(info: &OutputInfo, config: &Config) -> Result<(), String> {
+        let delay = info.frame_delay()?;
+        let width = info.width()?;
+        let height = info.height()?;
+        let num_frames = info.num_frames()?;
+
+        write_or_discard(&info.savefile(), |output_file| {
+            let mut encoder = Encoder::with_workers(
+                BufWriter::new(output_file),
+                width,
+                height,
+                num_frames,
+                encoder_config(config),
+                encoder_workers(config),
+            )
+            .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
+
+            info.encode_frames(config.color_format, |frame_data| {
+                encoder
+                    .add_frame(&frame_data, delay)
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(|e| e.to_string())?;
+
+            encoder
+                .finish()
+                .map_err(|e| format!("エンコーダー終了エラー: {}", e))?
+                .into_inner()
+                .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
+
+            Ok(())
+        })
     }
 
-    fn config(hwnd: HWND, _dll_hinst: HINSTANCE) -> bool {
-        let default_config = Config::load();
-
-        if let Ok(result) = show_config_dialog(hwnd, default_config) {
-            match result {
-                Some(config) => {
-                    // 設定を保存
-                    if let Err(e) = config.save() {
-                        let error_msg = format!("設定保存エラー: {}", e);
-                        logger::warn(&error_msg);
-                        MessageBox::warning(Some(hwnd), &error_msg, "警告");
-                    }
-                    true
-                }
-                None => false,
-            }
-        } else {
-            logger::error("設定の取得に失敗しました。");
-            MessageBox::error(Some(hwnd), "設定の取得に失敗しました。", "エラー");
-            false
-        }
+    fn show_config_dialog(hwnd: HWND, config: Config) -> ConfigDialog<Config> {
+        dialog::show_config_dialog(hwnd, config)
     }
 }
 

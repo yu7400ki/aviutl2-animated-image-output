@@ -1,6 +1,6 @@
 use crate::config::{ColorFormat, Config};
 use aviutl2::dialog::{RangedInput, repeat_input};
-use aviutl2::{MAX_REPEAT, max_threads};
+use aviutl2::{ConfigDialog, MAX_REPEAT, max_threads};
 use std::ops::RangeInclusive;
 use webp_encoder::{METHOD_RANGE, QUALITY_RANGE};
 use win32_ui::{
@@ -91,10 +91,7 @@ impl Inputs {
     }
 }
 
-pub fn show_config_dialog(
-    parent_hwnd: HWND,
-    default_config: Config,
-) -> std::result::Result<Option<Config>, ()> {
+pub fn show_config_dialog(parent_hwnd: HWND, default_config: Config) -> ConfigDialog<Config> {
     let inputs = Inputs::new(&default_config);
 
     let dialog = Dialog::new("WebP出力設定");
@@ -124,15 +121,17 @@ pub fn show_config_dialog(
             .with_widget(cancel_button),
     );
 
-    let accepted = dialog
-        .with_layout(layout)
-        .open(parent_hwnd)
-        .map_err(|_| ())?;
+    let Ok(accepted) = dialog.with_layout(layout).open(parent_hwnd) else {
+        return ConfigDialog::Failed;
+    };
     if !accepted {
-        return Ok(None);
+        return ConfigDialog::Cancelled;
     }
 
-    inputs.collect().map(Some).map_err(|_| ())
+    match inputs.collect() {
+        Ok(config) => ConfigDialog::Accepted(config),
+        Err(_) => ConfigDialog::Failed,
+    }
 }
 
 #[cfg(test)]

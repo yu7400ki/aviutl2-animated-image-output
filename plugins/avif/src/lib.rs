@@ -3,14 +3,12 @@ mod dialog;
 
 use avif_encoder::{ColorType, Config as EncoderConfig, Encoder, Usage};
 use aviutl2::{
-    FileFilter, IniConfig, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
+    ConfigDialog, FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
     register_logger, register_output_plugin, write_or_discard,
 };
 use config::{ColorFormat, Config};
-use dialog::show_config_dialog;
 use std::io::BufWriter;
-use win32_ui::MessageBox;
-use windows::Win32::Foundation::{HINSTANCE, HWND};
+use windows::Win32::Foundation::HWND;
 
 /// プラグイン設定をエンコーダの設定へ対応付ける
 fn encoder_config(config: &Config, timescale: u32) -> EncoderConfig {
@@ -76,46 +74,12 @@ fn operating_point_message(config: &EncoderConfig, sequence: &Sequence) -> Strin
     )
 }
 
-fn create_avif_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
-    let width = info.width()?;
-    let height = info.height()?;
-    let sequence = Sequence::new(info.num_frames()?, info.scale()?, info.rate()?);
-
-    let encoder_config = encoder_config(config, sequence.timescale);
-
-    write_or_discard(&info.savefile(), |output_file| {
-        let mut encoder = Encoder::new(
-            BufWriter::new(output_file),
-            width,
-            height,
-            sequence.num_frames,
-            encoder_config,
-        )
-        .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
-
-        logger::info(&operating_point_message(&encoder_config, &sequence));
-
-        info.encode_frames(config.color_format, |frame_data| {
-            encoder.add_frame(&frame_data, sequence.duration)
-        })
-        .map_err(|e| e.to_string())?;
-
-        let writer = encoder
-            .finish()
-            .map_err(|e| format!("エンコーダー終了エラー: {}", e))?;
-
-        writer
-            .into_inner()
-            .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
-
-        Ok(())
-    })
-}
-
 struct AvifOutputPlugin;
 
 impl OutputPlugin for AvifOutputPlugin {
-    type Error = String;
+    type Config = Config;
+
+    const FORMAT_NAME: &'static str = "AVIF";
 
     const HAS_CONFIG_DIALOG: bool = true;
 
@@ -133,32 +97,44 @@ impl OutputPlugin for AvifOutputPlugin {
         }
     }
 
-    fn output(info: &OutputInfo) -> std::result::Result<(), String> {
-        let config = Config::load();
-        create_avif_from_video(info, &config).map_err(|e| format!("AVIF出力エラー: {}", e))
+    fn encode(info: &OutputInfo, config: &Config) -> Result<(), String> {
+        let width = info.width()?;
+        let height = info.height()?;
+        let sequence = Sequence::new(info.num_frames()?, info.scale()?, info.rate()?);
+
+        let encoder_config = encoder_config(config, sequence.timescale);
+
+        write_or_discard(&info.savefile(), |output_file| {
+            let mut encoder = Encoder::new(
+                BufWriter::new(output_file),
+                width,
+                height,
+                sequence.num_frames,
+                encoder_config,
+            )
+            .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
+
+            logger::info(&operating_point_message(&encoder_config, &sequence));
+
+            info.encode_frames(config.color_format, |frame_data| {
+                encoder.add_frame(&frame_data, sequence.duration)
+            })
+            .map_err(|e| e.to_string())?;
+
+            let writer = encoder
+                .finish()
+                .map_err(|e| format!("エンコーダー終了エラー: {}", e))?;
+
+            writer
+                .into_inner()
+                .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
+
+            Ok(())
+        })
     }
 
-    fn config(hwnd: HWND, _dll_hinst: HINSTANCE) -> bool {
-        let default_config = Config::load();
-
-        if let Ok(result) = show_config_dialog(hwnd, default_config) {
-            match result {
-                Some(config) => {
-                    // 設定を保存
-                    if let Err(e) = config.save() {
-                        let error_msg = format!("設定保存エラー: {}", e);
-                        logger::warn(&error_msg);
-                        MessageBox::warning(Some(hwnd), &error_msg, "警告");
-                    }
-                    true
-                }
-                None => false,
-            }
-        } else {
-            logger::error("設定の取得に失敗しました。");
-            MessageBox::error(Some(hwnd), "設定の取得に失敗しました。", "エラー");
-            false
-        }
+    fn show_config_dialog(hwnd: HWND, config: Config) -> ConfigDialog<Config> {
+        dialog::show_config_dialog(hwnd, config)
     }
 }
 

@@ -1,13 +1,31 @@
 //! `register_output_plugin!` が生成するプラグインテーブルの内容を検証する
 
 use aviutl2::__private::TableStorage;
-use aviutl2::{FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo};
+use aviutl2::{
+    ConfigDialog, FileFilter, IniConfig, OutputInfo, OutputPlugin, PluginFlags, PluginInfo,
+};
 use widestring::U16CStr;
+use windows::Win32::Foundation::HWND;
+
+#[derive(Default)]
+struct TestConfig;
+
+impl IniConfig for TestConfig {
+    const FILE_NAME: &'static str = "table-test.ini";
+
+    fn load_from(_section: Option<&aviutl2::ini::Properties>) -> Self {
+        TestConfig
+    }
+
+    fn save_to(&self, _ini: &mut aviutl2::ini::Ini) {}
+}
 
 struct TestPlugin;
 
 impl OutputPlugin for TestPlugin {
-    type Error = String;
+    type Config = TestConfig;
+
+    const FORMAT_NAME: &'static str = "テスト";
 
     const HAS_CONFIG_DIALOG: bool = true;
 
@@ -22,8 +40,12 @@ impl OutputPlugin for TestPlugin {
         }
     }
 
-    fn output(_info: &OutputInfo) -> Result<(), String> {
+    fn encode(_info: &OutputInfo, _config: &TestConfig) -> Result<(), String> {
         Ok(())
+    }
+
+    fn show_config_dialog(_hwnd: HWND, _config: TestConfig) -> ConfigDialog<TestConfig> {
+        ConfigDialog::Cancelled
     }
 }
 

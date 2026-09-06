@@ -2,16 +2,14 @@ mod config;
 mod dialog;
 
 use aviutl2::{
-    FileFilter, IniConfig, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
+    ConfigDialog, FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
     register_logger, register_output_plugin, write_or_discard,
 };
 use config::{ColorFormat, Config};
-use dialog::show_config_dialog;
 use std::io::BufWriter;
 use std::num::NonZeroUsize;
 use webp_encoder::{ColorType, Config as EncoderConfig, Encoder, Report};
-use win32_ui::MessageBox;
-use windows::Win32::Foundation::{HINSTANCE, HWND};
+use windows::Win32::Foundation::HWND;
 
 /// プラグイン設定をエンコーダの設定へ対応付ける
 fn encoder_config(config: &Config) -> EncoderConfig {
@@ -65,51 +63,12 @@ fn report_messages(report: &Report, num_frames: u32) -> Vec<(Severity, String)> 
     messages
 }
 
-fn create_webp_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
-    let delay = info.frame_delay()?;
-
-    let width = info.width()?;
-    let height = info.height()?;
-    let num_frames = info.num_frames()?;
-
-    write_or_discard(&info.savefile(), |output_file| {
-        let mut encoder = Encoder::with_workers(
-            BufWriter::new(output_file),
-            width,
-            height,
-            num_frames,
-            encoder_config(config),
-            encoder_workers(config),
-        )
-        .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
-
-        info.encode_frames(config.color_format, |frame_data| {
-            encoder.add_frame(&frame_data, delay)
-        })
-        .map_err(|e| e.to_string())?;
-
-        let (writer, report) = encoder
-            .finish()
-            .map_err(|e| format!("エンコーダー終了エラー: {}", e))?;
-
-        writer
-            .into_inner()
-            .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
-
-        for (severity, message) in report_messages(&report, num_frames) {
-            match severity {
-                Severity::Info => logger::info(&message),
-                Severity::Warn => logger::warn(&message),
-            }
-        }
-        Ok(())
-    })
-}
-
 struct WebpOutputPlugin;
 
 impl OutputPlugin for WebpOutputPlugin {
-    type Error = String;
+    type Config = Config;
+
+    const FORMAT_NAME: &'static str = "WebP";
 
     const HAS_CONFIG_DIALOG: bool = true;
 
@@ -127,32 +86,49 @@ impl OutputPlugin for WebpOutputPlugin {
         }
     }
 
-    fn output(info: &OutputInfo) -> std::result::Result<(), String> {
-        let config = Config::load();
-        create_webp_from_video(info, &config).map_err(|e| format!("WebP出力エラー: {}", e))
+    fn encode(info: &OutputInfo, config: &Config) -> Result<(), String> {
+        let delay = info.frame_delay()?;
+
+        let width = info.width()?;
+        let height = info.height()?;
+        let num_frames = info.num_frames()?;
+
+        write_or_discard(&info.savefile(), |output_file| {
+            let mut encoder = Encoder::with_workers(
+                BufWriter::new(output_file),
+                width,
+                height,
+                num_frames,
+                encoder_config(config),
+                encoder_workers(config),
+            )
+            .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
+
+            info.encode_frames(config.color_format, |frame_data| {
+                encoder.add_frame(&frame_data, delay)
+            })
+            .map_err(|e| e.to_string())?;
+
+            let (writer, report) = encoder
+                .finish()
+                .map_err(|e| format!("エンコーダー終了エラー: {}", e))?;
+
+            writer
+                .into_inner()
+                .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
+
+            for (severity, message) in report_messages(&report, num_frames) {
+                match severity {
+                    Severity::Info => logger::info(&message),
+                    Severity::Warn => logger::warn(&message),
+                }
+            }
+            Ok(())
+        })
     }
 
-    fn config(hwnd: HWND, _dll_hinst: HINSTANCE) -> bool {
-        let default_config = Config::load();
-
-        if let Ok(result) = show_config_dialog(hwnd, default_config) {
-            match result {
-                Some(config) => {
-                    // 設定を保存
-                    if let Err(e) = config.save() {
-                        let error_msg = format!("設定保存エラー: {}", e);
-                        logger::warn(&error_msg);
-                        MessageBox::warning(Some(hwnd), &error_msg, "警告");
-                    }
-                    true
-                }
-                None => false,
-            }
-        } else {
-            logger::error("設定の取得に失敗しました。");
-            MessageBox::error(Some(hwnd), "設定の取得に失敗しました。", "エラー");
-            false
-        }
+    fn show_config_dialog(hwnd: HWND, config: Config) -> ConfigDialog<Config> {
+        dialog::show_config_dialog(hwnd, config)
     }
 }
 
