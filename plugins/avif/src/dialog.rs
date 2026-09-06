@@ -41,11 +41,14 @@ impl Inputs {
                 speed_range(),
                 i32::from(default_config.speed),
             ),
-            color: ComboBox::new(vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()])
-                .selected(match default_config.color_format {
-                    ColorFormat::Rgb24 => 0,
-                    ColorFormat::Rgba32 => 1,
-                }),
+            color: ComboBox::new(vec![
+                ColorFormat::Rgb24.label(),
+                ColorFormat::Rgba32.label(),
+            ])
+            .selected(match default_config.color_format {
+                ColorFormat::Rgb24 => 0,
+                ColorFormat::Rgba32 => 1,
+            }),
             yuv: ComboBox::new(vec![
                 YuvFormat::Yuv420.into(),
                 YuvFormat::Yuv422.into(),

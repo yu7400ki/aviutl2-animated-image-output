@@ -40,6 +40,17 @@ pub fn read<T: FromStr>(section: Option<&Properties>, key: &str, default: T) -> 
         .unwrap_or(default)
 }
 
+/// セクションからキーを読み、`0` を偽・`1` を真として解釈する
+///
+/// セクションが無い・キーが無い・`0` と `1` のどちらでもない場合は `default` を返す。
+pub fn read_flag(section: Option<&Properties>, key: &str, default: bool) -> bool {
+    match read(section, key, u32::from(default)) {
+        0 => false,
+        1 => true,
+        _ => default,
+    }
+}
+
 /// プラグイン設定のini永続化
 ///
 /// `load_from` / `save_to` でフィールドの読み書きだけを実装すれば、
@@ -147,6 +158,32 @@ mod tests {
         let properties = properties(&[("repeat", "3")]);
         let value: u32 = read(Some(&properties), "repeat", 5);
         assert_eq!(value, 3);
+    }
+
+    /// 真偽値は0と1で読む
+    #[test]
+    fn a_flag_is_read_as_zero_or_one() {
+        assert!(read_flag(
+            Some(&properties(&[("lossless", "1")])),
+            "lossless",
+            false
+        ));
+        assert!(!read_flag(
+            Some(&properties(&[("lossless", "0")])),
+            "lossless",
+            true
+        ));
+    }
+
+    /// 0と1のどちらでもない真偽値は既定値へ落ちる
+    #[test]
+    fn an_unreadable_flag_falls_back_to_default() {
+        for value in ["true", "false", "2", "-1", ""] {
+            let properties = properties(&[("lossless", value)]);
+            assert!(read_flag(Some(&properties), "lossless", true), "{value}");
+            assert!(!read_flag(Some(&properties), "lossless", false), "{value}");
+        }
+        assert!(read_flag(None, "lossless", true));
     }
 
     /// 既定のスレッド数は上限の内側で控えめに採る

@@ -19,11 +19,14 @@ impl Inputs {
     fn new(default_config: &Config) -> Self {
         Inputs {
             repeat: repeat_input(u32::from(u16::MAX), u32::from(default_config.repeat)),
-            color: ComboBox::new(vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()])
-                .selected(match default_config.color_format {
-                    ColorFormat::Rgb24 => 0,
-                    ColorFormat::Rgba32 => 1,
-                }),
+            color: ComboBox::new(vec![
+                ColorFormat::Rgb24.label(),
+                ColorFormat::Rgba32.label(),
+            ])
+            .selected(match default_config.color_format {
+                ColorFormat::Rgb24 => 0,
+                ColorFormat::Rgba32 => 1,
+            }),
         }
     }
 

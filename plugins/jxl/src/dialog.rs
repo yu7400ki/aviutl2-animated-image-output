@@ -34,11 +34,14 @@ impl Inputs {
     fn new(default_config: &Config) -> Self {
         Inputs {
             repeat: repeat_input(MAX_REPEAT, default_config.repeat),
-            color: ComboBox::new(vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()])
-                .selected(match default_config.color_format {
-                    ColorFormat::Rgb24 => 0,
-                    ColorFormat::Rgba32 => 1,
-                }),
+            color: ComboBox::new(vec![
+                ColorFormat::Rgb24.label(),
+                ColorFormat::Rgba32.label(),
+            ])
+            .selected(match default_config.color_format {
+                ColorFormat::Rgb24 => 0,
+                ColorFormat::Rgba32 => 1,
+            }),
             quality: RangedInput::new("品質", quality_range(), default_config.quality as i32),
             effort: RangedInput::new("均衡", effort_range(), i32::from(default_config.effort)),
             threads: RangedInput::new(

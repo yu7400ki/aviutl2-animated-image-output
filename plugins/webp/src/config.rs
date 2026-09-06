@@ -1,6 +1,6 @@
 pub use aviutl2::ColorFormat;
 use aviutl2::ini::{Ini, Properties};
-use aviutl2::{IniConfig, MAX_REPEAT, default_threads, max_threads, read};
+use aviutl2::{IniConfig, MAX_REPEAT, default_threads, max_threads, read, read_flag};
 use webp_encoder::{METHOD_RANGE, QUALITY_RANGE};
 
 #[derive(Clone)]
@@ -34,7 +34,7 @@ impl IniConfig for Config {
 
         let repeat = read(section, "repeat", default.repeat).min(MAX_REPEAT);
         let color_format = read(section, "color_format", default.color_format);
-        let lossless = read(section, "lossless", default.lossless);
+        let lossless = read_flag(section, "lossless", default.lossless);
         let quality = read(section, "quality", default.quality)
             .clamp(*QUALITY_RANGE.start(), *QUALITY_RANGE.end());
         let method = read(section, "method", default.method)
@@ -55,7 +55,7 @@ impl IniConfig for Config {
         ini.with_section(Some(Self::SECTION))
             .set("repeat", self.repeat.to_string())
             .set("color_format", self.color_format.to_index().to_string())
-            .set("lossless", self.lossless.to_string())
+            .set("lossless", u32::from(self.lossless).to_string())
             .set("quality", self.quality.to_string())
             .set("method", self.method.to_string())
             .set("threads", self.threads.to_string());
@@ -118,7 +118,7 @@ mod tests {
 [Config]
 repeat=5
 color_format=1
-lossless=true
+lossless=1
 quality=90
 method=3
 ";
@@ -130,6 +130,38 @@ method=3
         assert!(config.lossless);
         assert_eq!(config.quality, 90.0);
         assert_eq!(config.method, 3);
+    }
+
+    /// 可逆の指定は、iniでは0と1で表す
+    #[test]
+    fn the_lossless_flag_is_read_as_zero_or_one() {
+        assert!(load(&[("lossless", "1")]).lossless);
+        assert!(!load(&[("lossless", "0")]).lossless);
+    }
+
+    /// 0でも1でもない可逆の指定は既定値へ落ちる
+    #[test]
+    fn an_unreadable_lossless_flag_falls_back_to_default() {
+        let default = Config::default().lossless;
+        for value in ["true", "True", "yes", "2", "-1", ""] {
+            assert_eq!(load(&[("lossless", value)]).lossless, default, "{value}");
+        }
+    }
+
+    /// 書き出した可逆の指定は、他の項目と同じ0と1の表現になる
+    #[test]
+    fn the_lossless_flag_is_written_as_zero_or_one() {
+        for (lossless, written) in [(true, "1"), (false, "0")] {
+            let mut ini = Ini::new();
+            Config {
+                lossless,
+                ..Config::default()
+            }
+            .save_to(&mut ini);
+
+            let section = ini.section(Some(Config::SECTION)).unwrap();
+            assert_eq!(section.get("lossless"), Some(written));
+        }
     }
 
     /// 値域の外の品質とメソッドは、エンコーダが受け取れる範囲へ収まる
@@ -171,7 +203,7 @@ method=3
     /// 読めない値の項目だけが既定値へ落ちる
     #[test]
     fn an_unreadable_value_falls_back_on_its_own() {
-        let config = load(&[("repeat", "many"), ("lossless", "true")]);
+        let config = load(&[("repeat", "many"), ("lossless", "1")]);
         let default = Config::default();
 
         assert_eq!(config.repeat, default.repeat);
