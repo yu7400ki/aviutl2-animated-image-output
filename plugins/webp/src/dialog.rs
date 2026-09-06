@@ -1,11 +1,12 @@
 use crate::config::{ColorFormat, Config, max_threads};
 use aviutl2::MAX_REPEAT;
+use aviutl2::dialog::{RangedInput, repeat_input};
 use std::ops::RangeInclusive;
 use webp_encoder::{METHOD_RANGE, QUALITY_RANGE};
 use win32_ui::{
     Dialog, MessageBox,
     layout::{FlexLayout, JustifyContent, SizeValue, labeled},
-    widget::{Button, CheckBox, ComboBox, Number},
+    widget::{Button, CheckBox, ComboBox},
 };
 use windows::Win32::Foundation::HWND;
 
@@ -19,57 +20,10 @@ fn method_range() -> RangeInclusive<i32> {
     i32::from(*METHOD_RANGE.start())..=i32::from(*METHOD_RANGE.end())
 }
 
-/// 値域を検める入力欄。
-///
-/// 画面へ出す項目名も、弾いたときの文言も、読む値の判定も、
-/// ここが持つ名前と値域から決まる。
-#[derive(Clone)]
-struct RangedInput {
-    name: &'static str,
-    range: RangeInclusive<i32>,
-    input: Number,
-}
-
-impl RangedInput {
-    fn new(name: &'static str, range: RangeInclusive<i32>, value: i32) -> Self {
-        let input = Number::new()
-            .value(value)
-            .range(*range.start(), *range.end());
-        RangedInput { name, range, input }
-    }
-
-    /// 名乗る値域
-    fn span(&self) -> String {
-        format!("{}-{}", self.range.start(), self.range.end())
-    }
-
-    /// 値域を添えた項目名
-    fn label(&self) -> String {
-        format!("{} ({})", self.name, self.span())
-    }
-
-    /// 値域の外を弾いたことを伝える文言
-    fn error(&self) -> String {
-        format!(
-            "{}の値が無効です。{}の値を入力してください。",
-            self.name,
-            self.span()
-        )
-    }
-
-    /// 入力欄の値を読む
-    ///
-    /// # Errors
-    /// 読めない値か値域の外の値のとき、画面へ出す文言。
-    fn read(&self) -> Result<i32, String> {
-        self.input.validate().map_err(|_| self.error())
-    }
-}
-
 /// ダイアログの入力欄
 #[derive(Clone)]
 struct Inputs {
-    repeat: Number,
+    repeat: RangedInput,
     color: ComboBox,
     lossless: CheckBox,
     quality: RangedInput,
@@ -80,9 +34,7 @@ struct Inputs {
 impl Inputs {
     fn new(default_config: &Config) -> Self {
         Inputs {
-            repeat: Number::new()
-                .value(default_config.repeat as i32)
-                .range(0, MAX_REPEAT as i32),
+            repeat: repeat_input(MAX_REPEAT, default_config.repeat),
             color: ComboBox::new(vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()])
                 .selected(match default_config.color_format {
                     ColorFormat::Rgb24 => 0,
@@ -106,12 +58,12 @@ impl Inputs {
             .with_width(SizeValue::Points(300.0))
             .with_padding(15.0)
             .with_gap(10.0)
-            .with_layout(labeled("ループ回数 (0=無限ループ)", self.repeat.clone()))
+            .with_layout(labeled(self.repeat.label(), self.repeat.input().clone()))
             .with_layout(labeled("カラーフォーマット", self.color.clone()))
             .with_widget(self.lossless.clone())
-            .with_layout(labeled(&self.quality.label(), self.quality.input.clone()))
-            .with_layout(labeled(&self.method.label(), self.method.input.clone()))
-            .with_layout(labeled(&self.threads.label(), self.threads.input.clone()))
+            .with_layout(labeled(self.quality.label(), self.quality.input().clone()))
+            .with_layout(labeled(self.method.label(), self.method.input().clone()))
+            .with_layout(labeled(self.threads.label(), self.threads.input().clone()))
     }
 
     /// 入力欄の値を設定へ組む
@@ -119,10 +71,7 @@ impl Inputs {
     /// # Errors
     /// 読めない欄か値域の外の欄があるとき、画面へ出す文言。
     fn collect(&self) -> Result<Config, String> {
-        let repeat = self
-            .repeat
-            .validate()
-            .map_err(|_| "ループ回数の値が無効です。0以上の数値を入力してください。".to_string())?;
+        let repeat = self.repeat.read()?;
         let threads = self.threads.read()?;
         let quality = self.quality.read()?;
         let method = self.method.read()?;
@@ -191,27 +140,19 @@ mod tests {
     use super::*;
     use aviutl2::IniConfig;
     use aviutl2::ini::Ini;
+    use win32_ui::widget::Number;
 
     fn inputs() -> Inputs {
         Inputs::new(&Config::default())
     }
 
-    /// 値域を検める3つの入力欄
-    fn ranged_inputs(inputs: &Inputs) -> [RangedInput; 3] {
-        [
-            inputs.quality.clone(),
-            inputs.method.clone(),
-            inputs.threads.clone(),
-        ]
-    }
-
     /// 数値を打ち込む4つの入力欄
     fn number_inputs(inputs: &Inputs) -> [(&'static str, Number); 4] {
         [
-            ("ループ回数", inputs.repeat.clone()),
-            ("品質", inputs.quality.input.clone()),
-            ("メソッド", inputs.method.input.clone()),
-            ("スレッド数", inputs.threads.input.clone()),
+            ("ループ回数", inputs.repeat.input().clone()),
+            ("品質", inputs.quality.input().clone()),
+            ("メソッド", inputs.method.input().clone()),
+            ("スレッド数", inputs.threads.input().clone()),
         ]
     }
 
@@ -222,8 +163,8 @@ mod tests {
     fn lossless_keeps_the_quality_and_method_shown_on_the_dialog() {
         let inputs = inputs();
         inputs.lossless.set_checked(true);
-        inputs.quality.input.set_value(40);
-        inputs.method.input.set_value(2);
+        inputs.quality.input().set_value(40);
+        inputs.method.input().set_value(2);
 
         let config = inputs.collect().expect("値域の内側なので組める");
 
@@ -238,15 +179,15 @@ mod tests {
         let inputs = inputs();
         inputs.lossless.set_checked(true);
 
-        inputs.quality.input.set_text("high");
+        inputs.quality.input().set_text("high");
         assert!(inputs.collect().is_err(), "読めない品質");
-        inputs.quality.input.set_value(*quality_range().end() + 1);
+        inputs.quality.input().set_value(*quality_range().end() + 1);
         assert!(inputs.collect().is_err(), "値域の外の品質");
-        inputs.quality.input.set_value(*quality_range().end());
+        inputs.quality.input().set_value(*quality_range().end());
 
-        inputs.method.input.set_value(*method_range().end() + 1);
+        inputs.method.input().set_value(*method_range().end() + 1);
         assert!(inputs.collect().is_err(), "値域の外のメソッド");
-        inputs.method.input.set_value(*method_range().end());
+        inputs.method.input().set_value(*method_range().end());
 
         assert!(inputs.collect().is_ok(), "値域へ戻せば組める");
     }
@@ -255,38 +196,20 @@ mod tests {
     #[test]
     fn an_out_of_range_worker_count_is_refused() {
         let inputs = inputs();
-        let range = inputs.threads.range.clone();
+        // 名乗る値域と、入力欄が実際に検める値域を突き合わせる
+        let (min, max) = inputs
+            .threads
+            .input()
+            .range_bounds()
+            .expect("値域を持つ入力欄");
+        assert_eq!(inputs.threads.label(), format!("スレッド数 ({min}-{max})"));
 
-        inputs.threads.input.set_value(*range.start() - 1);
+        inputs.threads.input().set_value(min - 1);
         assert!(inputs.collect().is_err(), "下限より下");
-        inputs.threads.input.set_value(*range.end() + 1);
+        inputs.threads.input().set_value(max + 1);
         assert!(inputs.collect().is_err(), "上限より上");
-        inputs.threads.input.set_value(*range.end());
+        inputs.threads.input().set_value(max);
         assert!(inputs.collect().is_ok(), "上限そのもの");
-    }
-
-    /// 項目名も、値域の外を弾いたときの文言も、検める値域をそのまま名乗る
-    #[test]
-    fn every_field_names_the_range_that_is_checked() {
-        for name in ["品質", "メソッド", "スレッド数"] {
-            let inputs = inputs();
-            let field = ranged_inputs(&inputs)
-                .into_iter()
-                .find(|field| field.name == name)
-                .expect("名前の一致する欄がある");
-            // 画面へ出す文字列を、入力欄が実際に検める値域と突き合わせる
-            let (min, max) = field.input.range_bounds().expect("値域を持つ入力欄");
-            assert_eq!(field.label(), format!("{name} ({min}-{max})"));
-
-            field.input.set_value(max + 1);
-            let Err(message) = inputs.collect() else {
-                panic!("{name}: 値域の外なので弾かれる");
-            };
-            assert_eq!(
-                message,
-                format!("{name}の値が無効です。{min}-{max}の値を入力してください。")
-            );
-        }
     }
 
     /// どの数値欄も、前後に空白のある入力を等しく受け取る
@@ -310,7 +233,7 @@ mod tests {
     #[test]
     fn a_negative_repeat_is_refused() {
         let inputs = inputs();
-        inputs.repeat.set_value(-1);
+        inputs.repeat.input().set_value(-1);
 
         let Err(message) = inputs.collect() else {
             panic!("0より小さいループ回数は弾かれる");

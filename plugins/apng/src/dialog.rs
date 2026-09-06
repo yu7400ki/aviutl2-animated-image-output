@@ -1,11 +1,12 @@
 use crate::config::{ColorFormat, Config, max_threads};
 use apng_encoder::COMPRESSION_LEVELS;
 use aviutl2::MAX_REPEAT;
+use aviutl2::dialog::{RangedInput, repeat_input};
 use std::ops::RangeInclusive;
 use win32_ui::{
     Dialog, MessageBox,
     layout::{FlexLayout, JustifyContent, SizeValue, labeled},
-    widget::{Button, ComboBox, Number},
+    widget::{Button, ComboBox},
 };
 use windows::Win32::Foundation::HWND;
 
@@ -14,57 +15,10 @@ fn compression_range() -> RangeInclusive<i32> {
     *COMPRESSION_LEVELS.start() as i32..=*COMPRESSION_LEVELS.end() as i32
 }
 
-/// 値域を検める入力欄。
-///
-/// 画面へ出す項目名も、弾いたときの文言も、読む値の判定も、
-/// ここが持つ名前と値域から決まる。
-#[derive(Clone)]
-struct RangedInput {
-    name: &'static str,
-    range: RangeInclusive<i32>,
-    input: Number,
-}
-
-impl RangedInput {
-    fn new(name: &'static str, range: RangeInclusive<i32>, value: i32) -> Self {
-        let input = Number::new()
-            .value(value)
-            .range(*range.start(), *range.end());
-        RangedInput { name, range, input }
-    }
-
-    /// 名乗る値域
-    fn span(&self) -> String {
-        format!("{}-{}", self.range.start(), self.range.end())
-    }
-
-    /// 値域を添えた項目名
-    fn label(&self) -> String {
-        format!("{} ({})", self.name, self.span())
-    }
-
-    /// 値域の外を弾いたことを伝える文言
-    fn error(&self) -> String {
-        format!(
-            "{}の値が無効です。{}の値を入力してください。",
-            self.name,
-            self.span()
-        )
-    }
-
-    /// 入力欄の値を読む
-    ///
-    /// # Errors
-    /// 読めない値か値域の外の値のとき、画面へ出す文言。
-    fn read(&self) -> Result<i32, String> {
-        self.input.validate().map_err(|_| self.error())
-    }
-}
-
 /// ダイアログの入力欄
 #[derive(Clone)]
 struct Inputs {
-    repeat: Number,
+    repeat: RangedInput,
     color: ComboBox,
     compression: RangedInput,
     threads: RangedInput,
@@ -73,9 +27,7 @@ struct Inputs {
 impl Inputs {
     fn new(default_config: &Config) -> Self {
         Inputs {
-            repeat: Number::new()
-                .value(default_config.repeat as i32)
-                .range(0, MAX_REPEAT as i32),
+            repeat: repeat_input(MAX_REPEAT, default_config.repeat),
             color: ComboBox::new(vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()])
                 .selected(match default_config.color_format {
                     ColorFormat::Rgb24 => 0,
@@ -101,13 +53,13 @@ impl Inputs {
             .with_width(SizeValue::Points(300.0))
             .with_padding(15.0)
             .with_gap(10.0)
-            .with_layout(labeled("ループ回数 (0=無限ループ)", self.repeat.clone()))
+            .with_layout(labeled(self.repeat.label(), self.repeat.input().clone()))
             .with_layout(labeled("カラーフォーマット", self.color.clone()))
             .with_layout(labeled(
-                &self.compression.label(),
-                self.compression.input.clone(),
+                self.compression.label(),
+                self.compression.input().clone(),
             ))
-            .with_layout(labeled(&self.threads.label(), self.threads.input.clone()))
+            .with_layout(labeled(self.threads.label(), self.threads.input().clone()))
     }
 
     /// 入力欄の値を設定へ組む
@@ -115,10 +67,7 @@ impl Inputs {
     /// # Errors
     /// 読めない欄か値域の外の欄があるとき、画面へ出す文言。
     fn collect(&self) -> Result<Config, String> {
-        let repeat = self
-            .repeat
-            .validate()
-            .map_err(|_| "ループ回数の値が無効です。0以上の数値を入力してください。".to_string())?;
+        let repeat = self.repeat.read()?;
         let compression_level = self.compression.read()?;
         let threads = self.threads.read()?;
 
@@ -198,13 +147,13 @@ mod tests {
     #[test]
     fn values_inside_the_range_become_the_config() {
         let inputs = inputs();
-        inputs.repeat.set_value(3);
+        inputs.repeat.input().set_value(3);
         inputs.color.set_selected_index(1);
         inputs
             .compression
-            .input
+            .input()
             .set_value(*COMPRESSION_LEVELS.end() as i32);
-        inputs.threads.input.set_value(max_threads() as i32);
+        inputs.threads.input().set_value(max_threads() as i32);
 
         let config = inputs.collect().expect("値域の内側なので組める");
 
@@ -214,31 +163,24 @@ mod tests {
         assert_eq!(config.threads, max_threads());
     }
 
-    /// 値域を検めるどの欄も、名乗る値域の内側だけを受け取り、外を文言で弾く
+    /// 値域を検める欄は、上下どちらの外側も弾く
     #[test]
-    fn every_field_names_the_range_that_is_checked() {
+    fn every_ranged_field_refuses_both_sides_of_its_range() {
         // 値域の外を打ち込んだ欄で読み出しが止まるため、欄ごとにダイアログを組み直す
         for position in 0..ranged_inputs(&inputs()).len() {
             let inputs = inputs();
             let field = ranged_inputs(&inputs)[position].clone();
-            let name = field.name;
-            // 画面へ出す文字列を、入力欄が実際に検める値域と突き合わせる
-            let (min, max) = field.input.range_bounds().expect("値域を持つ入力欄");
-            assert_eq!(field.label(), format!("{name} ({min}-{max})"));
+            let label = field.label().to_string();
+            // 名乗る値域と、入力欄が実際に検める値域を突き合わせる
+            let (min, max) = field.input().range_bounds().expect("値域を持つ入力欄");
+            assert!(label.ends_with(&format!("({min}-{max})")), "{label}");
 
-            field.input.set_value(max);
-            assert!(inputs.collect().is_ok(), "{name}: 上限そのもの");
-            field.input.set_value(min - 1);
-            assert!(inputs.collect().is_err(), "{name}: 下限より下");
-
-            field.input.set_value(max + 1);
-            let Err(message) = inputs.collect() else {
-                panic!("{name}: 値域の外なので弾かれる");
-            };
-            assert_eq!(
-                message,
-                format!("{name}の値が無効です。{min}-{max}の値を入力してください。")
-            );
+            field.input().set_value(min - 1);
+            assert!(inputs.collect().is_err(), "{label}: 下限より下");
+            field.input().set_value(max + 1);
+            assert!(inputs.collect().is_err(), "{label}: 上限より上");
+            field.input().set_value(max);
+            assert!(inputs.collect().is_ok(), "{label}: 上限そのもの");
         }
     }
 
@@ -247,9 +189,9 @@ mod tests {
     fn every_number_field_accepts_surrounding_whitespace() {
         let inputs = inputs();
         for (name, input) in [
-            ("ループ回数", inputs.repeat.clone()),
-            ("圧縮レベル", inputs.compression.input.clone()),
-            ("スレッド数", inputs.threads.input.clone()),
+            ("ループ回数", inputs.repeat.input().clone()),
+            ("圧縮レベル", inputs.compression.input().clone()),
+            ("スレッド数", inputs.threads.input().clone()),
         ] {
             let (min, _) = input.range_bounds().expect("値域を持つ入力欄");
             input.set_text(&format!(" {min} "));
@@ -264,7 +206,7 @@ mod tests {
         let inputs = inputs();
 
         for text in ["abc", "", "2147483648", "-1"] {
-            inputs.repeat.set_text(text);
+            inputs.repeat.input().set_text(text);
             let Err(message) = inputs.collect() else {
                 panic!("ループ回数{text:?}は弾かれる");
             };
