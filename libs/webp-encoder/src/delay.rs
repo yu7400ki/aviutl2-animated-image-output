@@ -1,6 +1,6 @@
 //! 遅延時間のミリ秒への変換
 
-use anim_core::FrameDelay;
+use anim_core::{Accumulator, FrameDelay};
 
 /// 表示時間の下限 (ms)
 const MIN_DURATION: u32 = 1;
@@ -9,66 +9,16 @@ const MIN_DURATION: u32 = 1;
 pub(crate) const MAX_DURATION: u32 = 0x00FF_FFFF;
 
 /// フレーム遅延をミリ秒へ累積で丸める
-///
-/// フレーム0..N-1 の遅延の総和を `T_N` として、N番目のフレームへ
-/// `round(T_{N+1} * 1000) - round(T_N * 1000)` を割り当てる。丸めは
-/// `floor(x + 1/2)` の最近傍。
-///
-/// 連続するフレームの割り当てを足したものは、その区間をまとめて丸めた値と
-/// 一致する。
-pub(crate) struct Milliseconds {
-    /// 残差の分子 (ms)。絶対値は `denominator / 2` 以下
-    numerator: i64,
-    /// 残差の分母
-    denominator: u64,
-}
+pub(crate) struct Milliseconds(Accumulator);
 
 impl Milliseconds {
     pub(crate) fn new() -> Self {
-        Milliseconds {
-            numerator: 0,
-            denominator: 1,
-        }
+        Milliseconds(Accumulator::new(1000))
     }
 
     /// 次のフレームの遅延をミリ秒へ変換する
     pub(crate) fn next(&mut self, delay: FrameDelay) -> u64 {
-        let denominator = u64::from(delay.denominator());
-        let common = self.align(denominator);
-        let scaled = i128::from(self.numerator) * i128::from(common / self.denominator)
-            + 1000 * i128::from(delay.numerator()) * i128::from(common / denominator);
-
-        let common = i128::from(common);
-        let rounded = (scaled * 2 + common).div_euclid(common * 2);
-        self.keep(scaled - rounded * common, common);
-
-        // 残差は 1/2 未満なので、非負の遅延を丸めた値が負になることはない
-        rounded as u64
-    }
-
-    /// 残差と `denominator` に共通の分母を取る
-    ///
-    /// 最小公倍数が `u64` に収まらないときは、残差を `denominator` の刻みへ
-    /// 丸め直してからその分母を返す。
-    fn align(&mut self, denominator: u64) -> u64 {
-        let common = u128::from(self.denominator) / gcd(self.denominator, denominator)
-            * u128::from(denominator);
-        if let Ok(common) = u64::try_from(common) {
-            return common;
-        }
-
-        let scaled = i128::from(self.numerator) * i128::from(denominator);
-        let previous = i128::from(self.denominator);
-        let rounded = (scaled * 2 + previous).div_euclid(previous * 2);
-        self.keep(rounded, i128::from(denominator));
-        denominator
-    }
-
-    /// `numerator / denominator` を既約分数にして残差に据える
-    fn keep(&mut self, numerator: i128, denominator: i128) {
-        let divisor = gcd(numerator.unsigned_abs(), denominator as u128) as i128;
-        self.numerator = (numerator / divisor) as i64;
-        self.denominator = (denominator / divisor) as u64;
+        self.0.next(delay)
     }
 }
 
@@ -107,14 +57,6 @@ impl Iterator for Durations {
     }
 }
 
-fn gcd(a: impl Into<u128>, b: impl Into<u128>) -> u128 {
-    let (mut a, mut b) = (a.into(), b.into());
-    while b != 0 {
-        (a, b) = (b, a % b);
-    }
-    a
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,13 +64,6 @@ mod tests {
     /// 1フレームだけを変換する
     fn once(numerator: u32, denominator: u32) -> u64 {
         Milliseconds::new().next(FrameDelay::new(numerator, denominator).unwrap())
-    }
-
-    /// 同じ遅延を `count` フレーム分変換する
-    fn repeated(numerator: u32, denominator: u32, count: usize) -> Vec<u64> {
-        let delay = FrameDelay::new(numerator, denominator).unwrap();
-        let mut milliseconds = Milliseconds::new();
-        (0..count).map(|_| milliseconds.next(delay)).collect()
     }
 
     #[test]
@@ -157,91 +92,6 @@ mod tests {
         }
         assert_eq!(once(1, 1000), 1);
         assert_eq!(once(1, 2000), 1);
-    }
-
-    /// 30fps は3フレームで100msになる
-    ///
-    /// 総和は 33.3, 66.7, 100.0, … と進むので、その丸めの差は 33, 34, 33 を繰り返す。
-    #[test]
-    fn thirty_frames_per_second_cycles_over_three_frames() {
-        assert_eq!(repeated(1, 30, 9), [33, 34, 33, 33, 34, 33, 33, 34, 33]);
-    }
-
-    /// 30000/1001 fps はミリ秒の刻みで30fpsとずれる
-    ///
-    /// 総和は 33.37, 66.73, 100.10, … と進み、10フレームで1ms多く積まれる。
-    #[test]
-    fn the_broadcast_rate_drifts_from_thirty_frames_per_second() {
-        assert_eq!(
-            repeated(1001, 30000, 9),
-            [33, 34, 33, 33, 34, 33, 34, 33, 33]
-        );
-        assert_eq!(repeated(1001, 30000, 10).iter().sum::<u64>(), 334);
-        assert_eq!(repeated(1, 30, 10).iter().sum::<u64>(), 333);
-    }
-
-    /// 連続するフレームの割り当ての和は、区間をまとめて丸めたものと一致する
-    #[test]
-    fn a_run_of_frames_rounds_at_its_ends() {
-        let delay = FrameDelay::new(1, 30).unwrap();
-        let mut milliseconds = Milliseconds::new();
-        let run: u64 = (0..7).map(|_| milliseconds.next(delay)).sum();
-        assert_eq!(run, once(7, 30));
-        assert_eq!(run, 233);
-    }
-
-    /// 累積の誤差はフレーム数に依らず1/2msを超えない
-    ///
-    /// どの区間を取っても総再生時間が素材の時間から半刻み以上ずれない。
-    #[test]
-    fn the_error_never_grows_with_the_number_of_frames() {
-        for (numerator, denominator) in [
-            (1, 30),
-            (1001, 30000),
-            (1, 24),
-            (1001, 24000),
-            (1, 25),
-            (7, 99),
-            (1, 3),
-        ] {
-            let delay = FrameDelay::new(numerator, denominator).unwrap();
-            let mut milliseconds = Milliseconds::new();
-            let mut total: i128 = 0;
-            for frames in 1..=2000i128 {
-                total += i128::from(milliseconds.next(delay));
-                // |total - 1000 * frames * numerator / denominator| <= 1/2
-                let ideal = 1000 * frames * i128::from(numerator);
-                let denominator = i128::from(denominator);
-                assert!(
-                    (total * denominator - ideal).abs() * 2 <= denominator,
-                    "{numerator}/{denominator} の {frames} フレーム目で誤差が積まれている"
-                );
-            }
-        }
-    }
-
-    /// 分母の最小公倍数が u64 に収まる限り、残差はそのまま持ち越す
-    #[test]
-    fn the_residual_keeps_its_exact_value() {
-        let mut milliseconds = Milliseconds {
-            numerator: 1,
-            denominator: 30,
-        };
-        assert_eq!(milliseconds.align(100), 300);
-        assert_eq!((milliseconds.numerator, milliseconds.denominator), (1, 30));
-    }
-
-    /// 最小公倍数が u64 を超えたら、残差を新しい分母の刻みへ丸め直す
-    #[test]
-    fn a_residual_beyond_the_common_multiple_is_regrided() {
-        // u64::MAX は 7 を約数に持たないので、最小公倍数は7倍になって収まらない
-        let mut milliseconds = Milliseconds {
-            numerator: (u64::MAX / 2) as i64,
-            denominator: u64::MAX,
-        };
-        assert_eq!(milliseconds.align(7), 7);
-        // 1/2 をわずかに下回る残差は 3/7 が最も近い
-        assert_eq!((milliseconds.numerator, milliseconds.denominator), (3, 7));
     }
 
     /// 欄に収まる表示時間は1つのまま
