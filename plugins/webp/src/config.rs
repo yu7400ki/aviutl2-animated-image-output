@@ -1,16 +1,7 @@
 pub use aviutl2::ColorFormat;
 use aviutl2::ini::{Ini, Properties};
-use aviutl2::{IniConfig, MAX_REPEAT, read};
-use std::num::NonZeroUsize;
-use std::thread::available_parallelism;
+use aviutl2::{IniConfig, MAX_REPEAT, default_threads, max_threads, read};
 use webp_encoder::{METHOD_RANGE, QUALITY_RANGE};
-
-/// 設定が採れるスレッド数の上限
-///
-/// この機械の論理CPU数。読めなければ1を返す。
-pub fn max_threads() -> usize {
-    available_parallelism().map_or(1, NonZeroUsize::get)
-}
 
 #[derive(Clone)]
 pub struct Config {
@@ -30,7 +21,7 @@ impl Default for Config {
             lossless: false,
             quality: 75.0,
             method: 4,
-            threads: (max_threads() / 2).max(1),
+            threads: default_threads(),
         }
     }
 }
@@ -175,25 +166,6 @@ method=3
 
         assert_eq!(load(&[("threads", "0")]).threads, 1);
         assert_eq!(load(&[("threads", &over)]).threads, max_threads());
-    }
-
-    /// 既定のスレッド数は上限の内側で控えめに採る
-    ///
-    /// 上限をそのまま採ると、書き出しが機械を独り占めする。上限が1の機械では
-    /// 1つしか採れないので、そこだけ上限と一致する。
-    #[test]
-    fn the_default_threads_stay_inside_the_ceiling() {
-        let default = Config::default().threads;
-        let ceiling = max_threads();
-
-        assert!(default >= 1, "{default}");
-        assert!(default <= ceiling, "{default} / {ceiling}");
-        if ceiling >= 2 {
-            assert!(
-                default < ceiling,
-                "上限をそのまま採っている: {default} / {ceiling}"
-            );
-        }
     }
 
     /// 読めない値の項目だけが既定値へ落ちる

@@ -1,16 +1,7 @@
 pub use aviutl2::ColorFormat;
 use aviutl2::ini::{Ini, Properties};
-use aviutl2::{IniConfig, MAX_REPEAT, read};
-use std::num::NonZeroUsize;
+use aviutl2::{IniConfig, MAX_REPEAT, default_threads, max_threads, read};
 use std::str::FromStr;
-use std::thread::available_parallelism;
-
-/// 設定が採れるスレッド数の上限
-///
-/// この機械の論理CPU数。読めなければ1を返す。
-pub fn max_threads() -> usize {
-    available_parallelism().map_or(1, NonZeroUsize::get)
-}
 
 #[derive(Copy, Clone, PartialEq, Default)]
 pub enum YuvFormat {
@@ -81,7 +72,7 @@ impl Default for Config {
             speed: 6,
             color_format: ColorFormat::default(),
             yuv_format: YuvFormat::default(),
-            threads: (max_threads() / 2).max(1),
+            threads: default_threads(),
         }
     }
 }

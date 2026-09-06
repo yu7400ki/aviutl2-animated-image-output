@@ -1,6 +1,6 @@
-use crate::config::{ColorFormat, Config, max_threads};
-use aviutl2::MAX_REPEAT;
+use crate::config::{ColorFormat, Config};
 use aviutl2::dialog::{RangedInput, repeat_input};
+use aviutl2::{MAX_REPEAT, max_threads};
 use std::ops::RangeInclusive;
 use webp_encoder::{METHOD_RANGE, QUALITY_RANGE};
 use win32_ui::{

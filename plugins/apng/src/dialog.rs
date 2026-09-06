@@ -1,7 +1,7 @@
-use crate::config::{ColorFormat, Config, max_threads};
+use crate::config::{ColorFormat, Config};
 use apng_encoder::COMPRESSION_LEVELS;
-use aviutl2::MAX_REPEAT;
 use aviutl2::dialog::{RangedInput, repeat_input};
+use aviutl2::{MAX_REPEAT, max_threads};
 use std::ops::RangeInclusive;
 use win32_ui::{
     Dialog, MessageBox,
