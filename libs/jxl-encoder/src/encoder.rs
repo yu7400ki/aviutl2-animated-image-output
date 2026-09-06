@@ -257,7 +257,7 @@ impl<W: Write> Encoder<W> {
             raw,
             settings,
             format: JxlPixelFormat {
-                num_channels: layout.bytes_per_pixel as u32,
+                num_channels: layout.color_type.bytes_per_pixel() as u32,
                 data_type: JXL_TYPE_UINT8,
                 endianness: JXL_NATIVE_ENDIAN,
                 align: 0,
