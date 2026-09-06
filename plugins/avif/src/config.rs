@@ -1,6 +1,6 @@
 pub use aviutl2::ColorFormat;
 use aviutl2::ini::{Ini, Properties};
-use aviutl2::{IniConfig, MAX_REPEAT};
+use aviutl2::{IniConfig, MAX_REPEAT, read};
 use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::thread::available_parallelism;
@@ -92,39 +92,12 @@ impl IniConfig for Config {
     fn load_from(section: Option<&Properties>) -> Self {
         let default = Self::default();
 
-        let repeat = section
-            .and_then(|s| s.get("repeat"))
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(default.repeat)
-            .min(MAX_REPEAT);
-
-        let quality = section
-            .and_then(|s| s.get("quality"))
-            .and_then(|s| s.parse::<u8>().ok())
-            .unwrap_or(default.quality)
-            .clamp(0, 100);
-
-        let speed = section
-            .and_then(|s| s.get("speed"))
-            .and_then(|s| s.parse::<u8>().ok())
-            .unwrap_or(default.speed)
-            .clamp(0, 10);
-
-        let color_format = section
-            .and_then(|s| s.get("color_format"))
-            .and_then(|s| s.parse::<ColorFormat>().ok())
-            .unwrap_or_default();
-
-        let yuv_format = section
-            .and_then(|s| s.get("yuv_format"))
-            .and_then(|s| s.parse::<YuvFormat>().ok())
-            .unwrap_or_default();
-
-        let threads = section
-            .and_then(|s| s.get("threads"))
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(default.threads)
-            .clamp(1, max_threads());
+        let repeat = read(section, "repeat", default.repeat).min(MAX_REPEAT);
+        let quality = read(section, "quality", default.quality).clamp(0, 100);
+        let speed = read(section, "speed", default.speed).clamp(0, 10);
+        let color_format = read(section, "color_format", default.color_format);
+        let yuv_format = read(section, "yuv_format", default.yuv_format);
+        let threads = read(section, "threads", default.threads).clamp(1, max_threads());
 
         Self {
             repeat,

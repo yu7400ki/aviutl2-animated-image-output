@@ -1,6 +1,6 @@
 pub use aviutl2::ColorFormat;
 use aviutl2::ini::{Ini, Properties};
-use aviutl2::{IniConfig, MAX_REPEAT};
+use aviutl2::{IniConfig, MAX_REPEAT, read};
 use jxl_encoder::{EFFORT_RANGE, QUALITY_RANGE};
 use std::thread::available_parallelism;
 
@@ -38,34 +38,13 @@ impl IniConfig for Config {
     fn load_from(section: Option<&Properties>) -> Self {
         let default = Self::default();
 
-        let repeat = section
-            .and_then(|s| s.get("repeat"))
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(default.repeat)
-            .min(MAX_REPEAT);
-
-        let color_format = section
-            .and_then(|s| s.get("color_format"))
-            .and_then(|s| s.parse::<ColorFormat>().ok())
-            .unwrap_or_default();
-
-        let quality = section
-            .and_then(|s| s.get("quality"))
-            .and_then(|s| s.parse::<f32>().ok())
-            .unwrap_or(default.quality)
+        let repeat = read(section, "repeat", default.repeat).min(MAX_REPEAT);
+        let color_format = read(section, "color_format", default.color_format);
+        let quality = read(section, "quality", default.quality)
             .clamp(*QUALITY_RANGE.start(), *QUALITY_RANGE.end());
-
-        let effort = section
-            .and_then(|s| s.get("effort"))
-            .and_then(|s| s.parse::<u8>().ok())
-            .unwrap_or(default.effort)
+        let effort = read(section, "effort", default.effort)
             .clamp(*EFFORT_RANGE.start(), *EFFORT_RANGE.end());
-
-        let threads = section
-            .and_then(|s| s.get("threads"))
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(default.threads)
-            .clamp(1, max_threads());
+        let threads = read(section, "threads", default.threads).clamp(1, max_threads());
 
         Self {
             repeat,

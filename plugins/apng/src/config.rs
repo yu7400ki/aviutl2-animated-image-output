@@ -1,7 +1,7 @@
 use apng_encoder::COMPRESSION_LEVELS;
 pub use aviutl2::ColorFormat;
 use aviutl2::ini::{Ini, Properties};
-use aviutl2::{IniConfig, MAX_REPEAT};
+use aviutl2::{IniConfig, MAX_REPEAT, read};
 use std::num::NonZeroUsize;
 use std::thread::available_parallelism;
 
@@ -37,28 +37,17 @@ impl IniConfig for Config {
     fn load_from(section: Option<&Properties>) -> Self {
         let default = Self::default();
 
-        let repeat = section
-            .and_then(|s| s.get("repeat"))
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(default.repeat)
-            .min(MAX_REPEAT);
+        let repeat = read(section, "repeat", default.repeat).min(MAX_REPEAT);
+        let color_format = read(section, "color_format", default.color_format);
 
-        let color_format = section
-            .and_then(|s| s.get("color_format"))
-            .and_then(|s| s.parse::<ColorFormat>().ok())
-            .unwrap_or(default.color_format);
+        let compression_level = read(section, "compression_level", default.compression_level);
+        let compression_level = if COMPRESSION_LEVELS.contains(&compression_level) {
+            compression_level
+        } else {
+            default.compression_level
+        };
 
-        let compression_level = section
-            .and_then(|s| s.get("compression_level"))
-            .and_then(|s| s.parse::<u32>().ok())
-            .filter(|level| COMPRESSION_LEVELS.contains(level))
-            .unwrap_or(default.compression_level);
-
-        let threads = section
-            .and_then(|s| s.get("threads"))
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(default.threads)
-            .clamp(1, max_threads());
+        let threads = read(section, "threads", default.threads).clamp(1, max_threads());
 
         Self {
             repeat,

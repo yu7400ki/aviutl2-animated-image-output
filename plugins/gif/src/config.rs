@@ -1,6 +1,6 @@
 pub use aviutl2::ColorFormat;
-use aviutl2::IniConfig;
 use aviutl2::ini::{Ini, Properties};
+use aviutl2::{IniConfig, read};
 
 #[derive(Clone, Default)]
 pub struct Config {
@@ -14,15 +14,8 @@ impl IniConfig for Config {
     fn load_from(section: Option<&Properties>) -> Self {
         let default = Self::default();
 
-        let repeat = section
-            .and_then(|s| s.get("repeat"))
-            .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(default.repeat);
-
-        let color_format = section
-            .and_then(|s| s.get("color_format"))
-            .and_then(|s| s.parse::<ColorFormat>().ok())
-            .unwrap_or(default.color_format);
+        let repeat = read(section, "repeat", default.repeat);
+        let color_format = read(section, "color_format", default.color_format);
 
         Self {
             repeat,
