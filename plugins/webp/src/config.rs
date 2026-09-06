@@ -194,13 +194,6 @@ method=3
         }
     }
 
-    /// 負のループ回数は既定値へ落ちる
-    #[test]
-    fn a_negative_repeat_falls_back_to_default() {
-        let default = Config::default();
-        assert_eq!(load(&[("repeat", "-5")]).repeat, default.repeat);
-    }
-
     /// ANIMのループ数欄に収まらないループ回数は、収まる上限へ丸められる
     #[test]
     fn out_of_range_num_plays_are_clamped() {
@@ -208,6 +201,7 @@ method=3
 
         assert_eq!(load(&[("repeat", "3000000000")]).repeat, ceiling);
         assert_eq!(load(&[("repeat", "70000")]).repeat, ceiling);
+        assert_eq!(load(&[("repeat", "-5")]).repeat, 0);
         assert_eq!(load(&[("repeat", "3")]).repeat, 3);
     }
 

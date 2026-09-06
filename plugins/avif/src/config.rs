@@ -182,7 +182,7 @@ mod tests {
     /// 値域の外の品質と速度は、エンコーダが受け取れる範囲へ収まる
     #[test]
     fn out_of_range_quality_and_speed_are_clamped() {
-        let config = load(&[("quality", "200"), ("speed", "99")]);
+        let config = load(&[("quality", "1000"), ("speed", "99")]);
 
         assert_eq!(config.quality, *QUALITY_RANGE.end());
         assert_eq!(config.speed, *SPEED_RANGE.end());

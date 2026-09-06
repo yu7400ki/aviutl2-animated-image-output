@@ -64,7 +64,7 @@ where
     else {
         return default;
     };
-    T::try_from(value.clamp(min, max)).unwrap_or(default)
+    T::try_from(value.max(min).min(max)).unwrap_or(default)
 }
 
 /// セクションからキーを読み、`0` を偽・`1` を真として解釈する
