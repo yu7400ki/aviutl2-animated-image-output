@@ -217,7 +217,7 @@ impl<W: Write> Encoder<W> {
     ///
     /// # Errors
     /// 幅・高さ・フレーム数が0のとき、1フレームのバイト数が `usize` で表現できないとき、
-    /// 圧縮レベルが範囲外のとき、または書き出しに失敗したとき。
+    /// 圧縮レベルが範囲外のとき、スレッドを起こせないとき、または書き出しに失敗したとき。
     pub fn new(
         writer: W,
         width: u32,
@@ -236,7 +236,7 @@ impl<W: Write> Encoder<W> {
     /// 同じになる。
     ///
     /// # Errors
-    /// [`Encoder::new`] と同じ。加えてスレッドを起こせないとき。
+    /// [`Encoder::new`] と同じ。
     pub fn with_workers(
         writer: W,
         width: u32,
