@@ -11,8 +11,6 @@ pub enum Error {
     InvalidFrameCount,
     /// 1フレームのバイト数が `usize` で表現できない
     ImageTooLarge { width: u32, height: u32 },
-    /// フレーム遅延の分母が0
-    InvalidFrameDelay,
     /// フレームのバイト数が `幅 * 高さ * チャンネル数` と一致しない
     FrameSizeMismatch { expected: usize, actual: usize },
     /// 投入されたフレーム数が宣言したフレーム数と一致しない
@@ -33,7 +31,6 @@ impl fmt::Display for Error {
             Error::ImageTooLarge { width, height } => {
                 write!(f, "画像が大きすぎます: {width}x{height}")
             }
-            Error::InvalidFrameDelay => write!(f, "フレーム遅延の分母が0です"),
             Error::FrameSizeMismatch { expected, actual } => {
                 write!(
                     f,
@@ -57,14 +54,6 @@ impl std::error::Error for Error {
         match self {
             Error::Io(e) => Some(e),
             _ => None,
-        }
-    }
-}
-
-impl From<anim_core::Error> for Error {
-    fn from(e: anim_core::Error) -> Self {
-        match e {
-            anim_core::Error::InvalidFrameDelay => Error::InvalidFrameDelay,
         }
     }
 }
