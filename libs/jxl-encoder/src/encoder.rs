@@ -272,7 +272,8 @@ impl<W: Write> Encoder<W> {
     /// フレームを1つ投入する
     ///
     /// `data` は [`Config::color_type`] の画素が左上から右下へ隙間なく並んで
-    /// いること。渡した面はそのままエンコーダが抱える。`duration` は
+    /// いること。書き直す範囲を持つ面は渡したものをそのままエンコーダが抱える。
+    /// `duration` は
     /// [`Config::tps_numerator`] と [`Config::tps_denominator`] が決める tick 数の
     /// 表示時間で、静止画では書かれない。
     ///

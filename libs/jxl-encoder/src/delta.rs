@@ -332,7 +332,6 @@ impl Delta {
         };
 
         self.stage(layout, pending.shape);
-        // 直前に投入されたフレームが2つ前のキャンバスになる
         self.canvas = std::mem::replace(&mut self.previous, data);
         self.pending = Some(Pending {
             shape,
