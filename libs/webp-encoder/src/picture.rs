@@ -48,7 +48,7 @@ impl Picture {
             return Err(Error::Encode(EncodingError::BadDimension));
         };
 
-        let mut raw = MaybeUninit::<WebPPicture>::uninit();
+        let mut raw = MaybeUninit::<WebPPicture>::zeroed();
         if unsafe { WebPPictureInitARGB(raw.as_mut_ptr()) } == 0 {
             return Err(Error::Encode(EncodingError::InvalidConfiguration));
         }
@@ -110,7 +110,8 @@ struct MemoryWriter {
 
 impl MemoryWriter {
     fn new() -> Self {
-        let mut raw = MaybeUninit::<WebPMemoryWriter>::uninit();
+        // `WebPMemoryWriterInit` が書かない欄は0のまま残る
+        let mut raw = MaybeUninit::<WebPMemoryWriter>::zeroed();
         unsafe { WebPMemoryWriterInit(raw.as_mut_ptr()) };
         MemoryWriter {
             raw: unsafe { raw.assume_init() },

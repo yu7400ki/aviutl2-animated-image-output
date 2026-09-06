@@ -138,7 +138,8 @@ impl Codec {
     /// # Errors
     /// 写した設定が値域に収まらないとき [`Error::Encode`]。
     pub(crate) fn new(config: &Config) -> Result<Self, Error> {
-        let mut raw = MaybeUninit::<WebPConfig>::uninit();
+        // `WebPConfigInit` が書かない欄は0のまま残る
+        let mut raw = MaybeUninit::<WebPConfig>::zeroed();
         if unsafe { WebPConfigInit(raw.as_mut_ptr()) } == 0 {
             return Err(Error::Encode(EncodingError::InvalidConfiguration));
         }

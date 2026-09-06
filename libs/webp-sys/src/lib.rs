@@ -333,14 +333,14 @@ mod tests {
 
     #[test]
     fn an_initialized_picture_selects_argb_input() {
-        let mut picture = MaybeUninit::<WebPPicture>::uninit();
+        let mut picture = MaybeUninit::<WebPPicture>::zeroed();
         assert_ne!(unsafe { WebPPictureInitARGB(picture.as_mut_ptr()) }, 0);
         assert_eq!(unsafe { picture.assume_init() }.use_argb, 1);
     }
 
     #[test]
     fn an_initialized_config_is_valid() {
-        let mut config = MaybeUninit::<WebPConfig>::uninit();
+        let mut config = MaybeUninit::<WebPConfig>::zeroed();
         assert_ne!(unsafe { WebPConfigInit(config.as_mut_ptr()) }, 0);
         assert_ne!(unsafe { WebPValidateConfig(config.as_ptr()) }, 0);
     }
@@ -352,11 +352,11 @@ mod tests {
         let (width, height) = (32, 32);
         let rgba = vec![0x40u8; (width * height * 4) as usize];
 
-        let mut config = MaybeUninit::<WebPConfig>::uninit();
+        let mut config = MaybeUninit::<WebPConfig>::zeroed();
         assert_ne!(unsafe { WebPConfigInit(config.as_mut_ptr()) }, 0);
         let config = unsafe { config.assume_init() };
 
-        let mut picture = MaybeUninit::<WebPPicture>::uninit();
+        let mut picture = MaybeUninit::<WebPPicture>::zeroed();
         assert_ne!(unsafe { WebPPictureInitARGB(picture.as_mut_ptr()) }, 0);
         let mut picture = unsafe { picture.assume_init() };
         picture.width = width;
@@ -367,7 +367,7 @@ mod tests {
         );
         assert_eq!(picture.use_argb, 1);
 
-        let mut memory = MaybeUninit::<WebPMemoryWriter>::uninit();
+        let mut memory = MaybeUninit::<WebPMemoryWriter>::zeroed();
         unsafe { WebPMemoryWriterInit(memory.as_mut_ptr()) };
         let mut memory = unsafe { memory.assume_init() };
         picture.writer = Some(WebPMemoryWrite);
