@@ -19,7 +19,7 @@ const SINGLE_PIXEL: Rect = Rect {
     height: 1,
 };
 
-/// 写した入力の載せ方と、保留中のフレームの廃棄方法
+/// 据えた入力の載せ方と、保留中のフレームの廃棄方法
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Placement {
     /// キャンバス上の矩形。`x` と `y` は偶数
@@ -34,7 +34,7 @@ pub(crate) struct Placement {
 ///
 /// どれも `stride` バイトの行が隙間なく並ぶRGBA。
 struct Sheets<'a> {
-    /// 正規化して写した入力
+    /// 正規化して据えた入力
     staged: &'a mut Vec<u8>,
     /// 前のフレームを描いた画素
     drawn: &'a mut Vec<u8>,
@@ -45,17 +45,17 @@ struct Sheets<'a> {
 }
 
 impl Sheets<'_> {
-    /// 写した入力を重ねる先の面
+    /// 据えた入力を重ねる先の面
     fn base(&self, dispose: bool) -> &[u8] {
         if dispose { self.disposed } else { self.drawn }
     }
 
-    /// 写した入力と `base` の差分矩形。オフセットは偶数へ寄る
+    /// 据えた入力と `base` の差分矩形。オフセットは偶数へ寄る
     fn exact(&self, base: &[u8]) -> Option<Rect> {
         dirty_rect(base, self.staged, self.stride, PIXEL).map(snap_to_even)
     }
 
-    /// `rect` の中の写した入力を、重ねる先の面へ重ねられるか
+    /// `rect` の中の据えた入力を、重ねる先の面へ重ねられるか
     ///
     /// 完全不透明な画素はそのまま置き換わる。残る画素は `mixes` が分ける。
     fn blendable(&self, rect: Rect, dispose: bool, mixes: impl Fn(&[u8], &[u8]) -> bool) -> bool {
@@ -89,7 +89,7 @@ impl Sheets<'_> {
         }
     }
 
-    /// 写した入力を描いた面と、そこから `rect` を抜いた面へ進める
+    /// 据えた入力を描いた面と、そこから `rect` を抜いた面へ進める
     fn draw(&mut self, rect: Rect) {
         std::mem::swap(self.drawn, self.staged);
         self.dispose(rect);
@@ -111,7 +111,7 @@ impl Sheets<'_> {
 
 /// 差分矩形を決めるとき比べる相手
 ///
-/// どちらも写した入力どうしを比べる。直前のフレームの画素を残す土台だけが、
+/// どちらも据えた入力どうしを比べる。直前のフレームの画素を残す土台だけが、
 /// そのフレームが書いた画素をもう1回ぶん引き継ぐ。
 enum Basis {
     /// 厳密に一致しない画素を書き直す
@@ -121,7 +121,7 @@ enum Basis {
 }
 
 impl Basis {
-    /// 写した入力の載せ方を決め、その矩形を書いた後の状態へ進める
+    /// 据えた入力の載せ方を決め、その矩形を書いた後の状態へ進める
     ///
     /// `disposable` は、矩形を抜く廃棄方法を載せられるフレームが保留されて
     /// いること。
@@ -169,7 +169,7 @@ pub(crate) struct Canvas {
     drawn: Vec<u8>,
     /// [`Self::drawn`] から前のフレームの矩形を抜いた画素
     disposed: Vec<u8>,
-    /// 正規化して写した入力
+    /// 正規化して据えた入力
     staged: Vec<u8>,
     /// キャンバス全体を覆う矩形
     whole: Rect,
@@ -192,46 +192,46 @@ impl Canvas {
         Canvas {
             drawn: Vec::new(),
             disposed: Vec::new(),
-            staged: Vec::with_capacity(stride * layout.height as usize),
+            staged: Vec::new(),
             whole: layout.whole(),
             stride,
             basis,
         }
     }
 
-    /// 入力を正規化してRGBAへ写す
+    /// RGBAの入力を正規化して据える
     ///
-    /// `data` は `color_type` の画素が [`Layout`] のとおりに並んでいること。
-    pub(crate) fn stage(&mut self, data: &[u8], color_type: ColorType) {
+    /// `data` は画素が [`Layout`] のとおりに並んでいること。
+    pub(crate) fn stage(&mut self, data: Vec<u8>) {
+        self.staged = data;
+        normalize(&mut self.staged);
+    }
+
+    /// RGBの入力をRGBAへ広げて据える
+    ///
+    /// `data` は画素が [`Layout`] のとおりに並んでいること。
+    pub(crate) fn expand(&mut self, data: &[u8]) {
         self.staged.clear();
-        match color_type {
-            ColorType::Rgba8 => {
-                self.staged.extend_from_slice(data);
-                normalize(&mut self.staged);
-            }
-            ColorType::Rgb8 => {
-                self.staged.reserve(data.len() / 3 * PIXEL);
-                for pixel in data.chunks_exact(3) {
-                    self.staged
-                        .extend_from_slice(&[pixel[0], pixel[1], pixel[2], OPAQUE]);
-                }
-            }
+        self.staged.reserve(data.len() / 3 * PIXEL);
+        for pixel in data.chunks_exact(3) {
+            self.staged
+                .extend_from_slice(&[pixel[0], pixel[1], pixel[2], OPAQUE]);
         }
     }
 
-    /// 写した入力 (RGBA)
+    /// 据えた入力 (RGBA)
     pub(crate) fn staged(&self) -> &[u8] {
         &self.staged
     }
 
-    /// 写した入力を重ねる先のキャンバス
+    /// 据えた入力を重ねる先のキャンバス
     ///
     /// `dispose` は保留中のフレームの矩形を抜くかどうか。
     pub(crate) fn base(&self, dispose: bool) -> &[u8] {
         if dispose { &self.disposed } else { &self.drawn }
     }
 
-    /// 写した入力の載せ方を決める
+    /// 据えた入力の載せ方を決める
     ///
     /// `disposable` は、矩形を抜く廃棄方法を載せられるフレームが保留されて
     /// いること。抜いた側の矩形が狭ければそちらを採る。書き直す画素が1つも
@@ -360,10 +360,10 @@ mod tests {
         settings(color_type, true)
     }
 
-    /// フレームを1つ据えたキャンバス
+    /// RGBAのフレームを1つ据えたキャンバス
     fn canvas_with(layout: &Layout, data: &[u8]) -> Canvas {
         let mut canvas = Canvas::new(layout, &lossless(layout.color_type));
-        canvas.stage(data, layout.color_type);
+        canvas.stage(data.to_vec());
         let placement = canvas.place(false).expect("先頭フレームは全面を持つ");
         canvas.commit(placement);
         canvas
@@ -413,13 +413,13 @@ mod tests {
 
         for lossless in [true, false] {
             let mut canvas = Canvas::new(&layout, &settings(layout.color_type, lossless));
-            canvas.stage(&first, ColorType::Rgba8);
+            canvas.stage(first.clone());
             let placement = canvas.place(false).expect("先頭フレームは全面を持つ");
             assert_eq!(placement.rect, layout.whole(), "可逆{lossless}");
             canvas.drawn = canvas.staged.clone();
             canvas.disposed = vec![0; canvas.staged.len()];
 
-            canvas.stage(&second, ColorType::Rgba8);
+            canvas.stage(second.clone());
             let placement = canvas.place(false).expect("対角の色が変わっている");
             assert_eq!(placement.rect, layout.whole(), "可逆{lossless}");
             assert_eq!(placement.blend, lossless, "可逆{lossless}");
@@ -497,7 +497,7 @@ mod tests {
         ];
 
         for (index, frame) in frames.iter().enumerate() {
-            canvas.stage(frame, ColorType::Rgba8);
+            canvas.stage(frame.clone());
             let placement = canvas.place(index > 0).expect("四角が動いている");
             assert_eq!(placement, expected[index], "フレーム{index}");
             canvas.commit(placement);
@@ -516,12 +516,12 @@ mod tests {
         let frames = [(2, 2), (6, 6), (10, 10)]
             .map(|at| repainted(&base, layout.width, at, 4, [9, 9, 9, OPAQUE]));
 
-        canvas.stage(&frames[0], ColorType::Rgba8);
+        canvas.stage(frames[0].clone());
         let placement = canvas.place(false).expect("先頭フレームは全面を持つ");
         canvas.commit(placement);
 
         // 2枚目は旧位置と新位置を覆う
-        canvas.stage(&frames[1], ColorType::Rgba8);
+        canvas.stage(frames[1].clone());
         let placement = canvas.place(true).expect("四角が動いている");
         assert_eq!(
             placement.rect,
@@ -535,7 +535,7 @@ mod tests {
         canvas.commit(placement);
 
         // 3枚目は2枚目が書いた範囲まで戻る
-        canvas.stage(&frames[2], ColorType::Rgba8);
+        canvas.stage(frames[2].clone());
         let placement = canvas.place(true).expect("四角が動いている");
         assert_eq!(
             placement.rect,
@@ -568,7 +568,7 @@ mod tests {
         for lossless in [true, false] {
             let mut canvas = Canvas::new(&layout, &settings(layout.color_type, lossless));
             for (index, frame) in frames.iter().enumerate() {
-                canvas.stage(frame, ColorType::Rgba8);
+                canvas.stage(frame.clone());
                 let placement = canvas.place(index > 0).expect("フレームごとに画素が変わる");
                 canvas.commit(placement);
 
@@ -635,7 +635,7 @@ mod tests {
     fn the_first_frame_covers_the_whole_canvas() {
         let layout = layout(ColorType::Rgba8);
         let mut canvas = Canvas::new(&layout, &lossless(layout.color_type));
-        canvas.stage(&vec![0; layout.frame_len], ColorType::Rgba8);
+        canvas.stage(vec![0; layout.frame_len]);
 
         assert_eq!(
             canvas.place(false),
@@ -653,7 +653,7 @@ mod tests {
         let data = ramp(layout.width, layout.height);
         let mut canvas = canvas_with(&layout, &data);
 
-        canvas.stage(&data, ColorType::Rgba8);
+        canvas.stage(data.clone());
         assert_eq!(canvas.place(true), None);
     }
 
@@ -668,7 +668,7 @@ mod tests {
 
         let mut canvas = canvas_with(&layout, &first);
 
-        canvas.stage(&second, ColorType::Rgba8);
+        canvas.stage(second.clone());
         assert_eq!(canvas.place(true), None);
     }
 
@@ -682,7 +682,7 @@ mod tests {
         let mut changed = data.clone();
         let at = (3 * 8 + 5) * 4;
         changed[at..at + 4].copy_from_slice(&[1, 2, 3, 255]);
-        canvas.stage(&changed, ColorType::Rgba8);
+        canvas.stage(changed.clone());
 
         let placement = canvas.place(true).expect("変わった画素がある");
         assert_eq!(
@@ -702,7 +702,7 @@ mod tests {
         let layout = layout(ColorType::Rgb8);
         let data: Vec<u8> = (0..layout.frame_len as u8).collect();
         let mut canvas = Canvas::new(&layout, &lossless(layout.color_type));
-        canvas.stage(&data, ColorType::Rgb8);
+        canvas.expand(&data);
 
         let expected: Vec<u8> = data
             .chunks_exact(3)
@@ -720,13 +720,13 @@ mod tests {
         second[0] ^= 0xFF;
 
         let mut canvas = canvas_with(&layout, &first);
-        canvas.stage(&second, ColorType::Rgba8);
+        canvas.stage(second.clone());
         let placement = canvas.place(false).expect("画素が1つ変わっている");
         canvas.commit(placement);
 
-        canvas.stage(&second, ColorType::Rgba8);
+        canvas.stage(second.clone());
         assert_eq!(canvas.place(false), None);
-        canvas.stage(&first, ColorType::Rgba8);
+        canvas.stage(first.clone());
         assert!(canvas.place(false).is_some());
     }
 
@@ -736,7 +736,7 @@ mod tests {
         let layout = Layout::new(16, 16, ColorType::Rgba8).unwrap();
         let mut canvas = canvas_with(&layout, &sprite(16, 16, (0, 0), 4, OPAQUE));
 
-        canvas.stage(&sprite(16, 16, (10, 10), 4, OPAQUE), ColorType::Rgba8);
+        canvas.stage(sprite(16, 16, (10, 10), 4, OPAQUE));
         assert_eq!(
             canvas.place(true),
             Some(Placement {
@@ -758,7 +758,7 @@ mod tests {
         let layout = Layout::new(16, 16, ColorType::Rgba8).unwrap();
         let mut canvas = canvas_with(&layout, &sprite(16, 16, (0, 0), 4, OPAQUE));
 
-        canvas.stage(&sprite(16, 16, (10, 10), 4, OPAQUE), ColorType::Rgba8);
+        canvas.stage(sprite(16, 16, (10, 10), 4, OPAQUE));
         assert_eq!(
             canvas.place(false),
             Some(Placement {
@@ -779,14 +779,14 @@ mod tests {
     fn a_frame_equal_to_the_disposed_canvas_takes_a_single_pixel() {
         let layout = Layout::new(16, 16, ColorType::Rgba8).unwrap();
         let mut canvas = Canvas::new(&layout, &lossless(layout.color_type));
-        canvas.stage(&sprite(16, 16, (0, 0), 16, OPAQUE), ColorType::Rgba8);
+        canvas.stage(sprite(16, 16, (0, 0), 16, OPAQUE));
         let placement = canvas.place(false).expect("先頭フレームは全面を持つ");
         canvas.commit(placement);
-        canvas.stage(&sprite(16, 16, (4, 4), 4, OPAQUE), ColorType::Rgba8);
+        canvas.stage(sprite(16, 16, (4, 4), 4, OPAQUE));
         let placement = canvas.place(false).expect("四角が縮んでいる");
         canvas.commit(placement);
 
-        canvas.stage(&vec![0; layout.frame_len], ColorType::Rgba8);
+        canvas.stage(vec![0; layout.frame_len]);
         assert_eq!(
             canvas.place(true),
             Some(Placement {
@@ -807,7 +807,7 @@ mod tests {
         let mut punched = opaque.clone();
         let at = (3 * 8 + 3) * 4;
         punched[at..at + 4].fill(0);
-        canvas.stage(&punched, ColorType::Rgba8);
+        canvas.stage(punched.clone());
 
         let placement = canvas.place(true).expect("画素が1つ変わっている");
         assert!(!placement.blend);
@@ -823,7 +823,7 @@ mod tests {
         let mut repainted = opaque.clone();
         let at = (3 * 8 + 3) * 4;
         repainted[at..at + 4].copy_from_slice(&[9, 9, 9, 0xFF]);
-        canvas.stage(&repainted, ColorType::Rgba8);
+        canvas.stage(repainted.clone());
 
         let placement = canvas.place(true).expect("画素が1つ変わっている");
         assert!(placement.blend);
@@ -839,7 +839,7 @@ mod tests {
         let mut canvas = canvas_with(&layout, &first);
 
         let second = repainted(&first, layout.width, (4, 4), 4, [0x11, 0x22, 0x33, OPAQUE]);
-        canvas.stage(&second, ColorType::Rgba8);
+        canvas.stage(second.clone());
         let placement = canvas.place(false).expect("四角を塗り替えている");
         assert_eq!(
             placement.rect,
@@ -855,7 +855,7 @@ mod tests {
         // 抜いた跡 (4,4,4,4) を含む (4,4,6,6) を透過にすると、抜いた側と
         // 抜かない側の差分がどちらも (4,4,6,6) になる
         let third = repainted(&second, layout.width, (4, 4), 6, [0, 0, 0, 0]);
-        canvas.stage(&third, ColorType::Rgba8);
+        canvas.stage(third.clone());
         assert_eq!(
             canvas.place(true),
             Some(Placement {
@@ -883,7 +883,7 @@ mod tests {
         let mut canvas = canvas_with(&layout, &first);
 
         let second = repainted(&first, layout.width, (2, 2), 12, [0x11, 0x22, 0x33, OPAQUE]);
-        canvas.stage(&second, ColorType::Rgba8);
+        canvas.stage(second.clone());
         let placement = canvas.place(false).expect("四角を塗り替えている");
         canvas.commit(placement);
 
@@ -892,7 +892,7 @@ mod tests {
         let mut third = repainted(&second, layout.width, (2, 2), 12, [0, 0, 0, 0]);
         let at = (7 * layout.width as usize + 7) * PIXEL;
         third[at..at + PIXEL].copy_from_slice(&[0x44, 0x55, 0x66, OPAQUE]);
-        canvas.stage(&third, ColorType::Rgba8);
+        canvas.stage(third.clone());
 
         assert_eq!(
             canvas.place(true),

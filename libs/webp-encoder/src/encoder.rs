@@ -170,12 +170,9 @@ fn filler<'a>(
 
 /// 符号化へ渡す画素
 ///
-/// RGBAは正規化した写し、RGBは投入されたフレームそのもの。
-fn source<'a>(layout: &Layout, canvas: &'a Canvas, data: &'a [u8]) -> &'a [u8] {
-    match layout.color_type {
-        ColorType::Rgb8 => data,
-        ColorType::Rgba8 => canvas.staged(),
-    }
+/// `input` は投入されたRGBのフレーム。RGBAはキャンバスへ据えた面を渡す。
+fn source<'a>(canvas: &'a Canvas, input: Option<&'a [u8]>) -> &'a [u8] {
+    input.unwrap_or_else(|| canvas.staged())
 }
 
 /// 符号化したフレームの行き先
@@ -202,7 +199,7 @@ pub struct Encoder<W: Write + Seek> {
     layout: Layout,
     /// 符号化の投入口と、投入順に揃える結果の受け取り
     pipeline: Pipeline,
-    /// 前のフレームまでを描いたキャンバスと、正規化した入力
+    /// 前のフレームまでを描いたキャンバスと、据えた入力
     canvas: Canvas,
     num_frames: u32,
     /// [`Self::add_frame`] が受け付けたフレーム数
@@ -311,7 +308,7 @@ impl<W: Write + Seek> Encoder<W> {
     /// [`Error::MalformedOutput`]。ファイルがRIFFの上限を超えるとき
     /// [`Error::FileTooLarge`]。書き出しに失敗したとき [`Error::Io`]。
     /// 以前の投入が書き出しに失敗しているとき [`Error::Poisoned`]。
-    pub fn add_frame(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
+    pub fn add_frame(&mut self, data: Vec<u8>, delay: FrameDelay) -> Result<(), Error> {
         if self.poisoned {
             return Err(Error::Poisoned);
         }
@@ -321,7 +318,7 @@ impl<W: Write + Seek> Encoder<W> {
                 actual: self.frames_accepted + 1,
             });
         }
-        self.layout.check_frame(data)?;
+        self.layout.check_frame(&data)?;
 
         // 途中で失敗するとチャンクの列が中断した状態で残るため、以降の投入を拒否する
         self.write_frame(data, delay)
@@ -387,15 +384,24 @@ impl<W: Write + Seek> Encoder<W> {
     }
 
     /// フレームを符号化して行き先へ渡す
-    fn write_frame(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
-        // 写した画素を読むのは、差分を取るときと、RGBAを符号化へ渡すとき
-        if self.layout.color_type == ColorType::Rgba8 || !matches!(self.sink, Sink::Still(_)) {
-            self.canvas.stage(data, self.layout.color_type);
-        }
+    fn write_frame(&mut self, data: Vec<u8>, delay: FrameDelay) -> Result<(), Error> {
+        let input = match self.layout.color_type {
+            ColorType::Rgba8 => {
+                self.canvas.stage(data);
+                None
+            }
+            ColorType::Rgb8 => {
+                // 広げた画素を読むのは差分を取るとき
+                if !matches!(self.sink, Sink::Still(_)) {
+                    self.canvas.expand(&data);
+                }
+                Some(data)
+            }
+        };
 
         let animation = match &mut self.sink {
             Sink::Still(writer) => {
-                let source = source(&self.layout, &self.canvas, data);
+                let source = source(&self.canvas, input.as_deref());
                 let job = Job::crop(source, &self.layout, self.layout.whole(), None, Vec::new());
                 let encoded = self.pipeline.codec().encode(&job)?;
                 return Ok(writer.write_all(encoded.still())?);
@@ -409,7 +415,7 @@ impl<W: Write + Seek> Encoder<W> {
             return Ok(());
         };
 
-        let source = source(&self.layout, &self.canvas, data);
+        let source = source(&self.canvas, input.as_deref());
         let base = (placement.blend && self.pipeline.codec().substitutes_transparency())
             .then(|| self.canvas.base(placement.dispose));
         // 切り出しはここで閉じる。以降の符号化はキャンバスを読まない
@@ -549,7 +555,7 @@ mod tests {
         .unwrap();
         for (index, frame) in frames.iter().enumerate() {
             let delay = FrameDelay::new(index as u32 * 7 + 20, 1000).unwrap();
-            encoder.add_frame(frame, delay).unwrap();
+            encoder.add_frame(frame.clone(), delay).unwrap();
         }
         let (writer, report) = encoder.finish().unwrap();
         (writer.into_inner(), report)
@@ -628,6 +634,34 @@ mod tests {
         }
     }
 
+    /// 投入されたRGBAの面が、写されずにキャンバスへ移る
+    #[test]
+    fn a_submitted_rgba_face_moves_onto_the_canvas() {
+        let (width, height) = (16, 16);
+        let frames = sprite_frames(width, height, 3);
+        let mut encoder = Encoder::new(
+            Cursor::new(Vec::new()),
+            width,
+            height,
+            frames.len() as u32,
+            config(true),
+        )
+        .unwrap();
+
+        for (index, frame) in frames.into_iter().enumerate() {
+            let head = frame.as_ptr();
+            encoder
+                .add_frame(frame, FrameDelay::new(1, 30).unwrap())
+                .unwrap();
+            assert_eq!(
+                encoder.canvas.base(false).as_ptr(),
+                head,
+                "フレーム{index}の面がキャンバスに無い"
+            );
+        }
+        encoder.finish().unwrap();
+    }
+
     /// 半透明の平らな背景に、離れた2つの不透明な四角を置いたRGBA
     fn panel_frames(width: u32, height: u32, count: usize) -> Vec<Vec<u8>> {
         let corners = [(2, 2), (width - SQUARE - 2, height - SQUARE - 2)];
@@ -671,7 +705,7 @@ mod tests {
         let mut canvases = Vec::new();
         for (index, frame) in frames.iter().enumerate() {
             let delay = FrameDelay::new(index as u32 * 7 + 20, 1000).unwrap();
-            encoder.add_frame(frame, delay).unwrap();
+            encoder.add_frame(frame.clone(), delay).unwrap();
             canvases.push(encoder.canvas.base(false).to_vec());
         }
         let (writer, _) = encoder.finish().unwrap();

@@ -94,7 +94,7 @@ fn encode(
     config: Config,
 ) -> Result<(Vec<u8>, Report), Error> {
     let mut encoder = Encoder::new(Cursor::new(Vec::new()), width, height, 1, config)?;
-    encoder.add_frame(data, FrameDelay::new(1, 30).unwrap())?;
+    encoder.add_frame(data.to_vec(), FrameDelay::new(1, 30).unwrap())?;
     let (writer, report) = encoder.finish()?;
     Ok((writer.into_inner(), report))
 }

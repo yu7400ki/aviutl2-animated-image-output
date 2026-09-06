@@ -93,7 +93,7 @@ impl OutputPlugin for WebpOutputPlugin {
             .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
 
             info.encode_frames(config.color_format, |frame_data| {
-                encoder.add_frame(&frame_data, delay)
+                encoder.add_frame(frame_data, delay)
             })
             .map_err(|e| e.to_string())?;
 
@@ -178,7 +178,7 @@ mod tests {
 
             for seed in 0..frames {
                 encoder
-                    .add_frame(&frame_of(seed), delay)
+                    .add_frame(frame_of(seed), delay)
                     .map_err(|e| e.to_string())?;
             }
 

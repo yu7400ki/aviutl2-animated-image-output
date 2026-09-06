@@ -166,7 +166,7 @@ fn encode(
         config,
     )?;
     for (index, data) in frames.iter().enumerate() {
-        encoder.add_frame(data, delay_of(index))?;
+        encoder.add_frame(data.clone(), delay_of(index))?;
     }
     let (writer, report) = encoder.finish()?;
     Ok((writer.into_inner(), report))
@@ -501,7 +501,7 @@ fn the_rounding_residual_carries_across_frames() {
     .unwrap();
     for frame in &frames {
         encoder
-            .add_frame(frame, FrameDelay::new(1, 30).unwrap())
+            .add_frame(frame.clone(), FrameDelay::new(1, 30).unwrap())
             .unwrap();
     }
     let bytes = encoder.finish().unwrap().0.into_inner();
@@ -528,7 +528,7 @@ fn a_delay_below_a_millisecond_is_raised_and_reported() {
     .unwrap();
     for frame in &frames {
         encoder
-            .add_frame(frame, FrameDelay::new(1, 10000).unwrap())
+            .add_frame(frame.clone(), FrameDelay::new(1, 10000).unwrap())
             .unwrap();
     }
     let (writer, report) = encoder.finish().unwrap();
@@ -801,7 +801,7 @@ fn a_duration_beyond_the_field_width_is_carried_by_extra_frames() {
     )
     .unwrap();
     for (frame, delay) in frames.iter().zip(delays) {
-        encoder.add_frame(frame, delay).unwrap();
+        encoder.add_frame(frame.clone(), delay).unwrap();
     }
     let bytes = encoder.finish().unwrap().0.into_inner();
 
@@ -845,7 +845,7 @@ fn a_frame_split_across_durations_never_clears_its_rect() {
     )
     .unwrap();
     for (frame, delay) in frames.iter().zip(delays) {
-        encoder.add_frame(frame, delay).unwrap();
+        encoder.add_frame(frame.clone(), delay).unwrap();
     }
     let bytes = encoder.finish().unwrap().0.into_inner();
 
@@ -902,7 +902,7 @@ fn a_frame_filling_the_duration_field_can_still_clear_its_rect() {
     )
     .unwrap();
     for (frame, delay) in frames.iter().zip(delays) {
-        encoder.add_frame(frame, delay).unwrap();
+        encoder.add_frame(frame.clone(), delay).unwrap();
     }
     let bytes = encoder.finish().unwrap().0.into_inner();
 
@@ -967,7 +967,7 @@ fn a_frame_count_other_than_the_declared_one_is_refused() {
         config(ColorType::Rgba8, 0),
     )
     .unwrap();
-    encoder.add_frame(&frames[0], delay_of(0)).unwrap();
+    encoder.add_frame(frames[0].clone(), delay_of(0)).unwrap();
     assert!(matches!(
         encoder.finish(),
         Err(Error::FrameCountMismatch {
@@ -985,10 +985,10 @@ fn a_frame_count_other_than_the_declared_one_is_refused() {
     )
     .unwrap();
     for frame in &frames[..2] {
-        encoder.add_frame(frame, delay_of(0)).unwrap();
+        encoder.add_frame(frame.clone(), delay_of(0)).unwrap();
     }
     assert!(matches!(
-        encoder.add_frame(&frames[2], delay_of(2)),
+        encoder.add_frame(frames[2].clone(), delay_of(2)),
         Err(Error::FrameCountMismatch {
             expected: 2,
             actual: 3
@@ -1088,7 +1088,7 @@ fn a_file_that_was_never_finished_keeps_a_zero_riff_size() {
     )
     .unwrap();
     for (index, frame) in frames.iter().enumerate() {
-        encoder.add_frame(frame, delay_of(index)).unwrap();
+        encoder.add_frame(frame.clone(), delay_of(index)).unwrap();
     }
     drop(encoder);
     let unfinished = written.borrow().clone();
@@ -1136,11 +1136,11 @@ fn a_failed_write_poisons_the_encoder() {
     let failure = frames
         .iter()
         .enumerate()
-        .find_map(|(index, frame)| encoder.add_frame(frame, delay_of(index)).err());
+        .find_map(|(index, frame)| encoder.add_frame(frame.clone(), delay_of(index)).err());
     assert!(matches!(failure, Some(Error::Io(_))), "{failure:?}");
 
     assert!(matches!(
-        encoder.add_frame(&frames[0], delay_of(0)),
+        encoder.add_frame(frames[0].clone(), delay_of(0)),
         Err(Error::Poisoned)
     ));
     assert!(matches!(encoder.finish(), Err(Error::Poisoned)));
@@ -1590,7 +1590,7 @@ fn the_frames_that_split_a_duration_raise_the_alpha_flag() {
     )
     .unwrap();
     for (frame, delay) in frames.iter().zip(delays) {
-        encoder.add_frame(frame, delay).unwrap();
+        encoder.add_frame(frame.clone(), delay).unwrap();
     }
     let bytes = encoder.finish().unwrap().0.into_inner();
 
