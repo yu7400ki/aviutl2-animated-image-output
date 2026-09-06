@@ -42,11 +42,32 @@ enum Source {
         /// 切り出す矩形
         rect: Rect,
     },
+    /// キャンバスとフレームの差分の外接矩形を求め、そこを切り出して埋める
+    ///
+    /// 矩形の面積が `kept_area` に満たないときだけ切り出して圧縮する。それ以外は
+    /// 候補にしない — 圧縮すれば小さくなることはあるが、それを測る圧縮の方が高くつく。
+    Restored {
+        /// 差分を採るキャンバス
+        canvas: Arc<Vec<u8>>,
+        /// 切り出す元のフレーム
+        data: Arc<Vec<u8>>,
+        /// 比べる相手の矩形の面積
+        kept_area: u64,
+    },
 }
 
 /// ジョブ1つの結末
 enum Outcome {
     Compressed(Candidate),
+    /// 走査で求めた矩形と、そこを圧縮した候補
+    Restored {
+        rect: Rect,
+        candidate: Candidate,
+    },
+    /// 走査した矩形が広く、候補にしなかった。本体のバッファは使っていない
+    Rejected {
+        body: Vec<u8>,
+    },
     /// ワーカーが巻き戻した。駆動側で投げ直す
     Panicked(Box<dyn Any + Send>),
 }
@@ -86,7 +107,7 @@ impl Drop for Pool {
 
 /// ジョブ1つを片付け、結末と領域のバッファを返す
 ///
-/// フレームから埋めるジョブは領域を切り出してから圧縮する。切り出しと圧縮の
+/// フレームから埋めるジョブは走査と切り出しを済ませてから圧縮する。そこまでの
 /// 巻き戻しは結末として持ち帰るので、領域のバッファは巻き戻しても返る。
 ///
 /// 返る時点でフレームを手放している。
@@ -106,6 +127,23 @@ fn run(codec: &mut Codec, layout: &Layout, job: Job) -> (Outcome, Vec<u8>) {
             crop(&data, rect, layout.stride, bpp, bpp, &mut region);
             let region_stride = rect.width as usize * bpp;
             Outcome::Compressed(codec.compress(&region, region_stride, bpp, body))
+        }
+        Source::Restored {
+            canvas,
+            data,
+            kept_area,
+        } => {
+            let rect = layout.bounding_rect(&canvas, &data);
+            if rect.area() >= kept_area {
+                return Outcome::Rejected { body };
+            }
+
+            crop(&data, rect, layout.stride, bpp, bpp, &mut region);
+            let region_stride = rect.width as usize * bpp;
+            Outcome::Restored {
+                rect,
+                candidate: codec.compress(&region, region_stride, bpp, body),
+            }
         }
     };
     let outcome = match panic::catch_unwind(AssertUnwindSafe(compress)) {
@@ -183,12 +221,12 @@ fn spawn(level: u32, workers: NonZeroUsize, layout: Layout) -> Result<Pool, Erro
 /// 圧縮を回し、番号を指して結果を受け取るパイプライン
 ///
 /// ワーカーが2つ以上あるときだけ群れを起こす。1つなら投入した場で圧縮する。
-/// 結果は届いた順に溜め、[`Pipeline::take`] が指した番号のものを返すので、
-/// 受け取りの順は投入の順から独立している。
+/// 結末は届いた順に溜め、指された番号のものを返すので、受け取りの順は投入の順から
+/// 独立している。
 ///
 /// 領域と本体に使うバッファはここが配り、結果と一緒に受け取って配り直す。
 pub(crate) struct Pipeline {
-    /// 駆動スレッドで回す圧縮器
+    /// ワーカーが1つのときに、投入した場で回す圧縮器
     codec: Codec,
     pool: Option<Pool>,
     /// 次に投入するジョブの番号
@@ -247,13 +285,6 @@ impl Pipeline {
         self.buffers.len()
     }
 
-    /// 駆動スレッドで領域を圧縮する
-    pub(crate) fn compress(&mut self, region: &[u8], region_stride: usize) -> Candidate {
-        let body = self.buffer();
-        self.codec
-            .compress(region, region_stride, self.layout.bytes_per_pixel, body)
-    }
-
     /// 切り出し済みの領域の圧縮を投入し、結果を指すための番号を返す
     ///
     /// `region` はパイプラインが引き取り、[`Pipeline::buffer`] から配り直す。
@@ -279,6 +310,29 @@ impl Pipeline {
         })
     }
 
+    /// キャンバスとフレームの差分を走査する圧縮を投入し、結果を指すための番号を返す
+    ///
+    /// 差分の外接矩形の面積が `kept_area` に満たないときだけ切り出して圧縮する。
+    /// 領域と本体は [`Pipeline::buffer`] から借り、どちらの結末でも配り直す。
+    pub(crate) fn submit_restored(
+        &mut self,
+        canvas: Arc<Vec<u8>>,
+        data: Arc<Vec<u8>>,
+        kept_area: u64,
+    ) -> usize {
+        let region = self.buffer();
+        let body = self.buffer();
+        self.submit(Job {
+            region,
+            body,
+            source: Source::Restored {
+                canvas,
+                data,
+                kept_area,
+            },
+        })
+    }
+
     /// ジョブを投入し、結果を指すための番号を返す
     ///
     /// ワーカーが1つなら、投入した場で片付けて結末を溜める。
@@ -295,26 +349,49 @@ impl Pipeline {
                 let (outcome, region) = run(&mut self.codec, &self.layout, job);
                 self.buffers.give(region);
                 match outcome {
-                    Outcome::Compressed(candidate) => {
-                        self.ready.insert(index, Outcome::Compressed(candidate));
-                    }
                     Outcome::Panicked(payload) => panic::resume_unwind(payload),
+                    outcome => {
+                        self.ready.insert(index, outcome);
+                    }
                 }
             }
         }
         index
     }
 
-    /// `index` のジョブの結果を受け取る
-    ///
-    /// 届いていなければ届くまで待つ。先に届いた別の番号の結果は溜めておく。
+    /// `index` の領域を圧縮するジョブの結果を受け取る
     pub(crate) fn take(&mut self, index: usize) -> Candidate {
+        match self.wait(index) {
+            Outcome::Compressed(candidate) => candidate,
+            Outcome::Panicked(payload) => panic::resume_unwind(payload),
+            Outcome::Restored { .. } | Outcome::Rejected { .. } => {
+                panic!("領域を圧縮するジョブの番号を指している")
+            }
+        }
+    }
+
+    /// `index` の差分を走査するジョブの結果を受け取る
+    ///
+    /// 候補にしなかったときは本体のバッファを配り直して `None` を返す。
+    pub(crate) fn take_restored(&mut self, index: usize) -> Option<(Rect, Candidate)> {
+        match self.wait(index) {
+            Outcome::Restored { rect, candidate } => Some((rect, candidate)),
+            Outcome::Rejected { body } => {
+                self.buffers.give(body);
+                None
+            }
+            Outcome::Panicked(payload) => panic::resume_unwind(payload),
+            Outcome::Compressed(_) => panic!("差分を走査するジョブの番号を指している"),
+        }
+    }
+
+    /// `index` のジョブの結末を受け取る
+    ///
+    /// 届いていなければ届くまで待つ。先に届いた別の番号の結末は溜めておく。
+    fn wait(&mut self, index: usize) -> Outcome {
         loop {
             if let Some(outcome) = self.ready.remove(&index) {
-                return match outcome {
-                    Outcome::Compressed(candidate) => candidate,
-                    Outcome::Panicked(payload) => panic::resume_unwind(payload),
-                };
+                return outcome;
             }
 
             let pool = self.pool.as_ref().expect("投入した場で圧縮が済んでいる");
@@ -400,6 +477,62 @@ mod tests {
                 pipeline.take(index).into_body(),
                 expected,
                 "ワーカー{workers}個"
+            );
+        }
+    }
+
+    /// 復元のジョブは、走査した矩形が比べる相手の面積に満たないときだけ候補になる
+    ///
+    /// 面積が並ぶ相手には候補を立てず、領域と本体のバッファをそのまま返す。1つ広い
+    /// 相手には切り出して圧縮し、走査した矩形と、同じ矩形を切り出したジョブと同じ
+    /// 本体を返す。
+    #[test]
+    fn a_restored_job_is_a_candidate_only_below_the_area_it_is_compared_with() {
+        const RECT: Rect = Rect {
+            x: 4,
+            y: 3,
+            width: 6,
+            height: 5,
+        };
+
+        let canvas = Arc::new(region(11));
+        let mut frame = canvas.as_ref().clone();
+        for y in RECT.y as usize..(RECT.y + RECT.height) as usize {
+            for x in RECT.x as usize..(RECT.x + RECT.width) as usize {
+                for byte in &mut frame[(y * WIDTH + x) * BPP..(y * WIDTH + x + 1) * BPP] {
+                    *byte ^= 0xFF;
+                }
+            }
+        }
+        let frame = Arc::new(frame);
+
+        for workers in [1, 2] {
+            let mut pipeline = pipeline(workers);
+            let index =
+                pipeline.submit_restored(Arc::clone(&canvas), Arc::clone(&frame), RECT.area());
+            assert!(
+                pipeline.take_restored(index).is_none(),
+                "ワーカー{workers}個: 面積が並ぶ矩形の候補"
+            );
+            assert_eq!(
+                pipeline.pooled(),
+                2,
+                "ワーカー{workers}個: 領域と本体の戻り"
+            );
+
+            let index = pipeline.submit_crop(Arc::clone(&frame), RECT);
+            let expected = pipeline.take(index).into_body();
+
+            let index =
+                pipeline.submit_restored(Arc::clone(&canvas), Arc::clone(&frame), RECT.area() + 1);
+            let (rect, candidate) = pipeline
+                .take_restored(index)
+                .expect("面積で落ちない矩形の候補");
+            assert_eq!(rect, RECT, "ワーカー{workers}個: 走査した矩形");
+            assert_eq!(
+                candidate.into_body(),
+                expected,
+                "ワーカー{workers}個: 圧縮した本体"
             );
         }
     }

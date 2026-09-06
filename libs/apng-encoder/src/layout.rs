@@ -1,7 +1,7 @@
 //! 入力フレームの並び
 
 use crate::error::Error;
-use anim_core::{ColorType, Rect};
+use anim_core::{ColorType, Rect, dirty_rect};
 
 /// キャンバスの大きさと、入力フレームのバイト並び
 #[derive(Debug, Clone, Copy)]
@@ -58,5 +58,19 @@ impl Layout {
             width: self.width,
             height: self.height,
         }
+    }
+
+    /// `base` と `data` の差分の外接矩形
+    ///
+    /// 差分が無い場合はfcTLの個数を保つために1画素だけ書き直す。
+    pub(crate) fn bounding_rect(&self, base: &[u8], data: &[u8]) -> Rect {
+        const UNCHANGED: Rect = Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        };
+
+        dirty_rect(base, data, self.stride, self.bytes_per_pixel).unwrap_or(UNCHANGED)
     }
 }

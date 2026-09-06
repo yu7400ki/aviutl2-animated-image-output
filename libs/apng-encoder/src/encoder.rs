@@ -9,7 +9,7 @@ use crate::error::Error;
 use crate::layout::Layout;
 use crate::over;
 use crate::pipeline::Pipeline;
-use anim_core::{ColorType, FrameDelay, Pacing, Rect, crop};
+use anim_core::{ColorType, FrameDelay, Pacing, Rect};
 use std::collections::VecDeque;
 use std::io::Write;
 use std::num::NonZeroUsize;
@@ -83,6 +83,10 @@ struct Staged {
     kept: Rect,
     /// `kept` をblend_op=SOURCEで圧縮する投入の番号
     job: usize,
+    /// 保留中のフレームを捨てるときの候補を走査する投入の番号
+    ///
+    /// 決定の1手前で投入したフレームだけが持つ。
+    restored: Option<usize>,
 }
 
 /// 決定点が組み立てた、blend_op=OVERの候補
@@ -367,6 +371,7 @@ impl<W: Write> Encoder<W> {
             delay,
             kept,
             job,
+            restored: None,
         });
     }
 
@@ -378,13 +383,14 @@ impl<W: Write> Encoder<W> {
             delay,
             kept,
             job,
+            restored,
         } = self.staged.pop_front().expect("決めるフレームがある");
 
         let Disposal {
             op: dispose,
             rect,
             candidate: source,
-        } = self.choose_dispose(&data, index, kept, job);
+        } = self.choose_dispose(kept, job, restored);
         let over = self.submit_over(&data, index, dispose, rect);
 
         self.writing.advance(
@@ -397,6 +403,7 @@ impl<W: Write> Encoder<W> {
             },
         );
         self.delta.advance(data, dispose);
+        self.submit_restored();
 
         while let Some(pending) = self.writing.overflowing(self.pending_depth.get()) {
             self.write(pending)?;
@@ -440,17 +447,9 @@ impl<W: Write> Encoder<W> {
     /// 採った側を戻り値へ残して、退けた側のバッファは配り直す先へ返す。同じ大きさなら
     /// 捨てない。
     ///
-    /// 捨てるときの候補を駆動スレッドで圧縮してから、投入した候補を受け取る。
-    fn choose_dispose(&mut self, data: &[u8], index: u32, kept: Rect, job: usize) -> Disposal {
-        let bpp = self.layout.bytes_per_pixel;
-        let restored = self.delta.restored_rect(&self.layout, data, kept, index);
-
-        let restored = restored.map(|rect| {
-            let region = self.crop_rect(data, rect);
-            let candidate = self.pipeline.compress(&region, rect.width as usize * bpp);
-            self.pipeline.recycle(region);
-            (rect, candidate)
-        });
+    /// 捨てるときの候補は矩形が狭いときだけ立ち、その判定は投入した先で済んでいる。
+    fn choose_dispose(&mut self, kept: Rect, job: usize, restored: Option<usize>) -> Disposal {
+        let restored = restored.and_then(|job| self.pipeline.take_restored(job));
         let kept_candidate = self.pipeline.take(job);
 
         let keep = |candidate| Disposal {
@@ -473,6 +472,34 @@ impl<W: Write> Encoder<W> {
             self.pipeline.recycle(restored_candidate.into_body());
             keep(kept_candidate)
         }
+    }
+
+    /// 次に決定するフレームの、保留中のフレームを捨てるときの候補を投入する
+    ///
+    /// 捨てたときに復元されるキャンバスは直前の決定で確定するため、決定の1手前に
+    /// あたるこの時点で投入できる。ワーカーは走査した矩形が捨てないときより狭い
+    /// ときだけ切り出して圧縮する。
+    ///
+    /// 投入された順の位置が2に満たないフレームは投入しない。キャンバスがまだ
+    /// 埋まっておらず、先頭のfcTLのdispose_op=PREVIOUSもBACKGROUNDとして扱われて
+    /// キャンバスを復元しないため。
+    fn submit_restored(&mut self) {
+        let Some(next) = self.staged.front() else {
+            return;
+        };
+        if next.index < 2 {
+            return;
+        }
+
+        let job = self.pipeline.submit_restored(
+            self.delta.canvas(),
+            Arc::clone(&next.data),
+            next.kept.area(),
+        );
+        self.staged
+            .front_mut()
+            .expect("決定を待つフレームがある")
+            .restored = Some(job);
     }
 
     /// 投入されたフレームをキャンバスへ重ねる候補を詰め直し、圧縮を投入する
@@ -554,14 +581,6 @@ impl<W: Write> Encoder<W> {
             .write_frame(rect, delay, dispose, blend, &body)?;
         self.pipeline.recycle(body);
         Ok(())
-    }
-
-    /// フレームから `rect` を切り出す
-    fn crop_rect(&mut self, data: &[u8], rect: Rect) -> Vec<u8> {
-        let bpp = self.layout.bytes_per_pixel;
-        let mut region = self.pipeline.buffer();
-        crop(data, rect, self.layout.stride, bpp, bpp, &mut region);
-        region
     }
 }
 
@@ -1063,10 +1082,11 @@ mod tests {
 
     /// 圧縮に配ったバッファは、退けた候補も捨てた候補もパイプラインへ戻る
     ///
-    /// 決定は詰め直した候補のぶんだけバッファを持ち出し、退けた候補の本体を返す。
-    /// 書き出しは持ち出したぶんと、書き出した本体を返す。休みの最中の候補も受け取って
-    /// から返すので、出入りの数はどのフレームでも候補の有無だけで決まり、書き出し切ると
-    /// 配った数がそのまま戻る。
+    /// 決定は詰め直した候補と、次に決めるフレームの捨てる候補のぶんだけバッファを
+    /// 持ち出し、受け取った捨てる候補のぶん — 退けた本体か、候補にしなかった本体 — を
+    /// 返す。書き出しは持ち出したぶんと、書き出した本体を返す。休みの最中の候補も
+    /// 受け取ってから返すので、出入りの数はどのフレームでも候補の有無だけで決まり、
+    /// 書き出し切ると配った数がそのまま戻る。
     ///
     /// 仕掛かりの上限を超えるバッファを先に満たしておく。確保が入れば最後の数がそのぶん
     /// 増える。
@@ -1102,14 +1122,23 @@ mod tests {
                 encoder.add_frame(frame, delay).unwrap();
             }
 
+            let restored = |staged: &VecDeque<Staged>| {
+                usize::from(
+                    staged
+                        .front()
+                        .is_some_and(|staged| staged.restored.is_some()),
+                )
+            };
             for index in 0..input.len() {
+                let taken = restored(&encoder.staged);
                 let before = encoder.pipeline.pooled();
                 encoder.decide().unwrap();
+                let submitted = restored(&encoder.staged);
                 let decided = encoder.writing.open.as_ref().expect("決めたフレームが残る");
                 let packed = usize::from(matches!(decided.over, Over::Packed(_)));
                 assert_eq!(
-                    encoder.pipeline.pooled() + packed,
-                    before,
+                    encoder.pipeline.pooled() + packed + submitted,
+                    before + taken,
                     "{color:?} フレーム {index}: 決定が持ち出したバッファ"
                 );
             }

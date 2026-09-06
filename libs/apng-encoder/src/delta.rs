@@ -2,7 +2,7 @@
 
 use crate::chunk::DISPOSE_OP_NONE;
 use crate::layout::Layout;
-use anim_core::{Rect, dirty_rect};
+use anim_core::Rect;
 use std::sync::Arc;
 
 /// 直前に投入されたフレームと、直前に決定したフレームとそのキャンバス
@@ -66,6 +66,11 @@ impl Delta {
         }
     }
 
+    /// 保留中のフレームをdispose_op=PREVIOUSで捨てたときに復元されるキャンバス
+    pub(crate) fn canvas(&self) -> Arc<Vec<u8>> {
+        Arc::clone(&self.canvas)
+    }
+
     /// 決定を終えたフレームを重ねるキャンバス
     ///
     /// 保留中のフレームを `dispose` で捨てると、キャンバスはそれを描く直前の内容へ戻る。
@@ -92,43 +97,6 @@ impl Delta {
             return layout.whole();
         }
 
-        bounding_rect(layout, &self.previous, data)
+        layout.bounding_rect(&self.previous, data)
     }
-
-    /// 保留中のフレームをdispose_op=PREVIOUSで捨てるときの、投入されたフレームの矩形
-    ///
-    /// `index` は投入された順の位置。次の場合は捨てても割に合わないため、候補にせず
-    /// `None` を返す。
-    /// - `index` が2に満たないとき。[`Self::canvas`] がまだ埋まっておらず、先頭の
-    ///   fcTLのdispose_op=PREVIOUSもBACKGROUNDとして扱われてキャンバスを復元しない
-    /// - 矩形が捨てない場合より小さくならないとき。圧縮すれば小さくなることは
-    ///   あるが、それを測る圧縮の方が高くつく
-    pub(crate) fn restored_rect(
-        &self,
-        layout: &Layout,
-        data: &[u8],
-        kept: Rect,
-        index: u32,
-    ) -> Option<Rect> {
-        if index < 2 {
-            return None;
-        }
-
-        let rect = bounding_rect(layout, &self.canvas, data);
-        (rect.area() < kept.area()).then_some(rect)
-    }
-}
-
-/// `base` と `data` の差分の外接矩形
-///
-/// 差分が無い場合はfcTLの個数を保つために1画素だけ書き直す。
-fn bounding_rect(layout: &Layout, base: &[u8], data: &[u8]) -> Rect {
-    const UNCHANGED: Rect = Rect {
-        x: 0,
-        y: 0,
-        width: 1,
-        height: 1,
-    };
-
-    dirty_rect(base, data, layout.stride, layout.bytes_per_pixel).unwrap_or(UNCHANGED)
 }
