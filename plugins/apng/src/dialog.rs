@@ -191,15 +191,6 @@ mod tests {
         [inputs.compression.clone(), inputs.threads.clone()]
     }
 
-    /// 数値を打ち込む3つの入力欄
-    fn number_inputs(inputs: &Inputs) -> [(&'static str, Number); 3] {
-        [
-            ("ループ回数", inputs.repeat.clone()),
-            ("圧縮レベル", inputs.compression.input.clone()),
-            ("スレッド数", inputs.threads.input.clone()),
-        ]
-    }
-
     /// 値域の内側の入力は、そのまま設定になる
     #[test]
     fn values_inside_the_range_become_the_config() {
@@ -220,46 +211,22 @@ mod tests {
         assert_eq!(config.threads, max_threads());
     }
 
-    /// 圧縮レベルの値域も、打ち込みに対して効く
-    #[test]
-    fn an_out_of_range_compression_level_is_refused() {
-        let inputs = inputs();
-        let range = inputs.compression.range.clone();
-
-        inputs.compression.input.set_value(*range.start() - 1);
-        assert!(inputs.collect().is_err(), "下限より下");
-        inputs.compression.input.set_value(*range.end() + 1);
-        assert!(inputs.collect().is_err(), "上限より上");
-        inputs.compression.input.set_value(*range.end());
-        assert!(inputs.collect().is_ok(), "上限そのもの");
-    }
-
-    /// スレッド数の値域も、打ち込みに対して効く
-    #[test]
-    fn an_out_of_range_worker_count_is_refused() {
-        let inputs = inputs();
-        let range = inputs.threads.range.clone();
-
-        inputs.threads.input.set_value(*range.start() - 1);
-        assert!(inputs.collect().is_err(), "下限より下");
-        inputs.threads.input.set_value(*range.end() + 1);
-        assert!(inputs.collect().is_err(), "上限より上");
-        inputs.threads.input.set_value(*range.end());
-        assert!(inputs.collect().is_ok(), "上限そのもの");
-    }
-
-    /// 項目名も、値域の外を弾いたときの文言も、検める値域をそのまま名乗る
+    /// 値域を検めるどの欄も、名乗る値域の内側だけを受け取り、外を文言で弾く
     #[test]
     fn every_field_names_the_range_that_is_checked() {
-        for name in ["圧縮レベル", "スレッド数"] {
+        // 値域の外を打ち込んだ欄で読み出しが止まるため、欄ごとにダイアログを組み直す
+        for position in 0..ranged_inputs(&inputs()).len() {
             let inputs = inputs();
-            let field = ranged_inputs(&inputs)
-                .into_iter()
-                .find(|field| field.name == name)
-                .expect("名前の一致する欄がある");
+            let field = ranged_inputs(&inputs)[position].clone();
+            let name = field.name;
             // 画面へ出す文字列を、入力欄が実際に検める値域と突き合わせる
             let (min, max) = field.input.range_bounds().expect("値域を持つ入力欄");
             assert_eq!(field.label(), format!("{name} ({min}-{max})"));
+
+            field.input.set_value(max);
+            assert!(inputs.collect().is_ok(), "{name}: 上限そのもの");
+            field.input.set_value(min - 1);
+            assert!(inputs.collect().is_err(), "{name}: 下限より下");
 
             field.input.set_value(max + 1);
             let Err(message) = inputs.collect() else {
@@ -275,13 +242,12 @@ mod tests {
     /// どの数値欄も、前後に空白のある入力を等しく受け取る
     #[test]
     fn every_number_field_accepts_surrounding_whitespace() {
-        for name in ["ループ回数", "圧縮レベル", "スレッド数"] {
-            let inputs = inputs();
-            let (_, input) = number_inputs(&inputs)
-                .into_iter()
-                .find(|(field, _)| *field == name)
-                .expect("名前の一致する欄がある");
-
+        let inputs = inputs();
+        for (name, input) in [
+            ("ループ回数", inputs.repeat.clone()),
+            ("圧縮レベル", inputs.compression.input.clone()),
+            ("スレッド数", inputs.threads.input.clone()),
+        ] {
             let (min, _) = input.range_bounds().expect("値域を持つ入力欄");
             input.set_text(&format!(" {min} "));
 
