@@ -84,6 +84,23 @@ pub fn verbose(message: &str) {
     emit(|h| h.verbose, message);
 }
 
+/// ログの深刻さ
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Info,
+    Warn,
+}
+
+/// 各メッセージをその深刻さのレベルで出力します
+pub fn report(messages: impl IntoIterator<Item = (Severity, String)>) {
+    for (severity, message) in messages {
+        match severity {
+            Severity::Info => info(&message),
+            Severity::Warn => warn(&message),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +156,52 @@ mod tests {
         *CAPTURED.lock().unwrap() = None;
         verbose("skip");
         assert!(CAPTURED.lock().unwrap().is_none());
+
+        HANDLE.store(ptr::null_mut(), Ordering::Release);
+    }
+
+    #[test]
+    fn report_dispatches_each_message_to_its_own_severity() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        static RECEIVED: Mutex<Vec<(Severity, Vec<u16>)>> = Mutex::new(Vec::new());
+        RECEIVED.lock().unwrap().clear();
+
+        unsafe extern "C" fn recording_info(_handle: *mut LOG_HANDLE, message: sys::LPCWSTR) {
+            let s = unsafe { U16CStr::from_ptr_str(message) };
+            RECEIVED
+                .lock()
+                .unwrap()
+                .push((Severity::Info, s.as_slice().to_vec()));
+        }
+        unsafe extern "C" fn recording_warn(_handle: *mut LOG_HANDLE, message: sys::LPCWSTR) {
+            let s = unsafe { U16CStr::from_ptr_str(message) };
+            RECEIVED
+                .lock()
+                .unwrap()
+                .push((Severity::Warn, s.as_slice().to_vec()));
+        }
+
+        let mut handle = LOG_HANDLE {
+            log: None,
+            info: Some(recording_info),
+            warn: Some(recording_warn),
+            error: None,
+            verbose: None,
+        };
+        unsafe { init(&mut handle as *mut LOG_HANDLE) };
+
+        report([
+            (Severity::Info, "a".to_string()),
+            (Severity::Warn, "b".to_string()),
+        ]);
+
+        assert_eq!(
+            RECEIVED.lock().unwrap().as_slice(),
+            [
+                (Severity::Info, "a".encode_utf16().collect::<Vec<u16>>()),
+                (Severity::Warn, "b".encode_utf16().collect::<Vec<u16>>()),
+            ]
+        );
 
         HANDLE.store(ptr::null_mut(), Ordering::Release);
     }

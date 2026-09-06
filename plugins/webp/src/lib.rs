@@ -2,7 +2,8 @@ mod config;
 mod dialog;
 
 use aviutl2::{
-    ConfigDialog, FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
+    ConfigDialog, FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo,
+    logger::{self, Severity},
     register_logger, register_output_plugin, write_or_discard,
 };
 use config::{ColorFormat, Config};
@@ -28,13 +29,6 @@ fn encoder_config(config: &Config) -> EncoderConfig {
 /// 設定のスレッド数をエンコーダのワーカー数へ渡す形にする
 fn encoder_workers(config: &Config) -> NonZeroUsize {
     NonZeroUsize::new(config.threads).unwrap_or(NonZeroUsize::MIN)
-}
-
-/// ログの深刻さ
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Severity {
-    Info,
-    Warn,
 }
 
 /// 出力が素材の見え方や並びと変わったところを並べる
@@ -117,12 +111,7 @@ impl OutputPlugin for WebpOutputPlugin {
                 .into_inner()
                 .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
 
-            for (severity, message) in report_messages(&report, num_frames) {
-                match severity {
-                    Severity::Info => logger::info(&message),
-                    Severity::Warn => logger::warn(&message),
-                }
-            }
+            logger::report(report_messages(&report, num_frames));
             Ok(())
         })
     }

@@ -2,7 +2,8 @@ mod config;
 mod dialog;
 
 use aviutl2::{
-    ConfigDialog, FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
+    ConfigDialog, FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo,
+    logger::{self, Severity},
     register_logger, register_output_plugin, write_or_discard,
 };
 use config::{ColorFormat, Config};
@@ -19,13 +20,6 @@ fn encoder_config(config: &Config) -> EncoderConfig {
         },
         num_plays: config.repeat as u32,
     }
-}
-
-/// ログの深刻さ
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Severity {
-    Info,
-    Warn,
 }
 
 /// 3桁ごとに区切った延べ画素数と、全画素に対する割合
@@ -200,12 +194,7 @@ impl OutputPlugin for GifOutputPlugin {
                 .into_inner()
                 .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
 
-            for (severity, message) in report_messages(&report, total_pixels) {
-                match severity {
-                    Severity::Info => logger::info(&message),
-                    Severity::Warn => logger::warn(&message),
-                }
-            }
+            logger::report(report_messages(&report, total_pixels));
             Ok(())
         })
     }
