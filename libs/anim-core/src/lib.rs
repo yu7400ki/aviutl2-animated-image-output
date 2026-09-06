@@ -1,5 +1,6 @@
 //! アニメーション画像のエンコーダが画像フォーマットに依らず共有する部品
 
+mod accumulator;
 mod alpha;
 mod color;
 mod delay;
@@ -10,6 +11,7 @@ mod palette;
 mod region;
 mod rewrite;
 
+pub use accumulator::{Accumulator, gcd};
 pub use alpha::has_transparency;
 pub use color::ColorType;
 pub use delay::FrameDelay;
