@@ -353,14 +353,13 @@ impl<W: Write> Encoder<W> {
     /// フレームを写し取り、捨てないときの矩形の圧縮を投入する
     ///
     /// 矩形は直前に投入されたフレームとの差分で決まるため、写し取るより先に求める。
+    /// 切り出しは圧縮を回す側で行う。
     fn stage(&mut self, data: &[u8], delay: FrameDelay) {
         let index = self.frames_accepted;
         let kept = self.delta.kept_rect(&self.layout, data, index);
         let data = self.delta.stage(data);
 
-        let bpp = self.layout.bytes_per_pixel;
-        let region = self.crop_rect(&data, kept);
-        let job = self.pipeline.submit(region, kept.width as usize * bpp);
+        let job = self.pipeline.submit_crop(Arc::clone(&data), kept);
 
         self.staged.push_back(Staged {
             index,
@@ -500,7 +499,10 @@ impl<W: Write> Encoder<W> {
         }
 
         let bpp = self.layout.bytes_per_pixel;
-        Over::Packed(self.pipeline.submit(region, rect.width as usize * bpp))
+        Over::Packed(
+            self.pipeline
+                .submit_region(region, rect.width as usize * bpp),
+        )
     }
 
     /// 書き出すフレームをキャンバスへ重ねる方法を決める

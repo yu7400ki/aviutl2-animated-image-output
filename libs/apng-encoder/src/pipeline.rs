@@ -3,6 +3,7 @@
 use crate::codec::{BufferPool, Candidate, Codec};
 use crate::error::Error;
 use crate::layout::Layout;
+use anim_core::{Rect, crop};
 use std::any::Any;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -15,16 +16,32 @@ use std::thread::{self, JoinHandle};
 /// ワーカーに付ける名前
 const WORKER_NAME: &str = "apng-compress";
 
-/// 圧縮を待つ、切り出し済みの領域1つ
-///
-/// 切り出した時点でフレームから独立し、圧縮はこのバッファだけを読む。
-struct Job {
-    /// 隙間なく並んだ矩形の中の画素
-    region: Vec<u8>,
-    /// 領域の1行のバイト数
-    region_stride: usize,
-    /// 圧縮した本体を組み立てるバッファ
-    body: Vec<u8>,
+/// 圧縮を待つ仕事1つ
+enum Job {
+    /// 切り出し済みの領域
+    ///
+    /// 切り出した時点でフレームから独立し、圧縮はこのバッファだけを読む。
+    Region {
+        /// 隙間なく並んだ矩形の中の画素
+        region: Vec<u8>,
+        /// 領域の1行のバイト数
+        region_stride: usize,
+        /// 圧縮した本体を組み立てるバッファ
+        body: Vec<u8>,
+    },
+    /// フレームと、そこから切り出す矩形
+    ///
+    /// 切り出しも圧縮を回す側で行う。
+    Crop {
+        /// 切り出す元のフレーム
+        data: Arc<Vec<u8>>,
+        /// 切り出す矩形
+        rect: Rect,
+        /// 切り出し先のバッファ
+        region: Vec<u8>,
+        /// 圧縮した本体を組み立てるバッファ
+        body: Vec<u8>,
+    },
 }
 
 /// ジョブ1つの結末
@@ -67,6 +84,41 @@ impl Drop for Pool {
     }
 }
 
+/// ジョブ1つを片付け、結末と領域のバッファを返す
+///
+/// 切り出しのジョブは領域を切り出してから圧縮する。切り出しと圧縮の巻き戻しは
+/// 結末として持ち帰るので、領域のバッファは巻き戻しても返る。
+///
+/// 返る時点でフレームを手放している。
+fn run(codec: &mut Codec, layout: &Layout, job: Job) -> (Outcome, Vec<u8>) {
+    let bpp = layout.bytes_per_pixel;
+    let (mut region, region_stride, body, source) = match job {
+        Job::Region {
+            region,
+            region_stride,
+            body,
+        } => (region, region_stride, body, None),
+        Job::Crop {
+            data,
+            rect,
+            region,
+            body,
+        } => (region, rect.width as usize * bpp, body, Some((data, rect))),
+    };
+
+    let compress = || {
+        if let Some((data, rect)) = &source {
+            crop(data, *rect, layout.stride, bpp, bpp, &mut region);
+        }
+        codec.compress(&region, region_stride, bpp, body)
+    };
+    let outcome = match panic::catch_unwind(AssertUnwindSafe(compress)) {
+        Ok(candidate) => Outcome::Compressed(candidate),
+        Err(payload) => Outcome::Panicked(payload),
+    };
+    (outcome, region)
+}
+
 /// ジョブを1つずつ取り、圧縮して結末を返す
 ///
 /// 巻き戻しで抜けたワーカーは抱えていたジョブの結末を返さず、駆動はその番号を
@@ -91,16 +143,7 @@ fn work(
             return;
         }
 
-        let Job {
-            region,
-            region_stride,
-            body,
-        } = job;
-        let compress = || codec.compress(&region, region_stride, layout.bytes_per_pixel, body);
-        let outcome = match panic::catch_unwind(AssertUnwindSafe(compress)) {
-            Ok(candidate) => Outcome::Compressed(candidate),
-            Err(payload) => Outcome::Panicked(payload),
-        };
+        let (outcome, region) = run(codec, layout, job);
         let done = Done {
             index,
             outcome,
@@ -215,17 +258,38 @@ impl Pipeline {
             .compress(region, region_stride, self.layout.bytes_per_pixel, body)
     }
 
-    /// 領域の圧縮を投入し、結果を指すための番号を返す
+    /// 切り出し済みの領域の圧縮を投入し、結果を指すための番号を返す
     ///
     /// `region` はパイプラインが引き取り、[`Pipeline::buffer`] から配り直す。
-    pub(crate) fn submit(&mut self, region: Vec<u8>, region_stride: usize) -> usize {
-        let index = self.submitted;
-        self.submitted += 1;
-        let job = Job {
+    pub(crate) fn submit_region(&mut self, region: Vec<u8>, region_stride: usize) -> usize {
+        let body = self.buffer();
+        self.submit(Job::Region {
             region,
             region_stride,
-            body: self.buffer(),
-        };
+            body,
+        })
+    }
+
+    /// フレームから `rect` を切り出す圧縮を投入し、結果を指すための番号を返す
+    ///
+    /// 切り出し先は [`Pipeline::buffer`] から借り、結果と一緒に配り直す。
+    pub(crate) fn submit_crop(&mut self, data: Arc<Vec<u8>>, rect: Rect) -> usize {
+        let region = self.buffer();
+        let body = self.buffer();
+        self.submit(Job::Crop {
+            data,
+            rect,
+            region,
+            body,
+        })
+    }
+
+    /// ジョブを投入し、結果を指すための番号を返す
+    ///
+    /// ワーカーが1つなら、投入した場で片付けて結末を溜める。
+    fn submit(&mut self, job: Job) -> usize {
+        let index = self.submitted;
+        self.submitted += 1;
 
         match &self.pool {
             Some(pool) => {
@@ -233,16 +297,14 @@ impl Pipeline {
                 jobs.send((index, job)).expect("ワーカーは畳むまで受け取る");
             }
             None => {
-                let Job {
-                    region,
-                    region_stride,
-                    body,
-                } = job;
-                let candidate =
-                    self.codec
-                        .compress(&region, region_stride, self.layout.bytes_per_pixel, body);
+                let (outcome, region) = run(&mut self.codec, &self.layout, job);
                 self.buffers.give(region);
-                self.ready.insert(index, Outcome::Compressed(candidate));
+                match outcome {
+                    Outcome::Compressed(candidate) => {
+                        self.ready.insert(index, Outcome::Compressed(candidate));
+                    }
+                    Outcome::Panicked(payload) => panic::resume_unwind(payload),
+                }
             }
         }
         index
@@ -304,7 +366,7 @@ mod tests {
         let expected: Vec<Vec<u8>> = regions
             .iter()
             .map(|region| {
-                let index = sequential.submit(region.clone(), STRIDE);
+                let index = sequential.submit_region(region.clone(), STRIDE);
                 sequential.take(index).into_body()
             })
             .collect();
@@ -312,10 +374,38 @@ mod tests {
         let mut parallel = pipeline(4);
         let indices: Vec<usize> = regions
             .iter()
-            .map(|region| parallel.submit(region.clone(), STRIDE))
+            .map(|region| parallel.submit_region(region.clone(), STRIDE))
             .collect();
         for (index, expected) in indices.into_iter().zip(&expected).rev() {
             assert_eq!(&parallel.take(index).into_body(), expected);
+        }
+    }
+
+    /// 切り出しのジョブは、同じ矩形を切り出した領域のジョブと同じ候補を返す
+    #[test]
+    fn a_crop_job_compresses_what_the_rect_cuts_out() {
+        const RECT: Rect = Rect {
+            x: 3,
+            y: 2,
+            width: 9,
+            height: 7,
+        };
+
+        let frame = Arc::new(region(5));
+        let mut cut = Vec::new();
+        crop(&frame, RECT, STRIDE, BPP, BPP, &mut cut);
+
+        for workers in [1, 2] {
+            let mut pipeline = pipeline(workers);
+            let index = pipeline.submit_region(cut.clone(), RECT.width as usize * BPP);
+            let expected = pipeline.take(index).into_body();
+
+            let index = pipeline.submit_crop(Arc::clone(&frame), RECT);
+            assert_eq!(
+                pipeline.take(index).into_body(),
+                expected,
+                "ワーカー{workers}個"
+            );
         }
     }
 
@@ -326,7 +416,7 @@ mod tests {
         let mut pipeline = pipeline(2);
         assert_eq!(pipeline.pooled(), 0, "配る前から抱えている");
 
-        let index = pipeline.submit(region.clone(), STRIDE);
+        let index = pipeline.submit_region(region.clone(), STRIDE);
         let body = pipeline.take(index).into_body();
         assert_eq!(pipeline.pooled(), 1, "領域のバッファが戻っていない");
 
@@ -363,7 +453,7 @@ mod tests {
         for abandoned in [false, true] {
             let (sender, receiver) = channel();
             let (results, done) = channel();
-            let job = Job {
+            let job = Job::Region {
                 region: region(0),
                 region_stride: STRIDE,
                 body: Vec::new(),
