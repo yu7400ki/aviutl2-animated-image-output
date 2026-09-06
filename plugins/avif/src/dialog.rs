@@ -1,5 +1,6 @@
 use crate::config::{ColorFormat, Config, YuvFormat, max_threads};
 use avif_encoder::{QUALITY_RANGE, SPEED_RANGE};
+use aviutl2::MAX_REPEAT;
 use std::ops::RangeInclusive;
 use win32_ui::{
     Dialog, MessageBox,
@@ -81,7 +82,7 @@ impl Inputs {
         Inputs {
             repeat: Number::new()
                 .value(default_config.repeat as i32)
-                .range(0, i32::MAX),
+                .range(0, MAX_REPEAT as i32),
             quality: RangedInput::new("品質", quality_range(), i32::from(default_config.quality)),
             speed: RangedInput::new(
                 "エンコード速度",
@@ -206,6 +207,8 @@ pub fn show_config_dialog(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aviutl2::IniConfig;
+    use aviutl2::ini::Ini;
 
     fn inputs() -> Inputs {
         Inputs::new(&Config::default())
@@ -361,5 +364,20 @@ mod tests {
         let collected = Inputs::new(&loaded).collect().expect("値域の内側");
 
         assert_eq!(collected.threads, 1);
+    }
+
+    /// i32へ折り返す回数を持つiniを読み直しても、ダイアログはその値のまま開ける
+    #[test]
+    fn a_number_of_plays_read_from_the_ini_fits_the_input() {
+        let mut ini = Ini::new();
+        ini.with_section(Some(Config::SECTION))
+            .set("repeat", "3000000000");
+        let config = Config::load_from(ini.section(Some(Config::SECTION)));
+
+        let collected = Inputs::new(&config)
+            .collect()
+            .expect("入力欄が扱える値になっている");
+
+        assert_eq!(collected.repeat, config.repeat);
     }
 }
