@@ -132,7 +132,7 @@ extern "C" fn output_shim<T: OutputPlugin>(oip: *mut sys::OUTPUT_INFO) -> bool {
             Ok(()) => {
                 logger::info(&format!(
                     "{name}: 出力完了 {}フレーム, {}, {:.2}秒",
-                    info.num_frames(),
+                    info.raw_num_frames(),
                     output_size(&info.savefile()),
                     start.elapsed().as_secs_f64()
                 ));

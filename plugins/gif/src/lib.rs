@@ -151,9 +151,9 @@ fn report_messages(report: &Report, total_pixels: u64) -> Vec<(Severity, String)
 fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
     let delay = info.frame_delay()?;
 
-    let width = info.width_u32()?;
-    let height = info.height_u32()?;
-    let num_frames = info.num_frames_u32()?;
+    let width = info.width()?;
+    let height = info.height()?;
+    let num_frames = info.num_frames()?;
     let total_pixels = u64::from(width) * u64::from(height) * u64::from(num_frames);
 
     write_or_discard(&info.savefile(), |output_file| {

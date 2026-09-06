@@ -38,60 +38,40 @@ impl<'a> OutputInfo<'a> {
         PathBuf::from(s.to_string_lossy())
     }
 
-    /// 幅
-    pub fn width(&self) -> i32 {
-        self.raw.w
-    }
-
-    /// 高さ
-    pub fn height(&self) -> i32 {
-        self.raw.h
-    }
-
-    /// フレームレート (分子)
-    pub fn rate(&self) -> i32 {
-        self.raw.rate
-    }
-
-    /// スケール (分母)
-    pub fn scale(&self) -> i32 {
-        self.raw.scale
-    }
-
-    /// フレーム数
-    pub fn num_frames(&self) -> i32 {
-        self.raw.n
-    }
-
-    /// u32へ検めた幅
-    pub fn width_u32(&self) -> Result<u32, String> {
+    /// 検めた幅
+    pub fn width(&self) -> Result<u32, String> {
         to_u32(self.raw.w, "幅")
     }
 
-    /// u32へ検めた高さ
-    pub fn height_u32(&self) -> Result<u32, String> {
+    /// 検めた高さ
+    pub fn height(&self) -> Result<u32, String> {
         to_u32(self.raw.h, "高さ")
     }
 
-    /// u32へ検めたフレームレート (分子)
-    pub fn rate_u32(&self) -> Result<u32, String> {
+    /// 検めたフレームレート (分子)
+    pub fn rate(&self) -> Result<u32, String> {
         to_u32(self.raw.rate, "フレームレート")
     }
 
-    /// u32へ検めたスケール (分母)
-    pub fn scale_u32(&self) -> Result<u32, String> {
+    /// 検めたスケール (分母)
+    pub fn scale(&self) -> Result<u32, String> {
         to_u32(self.raw.scale, "フレームレートのスケール")
     }
 
-    /// u32へ検めたフレーム数
-    pub fn num_frames_u32(&self) -> Result<u32, String> {
+    /// 検めたフレーム数
+    pub fn num_frames(&self) -> Result<u32, String> {
         to_u32(self.raw.n, "フレーム数")
+    }
+
+    /// ホストが渡したままのフレーム数
+    pub(crate) fn raw_num_frames(&self) -> i32 {
+        self.raw.n
     }
 
     /// 1フレームの表示時間 (scale / rate 秒)
     pub fn frame_delay(&self) -> Result<FrameDelay, String> {
-        let scale = self.scale_u32()?;
-        let rate = self.rate_u32()?;
+        let scale = self.scale()?;
+        let rate = self.rate()?;
         FrameDelay::new(scale, rate).map_err(|e| format!("フレームレート設定エラー: {}", e))
     }
 
@@ -364,11 +344,11 @@ mod tests {
         let raw = raw_info(1920, 1080, 30000, 1001, 24);
         let info = info(&raw);
 
-        assert_eq!(info.width_u32().unwrap(), 1920);
-        assert_eq!(info.height_u32().unwrap(), 1080);
-        assert_eq!(info.rate_u32().unwrap(), 30000);
-        assert_eq!(info.scale_u32().unwrap(), 1001);
-        assert_eq!(info.num_frames_u32().unwrap(), 24);
+        assert_eq!(info.width().unwrap(), 1920);
+        assert_eq!(info.height().unwrap(), 1080);
+        assert_eq!(info.rate().unwrap(), 30000);
+        assert_eq!(info.scale().unwrap(), 1001);
+        assert_eq!(info.num_frames().unwrap(), 24);
     }
 
     #[test]
@@ -376,17 +356,14 @@ mod tests {
         let raw = raw_info(-1, -2, -3, -4, -5);
         let info = info(&raw);
 
-        assert_eq!(info.width_u32().unwrap_err(), "幅が不正です: -1");
-        assert_eq!(info.height_u32().unwrap_err(), "高さが不正です: -2");
-        assert_eq!(info.rate_u32().unwrap_err(), "フレームレートが不正です: -3");
+        assert_eq!(info.width().unwrap_err(), "幅が不正です: -1");
+        assert_eq!(info.height().unwrap_err(), "高さが不正です: -2");
+        assert_eq!(info.rate().unwrap_err(), "フレームレートが不正です: -3");
         assert_eq!(
-            info.scale_u32().unwrap_err(),
+            info.scale().unwrap_err(),
             "フレームレートのスケールが不正です: -4"
         );
-        assert_eq!(
-            info.num_frames_u32().unwrap_err(),
-            "フレーム数が不正です: -5"
-        );
+        assert_eq!(info.num_frames().unwrap_err(), "フレーム数が不正です: -5");
     }
 
     /// 1フレームはscale / rate秒なので、スケールが分子、レートが分母

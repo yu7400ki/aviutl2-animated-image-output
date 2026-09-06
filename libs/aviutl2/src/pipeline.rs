@@ -122,7 +122,7 @@ impl OutputInfo<'_> {
         S: FnMut(Vec<u8>) -> Result<(), E> + Send,
         E: Send,
     {
-        let frames = self.num_frames();
+        let frames = self.raw_num_frames();
 
         run(
             frames,

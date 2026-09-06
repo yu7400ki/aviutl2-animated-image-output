@@ -32,9 +32,9 @@ fn encoder_workers(config: &Config) -> NonZeroUsize {
 
 fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
     let delay = info.frame_delay()?;
-    let width = info.width_u32()?;
-    let height = info.height_u32()?;
-    let num_frames = info.num_frames_u32()?;
+    let width = info.width()?;
+    let height = info.height()?;
+    let num_frames = info.num_frames()?;
 
     write_or_discard(&info.savefile(), |output_file| {
         let mut encoder = Encoder::with_workers(

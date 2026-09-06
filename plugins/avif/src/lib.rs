@@ -12,11 +12,6 @@ use std::io::BufWriter;
 use win32_ui::MessageBox;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
 
-/// 負の値をエンコーダへ渡さないためのi32からu32への変換
-fn to_u32(value: i32, name: &str) -> std::result::Result<u32, String> {
-    u32::try_from(value).map_err(|_| format!("{}が不正です: {}", name, value))
-}
-
 /// プラグイン設定をエンコーダの設定へ対応付ける
 fn encoder_config(config: &Config, timescale: u32) -> EncoderConfig {
     EncoderConfig {
@@ -47,12 +42,12 @@ impl Sequence {
     /// 1フレームが `scale` / `rate` 秒の素材が `num_frames` 枚
     ///
     /// 刻みを `rate` に据えると、1フレームは `scale` 刻みになる。
-    fn new(num_frames: i32, rate: i32, scale: i32) -> std::result::Result<Self, String> {
-        Ok(Self {
-            num_frames: to_u32(num_frames, "フレーム数")?,
-            timescale: to_u32(rate, "フレームレート")?,
-            duration: to_u32(scale, "フレームレートのスケール")?,
-        })
+    fn new(num_frames: u32, scale: u32, rate: u32) -> Self {
+        Self {
+            num_frames,
+            timescale: rate,
+            duration: scale,
+        }
     }
 
     /// 動きを持たない1枚の素材か
@@ -82,9 +77,9 @@ fn operating_point_message(config: &EncoderConfig, sequence: &Sequence) -> Strin
 }
 
 fn create_avif_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
-    let width = to_u32(info.width(), "幅")?;
-    let height = to_u32(info.height(), "高さ")?;
-    let sequence = Sequence::new(info.num_frames(), info.rate(), info.scale())?;
+    let width = info.width()?;
+    let height = info.height()?;
+    let sequence = Sequence::new(info.num_frames()?, info.scale()?, info.rate()?);
 
     let encoder_config = encoder_config(config, sequence.timescale);
 
@@ -178,12 +173,6 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn negative_dimensions_are_rejected() {
-        assert_eq!(to_u32(1920, "幅").unwrap(), 1920);
-        assert!(to_u32(-1, "幅").is_err());
-    }
-
-    #[test]
     fn color_format_maps_to_the_matching_color_type() {
         let rgb = encoder_config(
             &Config {
@@ -254,16 +243,9 @@ mod tests {
     /// 1フレームがscale / rate秒なので、rateが刻み数、scaleが1フレームの長さ
     #[test]
     fn the_rate_becomes_the_timescale_and_the_scale_becomes_the_duration() {
-        let sequence = Sequence::new(24, 30000, 1001).unwrap();
+        let sequence = Sequence::new(24, 1001, 30000);
         assert_eq!(sequence.timescale, 30000);
         assert_eq!(sequence.duration, 1001);
-    }
-
-    #[test]
-    fn a_negative_frame_count_or_frame_rate_is_rejected() {
-        assert!(Sequence::new(-1, 30000, 1001).is_err());
-        assert!(Sequence::new(24, -1, 1001).is_err());
-        assert!(Sequence::new(24, 30000, -1).is_err());
     }
 
     #[test]
@@ -303,7 +285,7 @@ mod tests {
             30,
         );
 
-        let message = operating_point_message(&config, &Sequence::new(24, 30, 1).unwrap());
+        let message = operating_point_message(&config, &Sequence::new(24, 1, 30));
         assert!(message.contains("speed 8"), "{message}");
         assert!(message.contains("realtime"), "{message}");
     }
@@ -319,10 +301,10 @@ mod tests {
             30,
         );
 
-        let single = operating_point_message(&config, &Sequence::new(1, 30, 1).unwrap());
+        let single = operating_point_message(&config, &Sequence::new(1, 1, 30));
         assert!(single.contains("all-intra"), "{single}");
 
-        let pair = operating_point_message(&config, &Sequence::new(2, 30, 1).unwrap());
+        let pair = operating_point_message(&config, &Sequence::new(2, 1, 30));
         assert!(!pair.contains("all-intra"), "{pair}");
     }
 

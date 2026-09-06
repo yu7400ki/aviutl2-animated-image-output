@@ -14,11 +14,6 @@ use std::path::Path;
 use win32_ui::MessageBox;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
 
-/// 負の値をエンコーダへ渡さないためのi32からu32への変換
-fn to_u32(value: i32, name: &str) -> Result<u32, String> {
-    u32::try_from(value).map_err(|_| format!("{}が不正です: {}", name, value))
-}
-
 /// 符号化器へ渡す、素材の枚数と時間の刻み
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Sequence {
@@ -35,13 +30,13 @@ impl Sequence {
     /// 1フレームが `scale` / `rate` 秒の素材が `num_frames` 枚
     ///
     /// 1秒あたりのtick数を `rate` / `scale` に据えると、1フレームは1tickになる。
-    fn new(num_frames: i32, rate: i32, scale: i32) -> Result<Self, String> {
-        Ok(Self {
-            num_frames: to_u32(num_frames, "フレーム数")?,
-            tps_numerator: to_u32(rate, "フレームレート")?,
-            tps_denominator: to_u32(scale, "フレームレートのスケール")?,
+    fn new(num_frames: u32, scale: u32, rate: u32) -> Self {
+        Self {
+            num_frames,
+            tps_numerator: rate,
+            tps_denominator: scale,
             duration: 1,
-        })
+        }
     }
 }
 
@@ -98,9 +93,9 @@ where
 }
 
 fn create_jxl_from_video(info: &OutputInfo, config: &Config) -> Result<(), String> {
-    let width = to_u32(info.width(), "幅")?;
-    let height = to_u32(info.height(), "高さ")?;
-    let sequence = Sequence::new(info.num_frames(), info.rate(), info.scale())?;
+    let width = info.width()?;
+    let height = info.height()?;
+    let sequence = Sequence::new(info.num_frames()?, info.scale()?, info.rate()?);
 
     write_frames(
         &info.savefile(),
@@ -202,8 +197,8 @@ mod tests {
     }
 
     /// 書き出しを通す素材の刻み。分子と分母の取り違えが値に出るよう互いに離す
-    const RATE: i32 = 30000;
-    const SCALE: i32 = 1001;
+    const RATE: u32 = 30000;
+    const SCALE: u32 = 1001;
 
     /// フレームを `declared` 枚宣言し、`frames` 枚だけ投入して閉じる
     fn write_animation(path: &Path, declared: u32, frames: u32) -> Result<(), String> {
@@ -211,7 +206,7 @@ mod tests {
             color_format: ColorFormat::Rgba32,
             ..Config::default()
         };
-        let sequence = Sequence::new(declared as i32, RATE, SCALE).unwrap();
+        let sequence = Sequence::new(declared, SCALE, RATE);
 
         write_frames(
             path,
@@ -230,23 +225,10 @@ mod tests {
         )
     }
 
-    #[test]
-    fn negative_dimensions_are_rejected() {
-        assert_eq!(to_u32(1920, "幅").unwrap(), 1920);
-        assert!(to_u32(-1, "幅").is_err());
-    }
-
-    #[test]
-    fn a_negative_frame_count_or_frame_rate_is_rejected() {
-        assert!(Sequence::new(-1, 30000, 1001).is_err());
-        assert!(Sequence::new(24, -1, 1001).is_err());
-        assert!(Sequence::new(24, 30000, -1).is_err());
-    }
-
     /// 1フレームがscale / rate秒なので、rateが分子、scaleが分母
     #[test]
     fn the_rate_and_the_scale_become_the_ticks_per_second() {
-        let sequence = Sequence::new(24, 30000, 1001).unwrap();
+        let sequence = Sequence::new(24, 1001, 30000);
 
         assert_eq!(sequence.num_frames, 24);
         assert_eq!(sequence.tps_numerator, 30000);
@@ -256,14 +238,14 @@ mod tests {
     /// 1秒あたりのtick数がフレームレートそのものなので、1フレームは1tick
     #[test]
     fn every_frame_lasts_one_tick() {
-        assert_eq!(Sequence::new(24, 30000, 1001).unwrap().duration, 1);
-        assert_eq!(Sequence::new(1, 30, 1).unwrap().duration, 1);
+        assert_eq!(Sequence::new(24, 1001, 30000).duration, 1);
+        assert_eq!(Sequence::new(1, 1, 30).duration, 1);
     }
 
     /// 素材の刻みがそのままエンコーダの1秒あたりのtick数になる
     #[test]
     fn the_ticks_per_second_reach_the_encoder() {
-        let sequence = Sequence::new(24, 30000, 1001).unwrap();
+        let sequence = Sequence::new(24, 1001, 30000);
         let config = encoder_config(&Config::default(), sequence);
 
         assert_eq!(config.tps_numerator, 30000);
@@ -272,7 +254,7 @@ mod tests {
 
     #[test]
     fn color_format_maps_to_the_matching_color_type() {
-        let sequence = Sequence::new(24, 30, 1).unwrap();
+        let sequence = Sequence::new(24, 1, 30);
 
         let rgb = encoder_config(
             &Config {
@@ -295,7 +277,7 @@ mod tests {
 
     #[test]
     fn the_compression_settings_are_passed_through() {
-        let sequence = Sequence::new(24, 30, 1).unwrap();
+        let sequence = Sequence::new(24, 1, 30);
 
         let lossy = encoder_config(
             &Config {
@@ -331,7 +313,7 @@ mod tests {
     /// スレッド数は符号化器の欄幅まで飽和して渡る
     #[test]
     fn threads_are_passed_through_up_to_the_field_width() {
-        let sequence = Sequence::new(24, 30, 1).unwrap();
+        let sequence = Sequence::new(24, 1, 30);
         let config = encoder_config(
             &Config {
                 threads: usize::MAX,
@@ -384,8 +366,8 @@ mod tests {
         assert_eq!(&bytes[..2], &[0xFF, 0x0A]);
 
         let (animation, frames) = decode(&bytes);
-        assert_eq!(animation.tps_numerator, RATE as u32);
-        assert_eq!(animation.tps_denominator, SCALE as u32);
+        assert_eq!(animation.tps_numerator, RATE);
+        assert_eq!(animation.tps_denominator, SCALE);
         assert_eq!(frames.len(), 4);
         let ticks: Vec<u32> = frames.iter().map(|frame| frame.duration_ticks).collect();
         assert_eq!(ticks, [1, 1, 1, 1]);
@@ -405,7 +387,7 @@ mod tests {
     #[test]
     fn an_unwritable_ticks_per_second_reaches_the_user() {
         let path = temp_path();
-        let sequence = Sequence::new(2, 1, 1025).unwrap();
+        let sequence = Sequence::new(2, 1025, 1);
 
         let message = write_frames(
             &path,
