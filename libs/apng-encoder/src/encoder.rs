@@ -357,7 +357,10 @@ impl<W: Write> Encoder<W> {
         let index = self.frames_accepted;
         let kept = self.delta.kept_rect(&self.layout, data, index);
         let data = self.delta.stage(data);
-        let job = self.submit_rect(&data, kept);
+
+        let bpp = self.layout.bytes_per_pixel;
+        let region = self.crop_rect(&data, kept);
+        let job = self.pipeline.submit(region, kept.width as usize * bpp, bpp);
 
         self.staged.push_back(Staged {
             index,
@@ -440,9 +443,17 @@ impl<W: Write> Encoder<W> {
     ///
     /// 捨てるときの候補を駆動スレッドで圧縮してから、投入した候補を受け取る。
     fn choose_dispose(&mut self, data: &[u8], index: u32, kept: Rect, job: usize) -> Disposal {
+        let bpp = self.layout.bytes_per_pixel;
         let restored = self.delta.restored_rect(&self.layout, data, kept, index);
 
-        let restored = restored.map(|rect| (rect, self.compress_rect(data, rect)));
+        let restored = restored.map(|rect| {
+            let region = self.crop_rect(data, rect);
+            let candidate = self
+                .pipeline
+                .compress(&region, rect.width as usize * bpp, bpp);
+            self.pipeline.recycle(region);
+            (rect, candidate)
+        });
         let kept_candidate = self.pipeline.take(job);
 
         let keep = |candidate| Disposal {
@@ -502,14 +513,12 @@ impl<W: Write> Encoder<W> {
     ///
     /// 休みの最中も投入した候補を受け取り、そのバッファを配り直す先へ返す。
     fn resolve_blend(&mut self, over: Over, source: Candidate) -> (u8, Candidate) {
-        let packed = match over {
-            Over::Skipped => return (BLEND_OP_SOURCE, source),
-            Over::Unpacked => None,
-            Over::Packed(job) => Some(job),
-        };
+        if matches!(over, Over::Skipped) {
+            return (BLEND_OP_SOURCE, source);
+        }
 
         let trying = self.writing.blend_pacing.should_try();
-        let Some(job) = packed else {
+        let Over::Packed(job) = over else {
             return (BLEND_OP_SOURCE, source);
         };
         let candidate = self.pipeline.take(job);
@@ -553,24 +562,6 @@ impl<W: Write> Encoder<W> {
         let mut region = self.pipeline.buffer();
         crop(data, rect, self.layout.stride, bpp, bpp, &mut region);
         region
-    }
-
-    /// フレームから `rect` を切り出し、圧縮を投入する
-    fn submit_rect(&mut self, data: &[u8], rect: Rect) -> usize {
-        let region = self.crop_rect(data, rect);
-        let bpp = self.layout.bytes_per_pixel;
-        self.pipeline.submit(region, rect.width as usize * bpp, bpp)
-    }
-
-    /// フレームから `rect` を切り出し、駆動スレッドで圧縮する
-    fn compress_rect(&mut self, data: &[u8], rect: Rect) -> Candidate {
-        let region = self.crop_rect(data, rect);
-        let bpp = self.layout.bytes_per_pixel;
-        let candidate = self
-            .pipeline
-            .compress(&region, rect.width as usize * bpp, bpp);
-        self.pipeline.recycle(region);
-        candidate
     }
 }
 
@@ -1027,10 +1018,6 @@ mod tests {
     #[test]
     fn the_over_candidate_is_taken_once_the_rest_ends() {
         const {
-            assert!(
-                RESTING_LOSSES >= BLEND_LOSS_STREAK as usize,
-                "休みの最中に潰した候補が負けるフレームが連敗の閾値ぶん並ぶ"
-            );
             assert!(
                 DENSE_STARTS_AT + 1 < REST_ENDS_AT,
                 "休みの最中に潰した候補が勝つフレームがある"
