@@ -4,7 +4,7 @@ use crate::delta::{Delta, Pending, Region};
 use crate::error::{EncodingError, Error};
 use crate::layout::Layout;
 use crate::{Config, EFFORT_RANGE, QUALITY_RANGE};
-use anim_core::ColorType;
+use anim_core::{ColorType, gcd};
 use jxl_sys::{
     JXL_ENC_ERR_OOM, JXL_ENC_ERROR, JXL_ENC_FRAME_SETTING_EFFORT, JXL_ENC_NEED_MORE_OUTPUT,
     JXL_ENC_SUCCESS, JXL_FALSE, JXL_NATIVE_ENDIAN, JXL_TRUE, JXL_TYPE_UINT8, JxlBasicInfo,
@@ -42,15 +42,6 @@ fn allocation_failed() -> Error {
     Error::Encode(EncodingError::new(JXL_ENC_ERROR, JXL_ENC_ERR_OOM))
 }
 
-/// 最大公約数
-fn gcd(a: u32, b: u32) -> u32 {
-    let (mut a, mut b) = (a, b);
-    while b != 0 {
-        (a, b) = (b, a % b);
-    }
-    a
-}
-
 /// アニメーションヘッダへ書ける1秒あたりのtick数
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Tps {
@@ -74,7 +65,7 @@ impl Tps {
             return Err(invalid());
         }
 
-        let divisor = gcd(numerator, denominator);
+        let divisor = gcd(numerator, denominator) as u32;
         let tps = Tps {
             numerator: numerator / divisor,
             denominator: denominator / divisor,
