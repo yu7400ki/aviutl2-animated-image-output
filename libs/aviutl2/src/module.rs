@@ -36,11 +36,19 @@ fn query_dll_path() -> Result<PathBuf, String> {
         (buffer, len)
     };
 
-    if len > 0 {
-        let dll_path = String::from_utf16_lossy(&buffer[..len as usize]);
-        Ok(PathBuf::from(dll_path))
-    } else {
-        Err("GetModuleFileNameW failed".to_string())
+    let len = written_len(len, buffer.len())?;
+    Ok(PathBuf::from(String::from_utf16_lossy(&buffer[..len])))
+}
+
+/// 書き込まれた文字数のうち、パスとして読める長さ
+///
+/// バッファに収まらなかったときは切り詰められた文字列と満杯の長さが残るため、
+/// 満杯は失敗になる。
+fn written_len(len: u32, capacity: usize) -> Result<usize, String> {
+    match len as usize {
+        0 => Err("GetModuleFileNameW failed".to_string()),
+        len if len == capacity => Err(format!("プラグインのパスが{}文字に収まりません", capacity)),
+        len => Ok(len),
     }
 }
 
@@ -61,6 +69,20 @@ mod tests {
     #[test]
     fn the_path_points_at_the_module_that_linked_this_crate() {
         assert_eq!(dll_path().unwrap(), std::env::current_exe().unwrap());
+    }
+
+    /// バッファが満杯なら切り詰められているので、パスとして読まない
+    #[test]
+    fn a_length_that_fills_the_buffer_is_a_failure() {
+        assert_eq!(written_len(259, 260), Ok(259));
+        assert_eq!(
+            written_len(260, 260),
+            Err("プラグインのパスが260文字に収まりません".to_string())
+        );
+        assert_eq!(
+            written_len(0, 260),
+            Err("GetModuleFileNameW failed".to_string())
+        );
     }
 
     /// 何度呼んでも同じ結果を返す
