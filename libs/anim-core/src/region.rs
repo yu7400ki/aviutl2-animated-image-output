@@ -6,7 +6,7 @@ use crate::diff::Rect;
 ///
 /// `in_bpp` と `out_bpp` が等しければそのまま複製し、`out_bpp` が小さければ
 /// 各画素の先頭 `out_bpp` バイトだけを残す。
-pub fn append_pixels(pixels: &[u8], in_bpp: usize, out_bpp: usize, out: &mut Vec<u8>) {
+pub(crate) fn append_pixels(pixels: &[u8], in_bpp: usize, out_bpp: usize, out: &mut Vec<u8>) {
     if in_bpp == out_bpp {
         out.extend_from_slice(pixels);
         return;

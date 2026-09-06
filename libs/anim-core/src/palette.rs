@@ -16,14 +16,6 @@ const TABLE_MASK: usize = TABLE_LEN - 1;
 /// 値を表全体へ散らす乗数 (2^32を黄金比で割った奇数)
 const HASH_MULTIPLIER: u32 = 0x9E37_79B1;
 
-/// 色を `R | G<<8 | B<<16 | A<<24` へ詰める
-///
-/// `BPP` が3の画素はアルファを255とみなす。
-fn pack<const BPP: usize>(pixel: &[u8]) -> u32 {
-    let alpha = if BPP == 4 { pixel[3] } else { u8::MAX };
-    u32::from_le_bytes([pixel[0], pixel[1], pixel[2], alpha])
-}
-
 /// 色が最初に占める表の位置
 fn slot_of(color: u32) -> usize {
     (color.wrapping_mul(HASH_MULTIPLIER) >> (u32::BITS - TABLE_BITS)) as usize
@@ -65,10 +57,12 @@ impl Table {
 
 /// 全フレームに現れた色の和集合
 ///
+/// 色は `R | G<<8 | B<<16 | A<<24` へ詰めた値でやり取りする。
+///
 /// 見つけた色が [`MAX_COLORS`] を超えた時点で、以降は何も数えない。
 pub struct Colors {
     table: Table,
-    /// [`pack`] で詰めた色を見つけた順に並べたもの
+    /// 見つけた順に並べた色
     entries: Vec<u32>,
     /// 上限を超えたか
     exceeded: bool,
@@ -123,56 +117,6 @@ impl Colors {
         self.entries.iter().copied()
     }
 
-    /// 画素の色の添字。数えていなければ `None`
-    ///
-    /// `pixel` は1画素 `bpp` バイトが並んでいること。`bpp` は3か4であること。
-    pub fn index_of_pixel(&self, pixel: &[u8], bpp: usize) -> Option<u8> {
-        match bpp {
-            3 => self.table.lookup(pack::<3>(pixel)),
-            4 => self.table.lookup(pack::<4>(pixel)),
-            other => panic!("1画素あたり3バイトか4バイトのみ扱える: {other}"),
-        }
-    }
-
-    /// 画素列を添字へ写して `out` へ追記する
-    ///
-    /// まだ数えていない色は見つけた順に数える。`pixels` は1画素 `bpp` バイトが
-    /// 隙間なく並んでいること。`bpp` は3か4であること。
-    ///
-    /// 上限を超えて数えられない色に当たったら、`out` を呼び出し前の長さへ戻して
-    /// 偽を返す。
-    pub fn append_indices(&mut self, pixels: &[u8], bpp: usize, out: &mut Vec<u8>) -> bool {
-        out.reserve(pixels.len() / bpp);
-        let start = out.len();
-        let mapped = match bpp {
-            3 => self.map::<3>(pixels, out),
-            4 => self.map::<4>(pixels, out),
-            other => panic!("1画素あたり3バイトか4バイトのみ扱える: {other}"),
-        };
-        if !mapped {
-            out.truncate(start);
-        }
-        mapped
-    }
-
-    fn map<const BPP: usize>(&mut self, pixels: &[u8], out: &mut Vec<u8>) -> bool {
-        for pixel in pixels.chunks_exact(BPP) {
-            let color = pack::<BPP>(pixel);
-            let index = match self.table.lookup(color) {
-                Some(index) => index,
-                None => {
-                    if !self.insert(color) {
-                        self.exceeded = true;
-                        return false;
-                    }
-                    (self.entries.len() - 1) as u8
-                }
-            };
-            out.push(index);
-        }
-        true
-    }
-
     /// 色を1つ覚える。上限を超えて入らなければ偽を返す
     fn insert(&mut self, color: u32) -> bool {
         let mut slot = slot_of(color);
@@ -198,23 +142,13 @@ impl Colors {
 mod tests {
     use super::*;
 
-    /// RGBA8の画素列を作る
-    fn rgba(pixels: &[[u8; 4]]) -> Vec<u8> {
-        pixels.iter().flatten().copied().collect()
-    }
-
-    /// 全画素が違う色になるRGB8の画素列を作る
-    fn distinct_rgb(count: usize) -> Vec<u8> {
-        (0..count)
-            .flat_map(|i| [i as u8, (i >> 8) as u8, (i >> 16) as u8])
-            .collect()
-    }
-
-    /// 画素列を数えた表
-    fn counted(pixels: &[u8], bpp: usize) -> Colors {
-        let mut colors = Colors::new();
-        assert!(colors.append_indices(pixels, bpp, &mut Vec::new()));
-        colors
+    /// 色を順に数えた表
+    fn counted(colors: impl IntoIterator<Item = u32>) -> Colors {
+        let mut counted = Colors::new();
+        for color in colors {
+            assert!(counted.observe_color(color), "{color:#010X} が入らない");
+        }
+        counted
     }
 
     /// 数えていない色を引いても、走査は表の空きで止まる
@@ -223,14 +157,14 @@ mod tests {
     /// 埋めた表でも一周しないことを踏む。
     #[test]
     fn a_color_outside_the_table_is_reported_as_missing() {
-        let colors = counted(&[1, 2, 3, 4, 5, 6], 3);
-        assert_eq!(colors.index_of(pack::<3>(&[1, 2, 3])), Some(0));
-        assert_eq!(colors.index_of(pack::<3>(&[4, 5, 6])), Some(1));
+        let colors = counted([0xFF03_0201, 0xFF06_0504]);
+        assert_eq!(colors.index_of(0xFF03_0201), Some(0));
+        assert_eq!(colors.index_of(0xFF06_0504), Some(1));
         for color in 0..8192u32 {
             assert_eq!(colors.index_of(color), None, "{color:#010X}");
         }
 
-        let full = counted(&distinct_rgb(MAX_COLORS), 3);
+        let full = counted((0..MAX_COLORS as u32).map(|i| 0xFF00_0000 | i));
         for color in 0..8192u32 {
             assert_eq!(full.index_of(color), None, "{color:#010X}");
         }
@@ -243,25 +177,24 @@ mod tests {
     /// ぶん、表の端を越えて先頭から空きを探すことになる。
     #[test]
     fn colors_colliding_at_the_last_slot_wrap_to_the_front() {
-        /// 表の最後の位置へ写る色 (詰めると `0x0000_03DB`)
-        const FIRST: [u8; 4] = [0xDB, 0x03, 0x00, 0x00];
-        /// 同じ位置へ写るもう1つの色 (詰めると `0x0000_07B6`)
-        const SECOND: [u8; 4] = [0xB6, 0x07, 0x00, 0x00];
+        /// 表の最後の位置へ写る色
+        const FIRST: u32 = 0x0000_03DB;
+        /// 同じ位置へ写るもう1つの色
+        const SECOND: u32 = 0x0000_07B6;
 
-        assert_eq!(slot_of(pack::<4>(&FIRST)), TABLE_MASK, "末尾へ写らない色");
-        assert_eq!(slot_of(pack::<4>(&SECOND)), TABLE_MASK, "末尾へ写らない色");
+        assert_eq!(slot_of(FIRST), TABLE_MASK, "末尾へ写らない色");
+        assert_eq!(slot_of(SECOND), TABLE_MASK, "末尾へ写らない色");
 
-        let colors = counted(&rgba(&[FIRST, SECOND]), 4);
+        let colors = counted([FIRST, SECOND]);
         assert_eq!(colors.count(), 2, "2色目を数えていない");
-        assert_eq!(colors.table.keys[TABLE_MASK], pack::<4>(&FIRST));
+        assert_eq!(colors.table.keys[TABLE_MASK], FIRST);
         assert_eq!(
-            colors.table.keys[0],
-            pack::<4>(&SECOND),
+            colors.table.keys[0], SECOND,
             "2色目が先頭へ回り込んでいない"
         );
         assert_ne!(colors.table.values[0], 0, "回り込んだ位置が空のまま");
-        assert_eq!(colors.index_of(pack::<4>(&FIRST)), Some(0));
-        assert_eq!(colors.index_of(pack::<4>(&SECOND)), Some(1));
+        assert_eq!(colors.index_of(FIRST), Some(0));
+        assert_eq!(colors.index_of(SECOND), Some(1));
     }
 
     /// 1色ずつ数えた色は、見つけた順の添字で引ける
@@ -277,6 +210,7 @@ mod tests {
         assert_eq!(colors.index_of(0x10), Some(1));
         assert_eq!(colors.index_of(0x20), Some(2));
         assert_eq!(colors.index_of(0x40), None);
+        assert_eq!(colors.colors().collect::<Vec<u32>>(), [0x30, 0x10, 0x20]);
     }
 
     /// 上限を超えた色は入らず、そこまでに数えた色は引けたまま残る
@@ -295,76 +229,5 @@ mod tests {
             colors.index_of(MAX_COLORS as u32 - 1),
             Some((MAX_COLORS - 1) as u8)
         );
-    }
-
-    /// 写しながら数えると、添字は色を見つけた順に振られる
-    #[test]
-    fn appending_indices_assigns_them_in_the_order_the_colors_are_found() {
-        let pixels = rgba(&[
-            [0x30, 0, 0, 0xFF],
-            [0x10, 0, 0, 0xFF],
-            [0x30, 0, 0, 0xFF],
-            [0x10, 0, 0, 0x80],
-        ]);
-        let mut colors = Colors::new();
-        let mut indices = Vec::new();
-        assert!(colors.append_indices(&pixels, 4, &mut indices));
-
-        assert_eq!(indices, [0, 1, 0, 2]);
-        assert_eq!(
-            colors.colors().collect::<Vec<u32>>(),
-            [
-                pack::<4>(&[0x30, 0, 0, 0xFF]),
-                pack::<4>(&[0x10, 0, 0, 0xFF]),
-                pack::<4>(&[0x10, 0, 0, 0x80]),
-            ]
-        );
-    }
-
-    /// 既に数えた色は、写すときも同じ添字を引く
-    #[test]
-    fn already_counted_colors_keep_their_indices_when_mapped() {
-        let mut colors = counted(&distinct_rgb(3), 3);
-
-        let mut indices = Vec::new();
-        assert!(colors.append_indices(&distinct_rgb(3), 3, &mut indices));
-        assert_eq!(indices, [0, 1, 2]);
-        assert_eq!(colors.count(), 3);
-    }
-
-    /// 上限を超える画素列は写せず、追記した添字も残らない
-    #[test]
-    fn a_pixel_beyond_the_limit_leaves_the_output_untouched() {
-        let mut colors = Colors::new();
-        let mut indices = vec![0xAA];
-        assert!(!colors.append_indices(&distinct_rgb(MAX_COLORS + 1), 3, &mut indices));
-
-        assert_eq!(indices, [0xAA]);
-        assert!(
-            !colors.observe_color(pack::<3>(&[0, 0, 0])),
-            "溢れた後に数えている"
-        );
-    }
-
-    /// 画素から添字を引ける。数えていない色は `None`
-    #[test]
-    fn a_counted_pixel_is_looked_up_by_its_bytes() {
-        let colors = counted(&rgba(&[[1, 2, 3, 0xFF], [4, 5, 6, 0x80]]), 4);
-
-        assert_eq!(colors.index_of_pixel(&[1, 2, 3, 0xFF], 4), Some(0));
-        assert_eq!(colors.index_of_pixel(&[1, 2, 3], 3), Some(0));
-        assert_eq!(colors.index_of_pixel(&[4, 5, 6, 0x80], 4), Some(1));
-        assert_eq!(colors.index_of_pixel(&[4, 5, 6], 3), None);
-    }
-
-    /// 写しながら数えた色も、1色ずつ数えた色と同じ表に載る
-    #[test]
-    fn the_two_ways_of_counting_share_one_table() {
-        let mut colors = counted(&rgba(&[[1, 2, 3, 0xFF]]), 4);
-        assert!(colors.observe_color(pack::<3>(&[4, 5, 6])));
-
-        assert_eq!(colors.index_of(pack::<3>(&[1, 2, 3])), Some(0));
-        assert_eq!(colors.index_of(pack::<3>(&[4, 5, 6])), Some(1));
-        assert_eq!(colors.count(), 2);
     }
 }
