@@ -23,7 +23,7 @@ pub mod pixel;
 pub mod __private;
 mod macros;
 
-pub use config::{IniConfig, MAX_REPEAT};
+pub use config::{IniConfig, MAX_REPEAT, read};
 pub use output::{FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, write_or_discard};
 pub use pipeline::PipelineError;
 pub use pixel::ColorFormat;
