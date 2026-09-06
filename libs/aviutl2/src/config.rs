@@ -3,6 +3,11 @@
 use ini::Ini;
 use std::path::PathBuf;
 
+/// 設定が採れるループ回数の上限
+///
+/// ダイアログの数値欄が扱える上限。
+pub const MAX_REPEAT: u32 = i32::MAX as u32;
+
 /// プラグイン設定のini永続化
 ///
 /// `load_from` / `save_to` でフィールドの読み書きだけを実装すれば、

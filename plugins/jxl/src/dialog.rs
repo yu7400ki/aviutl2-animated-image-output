@@ -1,4 +1,5 @@
-use crate::config::{ColorFormat, Config, MAX_REPEAT, max_threads};
+use crate::config::{ColorFormat, Config, max_threads};
+use aviutl2::MAX_REPEAT;
 use jxl_encoder::{EFFORT_RANGE, QUALITY_RANGE};
 use std::ops::RangeInclusive;
 use win32_ui::{

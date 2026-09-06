@@ -1,13 +1,8 @@
 pub use aviutl2::ColorFormat;
-use aviutl2::IniConfig;
 use aviutl2::ini::{Ini, Properties};
+use aviutl2::{IniConfig, MAX_REPEAT};
 use jxl_encoder::{EFFORT_RANGE, QUALITY_RANGE};
 use std::thread::available_parallelism;
-
-/// 設定が採れるループ回数の上限
-///
-/// ダイアログの数値欄が扱える上限。
-pub const MAX_REPEAT: u32 = i32::MAX as u32;
 
 /// 設定が採れるスレッド数の上限
 ///
