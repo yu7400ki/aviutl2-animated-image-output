@@ -7,7 +7,7 @@ use std::sync::Arc;
 ///
 /// 投入と決定は別の時点で進む。投入は直前に投入されたフレームを進め、決定は
 /// 直前に決定したフレームとそれを描く直前のキャンバスを進める。面は分け持ち、
-/// どこからも指されなくなったものを次の写し先へ回す。
+/// どこからも指されなくなったところで落ちる。
 pub(crate) struct Delta {
     /// 直前に投入されたフレーム
     previous: Arc<Vec<u8>>,
@@ -21,8 +21,6 @@ pub(crate) struct Delta {
     /// 保留中のフレームをdispose_op=PREVIOUSで捨てると、この内容が復元される。
     /// 復元先は常に過去のいずれかのフレームそのものなので、1面あれば足りる。
     canvas: Arc<Vec<u8>>,
-    /// 写し先へ配り直す面
-    spare: Vec<Vec<u8>>,
 }
 
 impl Delta {
@@ -31,38 +29,24 @@ impl Delta {
             previous: Arc::default(),
             decided: Arc::default(),
             canvas: Arc::default(),
-            spare: Vec::new(),
         }
     }
 
-    /// フレームを写し取り、直前に投入されたフレームとして覚える
+    /// 受け取った面を、直前に投入されたフレームとして覚える
     ///
-    /// 写し先は配り直された面を使う。それまで直前に投入されていたフレームと、写し取った
-    /// フレームを返し、どちらの面も投入されたフレームとして分け持つ。先頭フレームの
-    /// 直前は空の面になる。
-    pub(crate) fn stage(&mut self, data: &[u8]) -> (Arc<Vec<u8>>, Arc<Vec<u8>>) {
-        let mut frame = self.spare.pop().unwrap_or_default();
-        frame.clear();
-        frame.extend_from_slice(data);
-
-        let previous = std::mem::replace(&mut self.previous, Arc::new(frame));
+    /// それまで直前に投入されていたフレームと、受け取ったフレームを返し、どちらの面も
+    /// 投入されたフレームとして分け持つ。先頭フレームの直前は空の面になる。
+    pub(crate) fn stage(&mut self, data: Vec<u8>) -> (Arc<Vec<u8>>, Arc<Vec<u8>>) {
+        let previous = std::mem::replace(&mut self.previous, Arc::new(data));
         (previous, Arc::clone(&self.previous))
     }
 
     /// 決定を終えたフレームを覚え、保留中のフレームの `dispose` でキャンバスを進める
-    ///
-    /// 指す先を失った面は写し先へ配り直す。
     pub(crate) fn advance(&mut self, data: Arc<Vec<u8>>, dispose: u8) {
         let decided = std::mem::replace(&mut self.decided, data);
         // 捨てない場合だけ、直前に決定したフレームがそのままキャンバスとして残る
-        let released = if dispose == DISPOSE_OP_NONE {
-            std::mem::replace(&mut self.canvas, decided)
-        } else {
-            decided
-        };
-
-        if let Ok(frame) = Arc::try_unwrap(released) {
-            self.spare.push(frame);
+        if dispose == DISPOSE_OP_NONE {
+            self.canvas = decided;
         }
     }
 
@@ -80,12 +64,6 @@ impl Delta {
         } else {
             &self.canvas
         }
-    }
-
-    /// 配り直しを待っている面
-    #[cfg(test)]
-    pub(crate) fn spare(&self) -> &[Vec<u8>] {
-        &self.spare
     }
 
     /// 直前に投入されたフレームの面

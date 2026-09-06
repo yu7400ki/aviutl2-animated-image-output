@@ -41,7 +41,7 @@ fn encode(width: u32, height: u32, color_type: ColorType, input: &[Vec<u8>]) -> 
     )
     .unwrap();
     for data in input {
-        encoder.add_frame(data, delay).unwrap();
+        encoder.add_frame(data.clone(), delay).unwrap();
     }
     encoder.finish().unwrap().into_inner()
 }
@@ -223,7 +223,7 @@ fn num_plays_reaches_the_animation_control() {
     )
     .unwrap();
     encoder
-        .add_frame(&input[0], FrameDelay::new(1, 30).unwrap())
+        .add_frame(input[0].clone(), FrameDelay::new(1, 30).unwrap())
         .unwrap();
     let bytes = encoder.finish().unwrap().into_inner();
 
@@ -238,7 +238,7 @@ fn out_of_range_delay_is_approximated() {
         let mut encoder =
             Encoder::new(Cursor::new(Vec::new()), 2, 2, 1, config(ColorType::Rgba8)).unwrap();
         encoder
-            .add_frame(&input[0], FrameDelay::new(1001, 120000).unwrap())
+            .add_frame(input[0].clone(), FrameDelay::new(1001, 120000).unwrap())
             .unwrap();
         encoder.finish().unwrap().into_inner()
     };
@@ -287,7 +287,7 @@ fn compression_level_changes_the_output_size() {
         )
         .unwrap();
         encoder
-            .add_frame(&data, FrameDelay::new(1, 30).unwrap())
+            .add_frame(data.clone(), FrameDelay::new(1, 30).unwrap())
             .unwrap();
         encoder.finish().unwrap().into_inner().len()
     };
@@ -351,7 +351,7 @@ fn a_failed_write_poisons_the_encoder() {
 
     let outcomes: Vec<Result<(), Error>> = input
         .iter()
-        .map(|frame| encoder.add_frame(frame, delay))
+        .map(|frame| encoder.add_frame(frame.clone(), delay))
         .collect();
     let failed = outcomes
         .iter()
@@ -371,7 +371,7 @@ fn frame_of_the_wrong_size_is_rejected() {
     let mut encoder =
         Encoder::new(Cursor::new(Vec::new()), 4, 4, 1, config(ColorType::Rgba8)).unwrap();
     assert!(matches!(
-        encoder.add_frame(&[0u8; 63], FrameDelay::new(1, 30).unwrap()),
+        encoder.add_frame(vec![0u8; 63], FrameDelay::new(1, 30).unwrap()),
         Err(Error::FrameSizeMismatch {
             expected: 64,
             actual: 63
@@ -385,10 +385,10 @@ fn extra_frame_is_rejected() {
     let delay = FrameDelay::new(1, 30).unwrap();
     let mut encoder =
         Encoder::new(Cursor::new(Vec::new()), 2, 2, 1, config(ColorType::Rgba8)).unwrap();
-    encoder.add_frame(&input[0], delay).unwrap();
+    encoder.add_frame(input[0].clone(), delay).unwrap();
 
     assert!(matches!(
-        encoder.add_frame(&input[0], delay),
+        encoder.add_frame(input[0].clone(), delay),
         Err(Error::FrameCountMismatch {
             expected: 1,
             actual: 2
@@ -402,7 +402,7 @@ fn missing_frame_is_rejected_on_finish() {
     let mut encoder =
         Encoder::new(Cursor::new(Vec::new()), 2, 2, 3, config(ColorType::Rgba8)).unwrap();
     encoder
-        .add_frame(&input[0], FrameDelay::new(1, 30).unwrap())
+        .add_frame(input[0].clone(), FrameDelay::new(1, 30).unwrap())
         .unwrap();
 
     assert!(matches!(

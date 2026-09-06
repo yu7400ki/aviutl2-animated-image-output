@@ -64,7 +64,7 @@ impl OutputPlugin for ApngOutputPlugin {
 
             info.encode_frames(config.color_format, |frame_data| {
                 encoder
-                    .add_frame(&frame_data, delay)
+                    .add_frame(frame_data, delay)
                     .map_err(|e| e.to_string())
             })
             .map_err(|e| e.to_string())?;
@@ -172,7 +172,7 @@ mod tests {
             .map_err(|e| e.to_string())?;
 
             let error = (0..COUNT)
-                .find_map(|_| encoder.add_frame(&frame, delay).err())
+                .find_map(|_| encoder.add_frame(frame.clone(), delay).err())
                 .expect("バッファを使い切るのでIoエラーになる");
             assert!(matches!(error, EncoderError::Io(_)), "{error}");
 

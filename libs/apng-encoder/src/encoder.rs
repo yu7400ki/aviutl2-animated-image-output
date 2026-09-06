@@ -189,7 +189,8 @@ impl Writing {
 /// 投入されたフレームは決定と書き出しの列を通ってから出るため、書き出しは投入から
 /// 遅れる。
 ///
-/// 生のフレームを `ワーカー数 × 2 + 3` 面抱える。[`Encoder::new`] はワーカー数を
+/// 投入された生のフレームの面を `ワーカー数 × 2 + 3` 枚まで抱え、決定が進んだ
+/// ところで落とす。[`Encoder::new`] はワーカー数を
 /// 機械の並列度に合わせるため、抱える面数もそれに比例する
 /// ([`Encoder::with_workers`] で指せば固定できる)。加えて、書き出しを待つ
 /// フレームごとに、圧縮した本体と、キャンバスへ重ねる候補の詰め直した領域および
@@ -318,6 +319,7 @@ impl<W: Write> Encoder<W> {
     /// フレームを1つ投入する
     ///
     /// `data` は上から下・左から右の順に並んだ `幅 * 高さ * 1画素のバイト数` バイトであること。
+    /// 渡した面はそのままエンコーダが抱える。
     ///
     /// 投入されたフレームはその場では書き出さず、以降の呼び出し、または
     /// [`Encoder::finish`] で書き出す。
@@ -328,7 +330,7 @@ impl<W: Write> Encoder<W> {
     ///
     /// 書き出しの失敗は先に投入されたフレームのものになる。列に残ったフレームの
     /// 書き出しは [`Encoder::finish`] で報告される。
-    pub fn add_frame(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
+    pub fn add_frame(&mut self, data: Vec<u8>, delay: FrameDelay) -> Result<(), Error> {
         if self.poisoned {
             return Err(Error::Poisoned);
         }
@@ -355,7 +357,7 @@ impl<W: Write> Encoder<W> {
     }
 
     /// フレームを投入し、列からあふれたぶんを決定へ回す
-    fn accept(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
+    fn accept(&mut self, data: Vec<u8>, delay: FrameDelay) -> Result<(), Error> {
         self.stage(data, delay);
         while self.staged.len() > self.staged_depth {
             self.decide()?;
@@ -363,11 +365,11 @@ impl<W: Write> Encoder<W> {
         Ok(())
     }
 
-    /// フレームを写し取り、捨てないときの候補の圧縮を投入する
+    /// フレームを列へ積み、捨てないときの候補の圧縮を投入する
     ///
     /// 先頭フレームはIDATに入るためキャンバス全体を切り出し、以降は直前に投入された
     /// フレームとの差分を採る。走査も切り出しも圧縮を回す側で行う。
-    fn stage(&mut self, data: &[u8], delay: FrameDelay) {
+    fn stage(&mut self, data: Vec<u8>, delay: FrameDelay) {
         let index = self.frames_accepted;
         let (previous, data) = self.delta.stage(data);
 
@@ -728,7 +730,7 @@ mod tests {
         .unwrap();
         for frame in input {
             encoder
-                .add_frame(frame, FrameDelay::new(1, 30).unwrap())
+                .add_frame(frame.clone(), FrameDelay::new(1, 30).unwrap())
                 .unwrap();
         }
         encoder.finish().unwrap().into_inner()
@@ -1144,7 +1146,7 @@ mod tests {
             encoder.staged_depth = input.len();
             encoder.pending_depth = NonZeroUsize::new(input.len() + 1).unwrap();
             for frame in &input {
-                encoder.add_frame(frame, delay).unwrap();
+                encoder.add_frame(frame.clone(), delay).unwrap();
             }
 
             // 捨てる候補を投入したフレームだけが、捨てないときの候補を受け取っている
@@ -1192,65 +1194,6 @@ mod tests {
         }
     }
 
-    /// 生のフレームの写し先は使い回され、暖機を過ぎると面を確保しない
-    ///
-    /// 決定を終えて指す先を失った面が1つずつ戻るので、戻り始めた後は配り直しを待つ
-    /// 面がフレームごとに1つで、その容量は次の1面を写すのに足りている。戻り始める
-    /// までに確保する面の数は、決定を待たせるフレーム数から決まる。
-    #[test]
-    fn the_frame_buffer_is_handed_back_for_the_next_copy() {
-        for (config, input) in jumping_material() {
-            let color = config.color_type;
-            let delay = FrameDelay::new(1, 30).unwrap();
-
-            for workers in [1, 3] {
-                let mut encoder = Encoder::with_workers(
-                    Cursor::new(Vec::new()),
-                    WIDTH,
-                    HEIGHT,
-                    input.len() as u32,
-                    config,
-                    NonZeroUsize::new(workers).unwrap(),
-                )
-                .unwrap();
-                assert_eq!(encoder.workers().get(), workers, "起こしたワーカー数");
-
-                let warm_up = encoder.staged_depth + 2;
-                let mut allocated = 0;
-                for (index, frame) in input.iter().enumerate() {
-                    let spare = encoder.delta.spare();
-                    if spare
-                        .first()
-                        .is_none_or(|face| face.capacity() < frame.len())
-                    {
-                        allocated += 1;
-                    }
-
-                    encoder.add_frame(frame, delay).unwrap();
-                    if index < warm_up {
-                        continue;
-                    }
-
-                    let spare = encoder.delta.spare();
-                    assert_eq!(
-                        spare.len(),
-                        1,
-                        "{color:?} ワーカー{workers}個 フレーム {index}: 配り直しを待つ面"
-                    );
-                    assert!(
-                        spare[0].capacity() >= frame.len(),
-                        "{color:?} ワーカー{workers}個 フレーム {index}: 写し先の容量が1面に足りない"
-                    );
-                }
-                assert_eq!(
-                    allocated,
-                    encoder.staged_depth + 3,
-                    "{color:?} ワーカー{workers}個: 写し先に確保した面"
-                );
-            }
-        }
-    }
-
     /// 生のフレームの面は決定が進むと落ち、同時に生きる数が列の深さで頭打ちになる
     ///
     /// 投入されたフレームを指すのは、決定を待つ列と、直前に決定したフレームおよびその
@@ -1279,7 +1222,7 @@ mod tests {
                     faces.iter().filter(|face| face.strong_count() > 0).count()
                 };
                 for (index, frame) in input.iter().enumerate() {
-                    encoder.add_frame(frame, delay).unwrap();
+                    encoder.add_frame(frame.clone(), delay).unwrap();
                     faces.push(Arc::downgrade(encoder.delta.previous()));
                     assert_eq!(
                         live(&faces),
@@ -1324,7 +1267,7 @@ mod tests {
                 )
                 .unwrap();
                 for (frame, delay) in input.iter().zip(&delays) {
-                    encoder.add_frame(frame, *delay).unwrap();
+                    encoder.add_frame(frame.clone(), *delay).unwrap();
                 }
                 let bytes = encoder.finish().unwrap().into_inner();
 
@@ -1395,13 +1338,13 @@ mod tests {
         )
         .unwrap();
         for frame in &input {
-            encoder.add_frame(frame, delay).unwrap();
+            encoder.add_frame(frame.clone(), delay).unwrap();
         }
         let blend_pacing = pacing_after_writing(&mut encoder);
         assert_eq!(blend_pacing.resting(), BLEND_REST_FRAMES);
 
         // 新しく書き出しへ届くのは、詰め直せないまだらなフレーム
-        encoder.add_frame(&uniform, delay).unwrap();
+        encoder.add_frame(uniform, delay).unwrap();
         let blend_pacing = pacing_after_writing(&mut encoder);
         assert_eq!(blend_pacing.resting(), BLEND_REST_FRAMES - 1);
     }
