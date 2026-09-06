@@ -50,9 +50,9 @@ impl Inputs {
                 ColorFormat::Rgba32 => 1,
             }),
             yuv: ComboBox::new(vec![
-                YuvFormat::Yuv420.into(),
-                YuvFormat::Yuv422.into(),
-                YuvFormat::Yuv444.into(),
+                YuvFormat::Yuv420.label(),
+                YuvFormat::Yuv422.label(),
+                YuvFormat::Yuv444.label(),
             ])
             .selected(match default_config.yuv_format {
                 YuvFormat::Yuv420 => 0,

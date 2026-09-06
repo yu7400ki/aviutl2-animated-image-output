@@ -12,16 +12,6 @@ pub enum YuvFormat {
     Yuv444,
 }
 
-impl From<YuvFormat> for &'static str {
-    fn from(value: YuvFormat) -> Self {
-        match value {
-            YuvFormat::Yuv420 => "YUV420",
-            YuvFormat::Yuv422 => "YUV422",
-            YuvFormat::Yuv444 => "YUV444",
-        }
-    }
-}
-
 impl FromStr for YuvFormat {
     type Err = ();
 
@@ -51,6 +41,15 @@ impl YuvFormat {
             YuvFormat::Yuv420 => 0,
             YuvFormat::Yuv422 => 1,
             YuvFormat::Yuv444 => 2,
+        }
+    }
+
+    /// 画面へ出す項目名
+    pub fn label(self) -> &'static str {
+        match self {
+            YuvFormat::Yuv420 => "YUV420",
+            YuvFormat::Yuv422 => "YUV422",
+            YuvFormat::Yuv444 => "YUV444",
         }
     }
 }
@@ -123,6 +122,24 @@ mod tests {
             section.set(*key, *value);
         }
         Config::load_from(ini.section(Some(Config::SECTION)))
+    }
+
+    /// YUVフォーマットがiniへ書くインデックスは、そのまま読み戻せる
+    #[test]
+    fn the_yuv_index_written_to_the_ini_reads_back() {
+        for format in [YuvFormat::Yuv420, YuvFormat::Yuv422, YuvFormat::Yuv444] {
+            let written = format.to_index().to_string();
+            assert!(written.parse::<YuvFormat>() == Ok(format), "{written}");
+        }
+    }
+
+    /// 画面へ出す項目名は、iniの値と別のアルファベットを持つ
+    #[test]
+    fn the_yuv_label_is_not_an_ini_value() {
+        for format in [YuvFormat::Yuv420, YuvFormat::Yuv422, YuvFormat::Yuv444] {
+            let label = format.label();
+            assert!(label.parse::<YuvFormat>().is_err(), "{label}");
+        }
     }
 
     #[test]
