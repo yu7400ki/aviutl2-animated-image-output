@@ -14,7 +14,8 @@ impl IniConfig for Config {
     fn load_from(section: Option<&Properties>) -> Self {
         let default = Self::default();
 
-        let repeat = read(section, "repeat", default.repeat);
+        let repeat = read(section, "repeat", u32::from(default.repeat));
+        let repeat = u16::try_from(repeat).unwrap_or(u16::MAX);
         let color_format = read(section, "color_format", default.color_format);
 
         Self {
@@ -90,14 +91,24 @@ mod tests {
         assert!(config.color_format == ColorFormat::Rgba32);
     }
 
-    /// 範囲外のループ回数は既定値になる
+    /// 読めないループ回数は既定値になる
     #[test]
-    fn out_of_range_repeat_falls_back_to_default() {
+    fn an_unreadable_repeat_falls_back_to_default() {
         let default = Config::default().repeat;
-        for value in ["-1", "65536", "many", ""] {
+        for value in ["-1", "many", ""] {
             assert_eq!(load(&[("repeat", value)]).repeat, default);
         }
-        assert_eq!(load(&[("repeat", "65535")]).repeat, 65535);
+    }
+
+    /// NETSCAPE拡張が持てる回数を超えたループ回数は、上限へ収まる
+    ///
+    /// 既定は0で、GIFでは0が無限ループを指す。超過値をそこへ落とすと意味が反転する。
+    #[test]
+    fn out_of_range_repeat_is_clamped() {
+        assert_eq!(load(&[("repeat", "70000")]).repeat, u16::MAX);
+        assert_eq!(load(&[("repeat", "65536")]).repeat, u16::MAX);
+        assert_eq!(load(&[("repeat", "65535")]).repeat, u16::MAX);
+        assert_eq!(load(&[("repeat", "3")]).repeat, 3);
     }
 
     /// 認識しないキーだけのセクションは既定値になる
