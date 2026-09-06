@@ -3,7 +3,7 @@
 use crate::error::{EncodingError, Error};
 use crate::image::{Image, RwData};
 use crate::layout::Layout;
-use crate::{Config, YuvFormat};
+use crate::{Config, QUALITY_RANGE, SPEED_RANGE, YuvFormat};
 use avif_sys::{
     AVIF_ADD_IMAGE_FLAG_NONE, AVIF_ADD_IMAGE_FLAG_SINGLE, AVIF_REPETITION_COUNT_INFINITE,
     AVIF_RESULT_OK, AVIF_RESULT_OUT_OF_MEMORY, avifEncoder, avifEncoderAddImage, avifEncoderCreate,
@@ -129,7 +129,9 @@ impl<W: Write> Encoder<W> {
     ///
     /// # Errors
     /// フレーム数が0のとき [`Error::InvalidFrameCount`]。時間刻み数が0のとき
-    /// [`Error::InvalidTimescale`]。寸法が0か行間が欄に収まらないとき
+    /// [`Error::InvalidTimescale`]。品質が [`QUALITY_RANGE`] の外のとき
+    /// [`Error::InvalidQuality`]。速度が [`SPEED_RANGE`] の外のとき
+    /// [`Error::InvalidSpeed`]。寸法が0か行間が欄に収まらないとき
     /// [`Error::InvalidDimensions`]。符号化器を確保できないとき [`Error::Encode`]。
     pub fn new(
         writer: W,
@@ -143,6 +145,16 @@ impl<W: Write> Encoder<W> {
         }
         if config.timescale == 0 {
             return Err(Error::InvalidTimescale);
+        }
+        if !QUALITY_RANGE.contains(&config.quality) {
+            return Err(Error::InvalidQuality {
+                quality: config.quality,
+            });
+        }
+        if !SPEED_RANGE.contains(&config.speed) {
+            return Err(Error::InvalidSpeed {
+                speed: config.speed,
+            });
         }
         let layout = Layout::new(width, height, config.color_type)?;
         let raw = Raw::new(&config)?;
@@ -357,6 +369,54 @@ mod tests {
             ),
             Err(Error::InvalidTimescale)
         ));
+    }
+
+    #[test]
+    fn a_quality_outside_the_range_is_rejected() {
+        for quality in [101, u8::MAX] {
+            assert!(
+                matches!(
+                    encoder(
+                        1,
+                        Config {
+                            quality,
+                            ..config()
+                        }
+                    ),
+                    Err(Error::InvalidQuality { .. })
+                ),
+                "{quality}"
+            );
+        }
+        for quality in [0, 50, 100] {
+            assert!(
+                encoder(
+                    1,
+                    Config {
+                        quality,
+                        ..config()
+                    }
+                )
+                .is_ok(),
+                "{quality}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_speed_outside_the_range_is_rejected() {
+        for speed in [11, u8::MAX] {
+            assert!(
+                matches!(
+                    encoder(1, Config { speed, ..config() }),
+                    Err(Error::InvalidSpeed { .. })
+                ),
+                "{speed}"
+            );
+        }
+        for speed in 0..=10 {
+            assert!(encoder(1, Config { speed, ..config() }).is_ok(), "{speed}");
+        }
     }
 
     #[test]

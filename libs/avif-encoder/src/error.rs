@@ -14,6 +14,10 @@ pub enum Error {
     InvalidTimescale,
     /// フレームの表示時間が0
     InvalidDuration,
+    /// 品質が値域の外
+    InvalidQuality { quality: u8 },
+    /// 速度と圧縮率の均衡が値域の外
+    InvalidSpeed { speed: u8 },
     /// フレームのバイト数が `幅 * 高さ * チャンネル数` と一致しない
     FrameSizeMismatch { expected: usize, actual: usize },
     /// 投入されたフレーム数が宣言したフレーム数と一致しない
@@ -68,6 +72,12 @@ impl fmt::Display for Error {
             Error::InvalidFrameCount => write!(f, "フレーム数は1以上である必要があります"),
             Error::InvalidTimescale => write!(f, "時間刻み数は1以上である必要があります"),
             Error::InvalidDuration => write!(f, "表示時間は1以上である必要があります"),
+            Error::InvalidQuality { quality } => {
+                write!(f, "品質は0以上100以下である必要があります: {quality}")
+            }
+            Error::InvalidSpeed { speed } => {
+                write!(f, "速度は0以上10以下である必要があります: {speed}")
+            }
             Error::FrameSizeMismatch { expected, actual } => {
                 write!(
                     f,
