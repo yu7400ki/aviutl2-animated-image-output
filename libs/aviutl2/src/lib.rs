@@ -11,6 +11,7 @@ pub use ini;
 
 pub mod config;
 pub mod convert;
+pub mod dialog;
 pub mod logger;
 mod metrics;
 pub mod module;
