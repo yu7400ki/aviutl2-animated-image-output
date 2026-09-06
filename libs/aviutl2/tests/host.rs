@@ -2,11 +2,20 @@
 //!
 //! ホストの関数ポインタは引数に手掛かりを持たないので、台本と記録は
 //! プロセス全体で1組しか置けない。[`Session`] が1本ずつに直列化する。
+//!
+//! ホストが呼ぶ入口である [`OutputPlugin`] の既定実装も、同じ `OUTPUT_INFO`
+//! を渡して検証する。設定ファイルの置き場所も1つなので [`ConfigSession`]
+//! が直列化する。
 
-use aviutl2::{ColorFormat, OutputInfo, PipelineError, sys};
+use aviutl2::{
+    ColorFormat, ConfigDialog, FileFilter, IniConfig, OutputInfo, OutputPlugin, PipelineError,
+    PluginFlags, PluginInfo, sys,
+};
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use std::thread::ThreadId;
+use windows::Win32::Foundation::{HINSTANCE, HWND};
 
 /// 偽ホストの寸法。PA64の1フレームは `WIDTH * HEIGHT * 4` 要素
 const WIDTH: usize = 2;
@@ -258,4 +267,142 @@ fn a_frame_the_host_refuses_is_not_read() {
 
     assert_eq!(info.get_video_frame(1, ColorFormat::Rgba32), None);
     assert_eq!(info.get_video_frame(1, ColorFormat::Rgb24), None);
+}
+
+/// ループ回数だけを持つ設定
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TestConfig {
+    repeat: u32,
+}
+
+impl IniConfig for TestConfig {
+    const FILE_NAME: &'static str = "host-test.ini";
+
+    fn load_from(section: Option<&aviutl2::ini::Properties>) -> Self {
+        TestConfig {
+            repeat: aviutl2::read(section, "repeat", 0),
+        }
+    }
+
+    fn save_to(&self, ini: &mut aviutl2::ini::Ini) {
+        ini.with_section(Some(Self::SECTION))
+            .set("repeat", self.repeat.to_string());
+    }
+
+    /// テスト実行ファイルの隣ではなく一時ディレクトリへ置く
+    fn config_path() -> Result<PathBuf, String> {
+        Ok(std::env::temp_dir().join(format!(
+            "aviutl2-{}-{}",
+            std::process::id(),
+            Self::FILE_NAME
+        )))
+    }
+}
+
+static CONFIG: Mutex<()> = Mutex::new(());
+
+/// 設定ファイルを使う権利。`repeat` を書き置いた状態で始まり、離すと消える
+struct ConfigSession(#[expect(dead_code, reason = "持っている間だけ有効")] MutexGuard<'static, ()>);
+
+impl ConfigSession {
+    fn new(repeat: u32) -> ConfigSession {
+        let guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+        TestConfig { repeat }.save().expect("設定の書き置き");
+        ConfigSession(guard)
+    }
+}
+
+impl Drop for ConfigSession {
+    fn drop(&mut self) {
+        let path = TestConfig::config_path().expect("設定の置き場所");
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// 読み込んだ設定を符号化と設定ダイアログの双方へ通すプラグイン
+struct TestPlugin;
+
+impl OutputPlugin for TestPlugin {
+    type Config = TestConfig;
+
+    const FORMAT_NAME: &'static str = "テスト";
+    const HAS_CONFIG_DIALOG: bool = true;
+
+    fn info() -> PluginInfo {
+        PluginInfo {
+            flags: PluginFlags::VIDEO,
+            name: "テスト出力プラグイン".into(),
+            file_filter: FileFilter::new(),
+            information: "テスト出力プラグイン".into(),
+        }
+    }
+
+    /// 受け取った設定をそのままエラー文言にする
+    fn encode(_info: &OutputInfo, config: &TestConfig) -> Result<(), String> {
+        Err(config.repeat.to_string())
+    }
+
+    /// 受け取った設定を1つ進めて返す
+    fn show_config_dialog(_hwnd: HWND, config: TestConfig) -> ConfigDialog<TestConfig> {
+        ConfigDialog::Accepted(TestConfig {
+            repeat: config.repeat + 1,
+        })
+    }
+}
+
+/// 設定ダイアログを取り消すプラグイン
+struct CancellingPlugin;
+
+impl OutputPlugin for CancellingPlugin {
+    type Config = TestConfig;
+
+    const FORMAT_NAME: &'static str = "テスト";
+    const HAS_CONFIG_DIALOG: bool = true;
+
+    fn info() -> PluginInfo {
+        TestPlugin::info()
+    }
+
+    fn encode(info: &OutputInfo, config: &TestConfig) -> Result<(), String> {
+        TestPlugin::encode(info, config)
+    }
+
+    fn show_config_dialog(_hwnd: HWND, _config: TestConfig) -> ConfigDialog<TestConfig> {
+        ConfigDialog::Cancelled
+    }
+}
+
+/// 出力は保存された設定で符号化し、失敗に形式名を添えて返す
+#[test]
+fn the_saved_config_reaches_the_encoder_and_its_failure_wears_the_format_name() {
+    let _config = ConfigSession::new(7);
+
+    let raw = output_info(1);
+    let info = unsafe { OutputInfo::from_raw(&raw) }.expect("OUTPUT_INFOがnull");
+
+    assert_eq!(
+        TestPlugin::output(&info),
+        Err("テスト出力エラー: 7".to_string())
+    );
+}
+
+/// 設定ダイアログが返した設定は保存される
+#[test]
+fn the_config_the_dialog_returns_is_saved() {
+    let _config = ConfigSession::new(7);
+
+    assert!(TestPlugin::config(HWND::default(), HINSTANCE::default()));
+    assert_eq!(TestConfig::load(), TestConfig { repeat: 8 });
+}
+
+/// 取り消された設定ダイアログは、保存された設定に触れない
+#[test]
+fn a_cancelled_dialog_leaves_the_saved_config_alone() {
+    let _config = ConfigSession::new(7);
+
+    assert!(!CancellingPlugin::config(
+        HWND::default(),
+        HINSTANCE::default()
+    ));
+    assert_eq!(TestConfig::load(), TestConfig { repeat: 7 });
 }
