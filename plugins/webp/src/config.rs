@@ -1,6 +1,6 @@
 pub use aviutl2::ColorFormat;
-use aviutl2::IniConfig;
 use aviutl2::ini::{Ini, Properties};
+use aviutl2::{IniConfig, MAX_REPEAT};
 use std::num::NonZeroUsize;
 use std::thread::available_parallelism;
 use webp_encoder::{METHOD_RANGE, QUALITY_RANGE};
@@ -14,7 +14,7 @@ pub fn max_threads() -> usize {
 
 #[derive(Clone)]
 pub struct Config {
-    pub repeat: i32,
+    pub repeat: u32,
     pub color_format: ColorFormat,
     pub lossless: bool,
     pub quality: f32,
@@ -43,8 +43,9 @@ impl IniConfig for Config {
 
         let repeat = section
             .and_then(|s| s.get("repeat"))
-            .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(default.repeat);
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(default.repeat)
+            .min(MAX_REPEAT);
 
         let color_format = section
             .and_then(|s| s.get("color_format"))
@@ -172,6 +173,22 @@ method=3
 
         assert_eq!(config.quality, *QUALITY_RANGE.end());
         assert_eq!(config.method, *METHOD_RANGE.end());
+    }
+
+    /// 負のループ回数は既定値へ落ちる
+    #[test]
+    fn a_negative_repeat_falls_back_to_default() {
+        let default = Config::default();
+        assert_eq!(load(&[("repeat", "-5")]).repeat, default.repeat);
+    }
+
+    /// 入力欄が扱えないループ回数は、扱える上限へ収まる
+    ///
+    /// i32へ折り返す値をそのまま持つと、ダイアログの初期値が負になる。
+    #[test]
+    fn out_of_range_num_plays_are_clamped() {
+        assert_eq!(load(&[("repeat", "3000000000")]).repeat, MAX_REPEAT);
+        assert_eq!(load(&[("repeat", "3")]).repeat, 3);
     }
 
     /// 値域の外のスレッド数は、走らせる機械の並列度の内側へ収まる

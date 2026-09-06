@@ -1,4 +1,5 @@
 use crate::config::{ColorFormat, Config, max_threads};
+use aviutl2::MAX_REPEAT;
 use std::ops::RangeInclusive;
 use webp_encoder::{METHOD_RANGE, QUALITY_RANGE};
 use win32_ui::{
@@ -80,8 +81,8 @@ impl Inputs {
     fn new(default_config: &Config) -> Self {
         Inputs {
             repeat: Number::new()
-                .value(default_config.repeat)
-                .range(0, i32::MAX),
+                .value(default_config.repeat as i32)
+                .range(0, MAX_REPEAT as i32),
             color: ComboBox::new(vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()])
                 .selected(match default_config.color_format {
                     ColorFormat::Rgb24 => 0,
@@ -127,7 +128,7 @@ impl Inputs {
         let method = self.method.read()?;
 
         Ok(Config {
-            repeat,
+            repeat: repeat as u32,
             color_format: match self.color.selected_index() {
                 0 => ColorFormat::Rgb24,
                 1 => ColorFormat::Rgba32,
@@ -188,6 +189,8 @@ pub fn show_config_dialog(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aviutl2::IniConfig;
+    use aviutl2::ini::Ini;
 
     fn inputs() -> Inputs {
         Inputs::new(&Config::default())
@@ -316,5 +319,20 @@ mod tests {
             message,
             "ループ回数の値が無効です。0以上の数値を入力してください。"
         );
+    }
+
+    /// i32へ折り返す回数を持つiniを読み直しても、ダイアログはその値のまま開ける
+    #[test]
+    fn a_number_of_plays_read_from_the_ini_fits_the_input() {
+        let mut ini = Ini::new();
+        ini.with_section(Some(Config::SECTION))
+            .set("repeat", "3000000000");
+        let config = Config::load_from(ini.section(Some(Config::SECTION)));
+
+        let collected = Inputs::new(&config)
+            .collect()
+            .expect("入力欄が扱える値になっている");
+
+        assert_eq!(collected.repeat, config.repeat);
     }
 }

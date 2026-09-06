@@ -28,8 +28,7 @@ fn encoder_config(config: &Config) -> EncoderConfig {
         lossless: config.lossless,
         quality: config.quality,
         method: config.method,
-        // 再生回数は0が無限ループなので、負の値もそこへ寄せる
-        num_plays: config.repeat.max(0) as u32,
+        num_plays: config.repeat,
     }
 }
 
@@ -175,6 +174,7 @@ register_logger!();
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aviutl2::MAX_REPEAT;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -312,29 +312,16 @@ mod tests {
 
     #[test]
     fn repeat_is_passed_through_as_the_number_of_plays() {
-        for repeat in [0, 1, 5, 65535, i32::MAX] {
+        for repeat in [0, 1, 5, 65535, MAX_REPEAT] {
             assert_eq!(
                 encoder_config(&Config {
                     repeat,
                     ..Config::default()
                 })
                 .num_plays,
-                repeat as u32
+                repeat
             );
         }
-    }
-
-    /// 負のループ回数は無限ループとして渡る
-    #[test]
-    fn a_negative_repeat_becomes_an_infinite_loop() {
-        assert_eq!(
-            encoder_config(&Config {
-                repeat: -1,
-                ..Config::default()
-            })
-            .num_plays,
-            0
-        );
     }
 
     #[test]
