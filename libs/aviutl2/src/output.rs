@@ -2,11 +2,17 @@
 
 use crate::pixel::ColorFormat;
 use crate::sys;
+use anim_core::FrameDelay;
 use std::ffi::c_void;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use widestring::U16CStr;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
+
+/// u32に収まらない値を、名前を添えたエラーにする
+fn to_u32(value: i32, name: &str) -> Result<u32, String> {
+    u32::try_from(value).map_err(|_| format!("{}が不正です: {}", name, value))
+}
 
 /// [`sys::OUTPUT_INFO`] の安全なラッパー
 pub struct OutputInfo<'a> {
@@ -55,6 +61,38 @@ impl<'a> OutputInfo<'a> {
     /// フレーム数
     pub fn num_frames(&self) -> i32 {
         self.raw.n
+    }
+
+    /// u32へ検めた幅
+    pub fn width_u32(&self) -> Result<u32, String> {
+        to_u32(self.raw.w, "幅")
+    }
+
+    /// u32へ検めた高さ
+    pub fn height_u32(&self) -> Result<u32, String> {
+        to_u32(self.raw.h, "高さ")
+    }
+
+    /// u32へ検めたフレームレート (分子)
+    pub fn rate_u32(&self) -> Result<u32, String> {
+        to_u32(self.raw.rate, "フレームレート")
+    }
+
+    /// u32へ検めたスケール (分母)
+    pub fn scale_u32(&self) -> Result<u32, String> {
+        to_u32(self.raw.scale, "フレームレートのスケール")
+    }
+
+    /// u32へ検めたフレーム数
+    pub fn num_frames_u32(&self) -> Result<u32, String> {
+        to_u32(self.raw.n, "フレーム数")
+    }
+
+    /// 1フレームの表示時間 (scale / rate 秒)
+    pub fn frame_delay(&self) -> Result<FrameDelay, String> {
+        let scale = self.scale_u32()?;
+        let rate = self.rate_u32()?;
+        FrameDelay::new(scale, rate).map_err(|e| format!("フレームレート設定エラー: {}", e))
     }
 
     /// 音声サンプリングレート
@@ -290,4 +328,98 @@ where
         Ok(()) => error,
         Err(e) => format!("{} (書きかけのファイルが残りました: {})", error, e),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 寸法と刻みだけを持つ `OUTPUT_INFO`
+    fn raw_info(w: i32, h: i32, rate: i32, scale: i32, n: i32) -> sys::OUTPUT_INFO {
+        sys::OUTPUT_INFO {
+            flag: sys::OUTPUT_INFO::FLAG_VIDEO,
+            w,
+            h,
+            rate,
+            scale,
+            n,
+            audio_rate: 0,
+            audio_ch: 0,
+            audio_n: 0,
+            savefile: std::ptr::null(),
+            func_get_video: None,
+            func_get_audio: None,
+            func_is_abort: None,
+            func_rest_time_disp: None,
+            func_set_buffer_size: None,
+        }
+    }
+
+    fn info(raw: &sys::OUTPUT_INFO) -> OutputInfo<'_> {
+        unsafe { OutputInfo::from_raw(raw) }.expect("OUTPUT_INFOがnull")
+    }
+
+    #[test]
+    fn the_checked_values_carry_the_fields_as_they_are() {
+        let raw = raw_info(1920, 1080, 30000, 1001, 24);
+        let info = info(&raw);
+
+        assert_eq!(info.width_u32().unwrap(), 1920);
+        assert_eq!(info.height_u32().unwrap(), 1080);
+        assert_eq!(info.rate_u32().unwrap(), 30000);
+        assert_eq!(info.scale_u32().unwrap(), 1001);
+        assert_eq!(info.num_frames_u32().unwrap(), 24);
+    }
+
+    #[test]
+    fn a_negative_value_is_rejected_with_the_name_of_the_field() {
+        let raw = raw_info(-1, -2, -3, -4, -5);
+        let info = info(&raw);
+
+        assert_eq!(info.width_u32().unwrap_err(), "幅が不正です: -1");
+        assert_eq!(info.height_u32().unwrap_err(), "高さが不正です: -2");
+        assert_eq!(info.rate_u32().unwrap_err(), "フレームレートが不正です: -3");
+        assert_eq!(
+            info.scale_u32().unwrap_err(),
+            "フレームレートのスケールが不正です: -4"
+        );
+        assert_eq!(
+            info.num_frames_u32().unwrap_err(),
+            "フレーム数が不正です: -5"
+        );
+    }
+
+    /// 1フレームはscale / rate秒なので、スケールが分子、レートが分母
+    #[test]
+    fn the_frame_rate_becomes_a_delay_in_seconds() {
+        let raw = raw_info(1920, 1080, 30000, 1001, 24);
+        let delay = info(&raw).frame_delay().unwrap();
+
+        assert_eq!((delay.numerator(), delay.denominator()), (1001, 30000));
+    }
+
+    #[test]
+    fn a_frame_rate_of_zero_is_rejected() {
+        let raw = raw_info(1920, 1080, 0, 1, 24);
+
+        assert_eq!(
+            info(&raw).frame_delay().unwrap_err(),
+            "フレームレート設定エラー: フレーム遅延の分母が0です"
+        );
+    }
+
+    #[test]
+    fn a_negative_rate_or_scale_is_rejected() {
+        let negative_rate = raw_info(1920, 1080, -30, 1, 24);
+        let negative_scale = raw_info(1920, 1080, 30, -1, 24);
+
+        assert_eq!(
+            info(&negative_rate).frame_delay().unwrap_err(),
+            "フレームレートが不正です: -30"
+        );
+        assert_eq!(
+            info(&negative_scale).frame_delay().unwrap_err(),
+            "フレームレートのスケールが不正です: -1"
+        );
+    }
 }

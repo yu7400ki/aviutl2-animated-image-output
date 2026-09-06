@@ -69,6 +69,7 @@ dependencies = [
 name = "aviutl2"
 version = "0.1.0"
 dependencies = [
+ "anim_core",
  "aviutl2-sys",
  "rust-ini",
  "widestring",
