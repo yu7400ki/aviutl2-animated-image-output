@@ -65,7 +65,7 @@ enum Input<'a> {
 /// 単葉の .webp を組む
 fn encode(width: u32, height: u32, input: Input<'_>, config: Config) -> Vec<u8> {
     unsafe {
-        let mut raw = MaybeUninit::<WebPConfig>::uninit();
+        let mut raw = MaybeUninit::<WebPConfig>::zeroed();
         assert_ne!(WebPConfigInit(raw.as_mut_ptr()), 0);
         let mut raw = raw.assume_init();
         raw.lossless = c_int::from(config.lossless);
@@ -74,7 +74,7 @@ fn encode(width: u32, height: u32, input: Input<'_>, config: Config) -> Vec<u8> 
         raw.method = 4;
         assert_ne!(WebPValidateConfig(&raw), 0, "設定が値域に収まらない");
 
-        let mut picture = MaybeUninit::<WebPPicture>::uninit();
+        let mut picture = MaybeUninit::<WebPPicture>::zeroed();
         assert_ne!(WebPPictureInitARGB(picture.as_mut_ptr()), 0);
         let mut picture = picture.assume_init();
         picture.width = width as c_int;
@@ -90,7 +90,7 @@ fn encode(width: u32, height: u32, input: Input<'_>, config: Config) -> Vec<u8> 
         };
         assert_ne!(imported, 0, "画素の取り込みに失敗した");
 
-        let mut writer = MaybeUninit::<WebPMemoryWriter>::uninit();
+        let mut writer = MaybeUninit::<WebPMemoryWriter>::zeroed();
         WebPMemoryWriterInit(writer.as_mut_ptr());
         let mut writer = writer.assume_init();
         picture.writer = Some(WebPMemoryWrite);

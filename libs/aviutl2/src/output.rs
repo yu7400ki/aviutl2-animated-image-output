@@ -53,10 +53,10 @@ impl<'a> OutputInfo<'a> {
 
     /// チャンネル数・サンプリングレート・サンプリング数を検めて音声の取り込み口を作る
     pub fn audio(&self) -> Result<Audio<'a>, String> {
-        let channels = to_u32(self.raw.audio_ch, "音声チャンネル数")?;
-        if channels == 0 {
-            return Err("音声チャンネル数が不正です: 0".to_string());
-        }
+        let channels = to_u32(self.raw.audio_ch, "音声チャンネル数")
+            .ok()
+            .filter(|&channels| channels > 0)
+            .ok_or_else(|| format!("音声チャンネル数が不正です: {}", self.raw.audio_ch))?;
         Ok(Audio {
             info: *self,
             channels,
