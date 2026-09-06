@@ -42,7 +42,7 @@ impl Inputs {
                 ColorFormat::Rgb24 => 0,
                 ColorFormat::Rgba32 => 1,
             }),
-            quality: RangedInput::new("品質", quality_range(), default_config.quality as i32),
+            quality: RangedInput::new("品質", quality_range(), i32::from(default_config.quality)),
             effort: RangedInput::new("均衡", effort_range(), i32::from(default_config.effort)),
             threads: RangedInput::new(
                 "スレッド数",
@@ -83,7 +83,7 @@ impl Inputs {
                 1 => ColorFormat::Rgba32,
                 _ => Default::default(),
             },
-            quality: quality as f32,
+            quality: quality as u8,
             effort: effort as u8,
             threads: threads as usize,
         })
@@ -242,7 +242,7 @@ mod tests {
 
         assert_eq!(config.repeat, 7);
         assert!(config.color_format == ColorFormat::Rgba32);
-        assert_eq!(config.quality, 40.0);
+        assert_eq!(config.quality, 40);
         assert_eq!(config.effort, 2);
         assert_eq!(config.threads, threads);
     }

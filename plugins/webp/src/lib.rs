@@ -19,7 +19,7 @@ fn encoder_config(config: &Config) -> EncoderConfig {
             ColorFormat::Rgba32 => ColorType::Rgba8,
         },
         lossless: config.lossless,
-        quality: config.quality,
+        quality: f32::from(config.quality),
         method: config.method,
         num_plays: config.repeat,
     }
@@ -263,7 +263,7 @@ mod tests {
     fn the_compression_settings_are_passed_through() {
         let lossy = encoder_config(&Config {
             lossless: false,
-            quality: 80.0,
+            quality: 80,
             method: 2,
             ..Config::default()
         });
@@ -273,7 +273,7 @@ mod tests {
 
         let lossless = encoder_config(&Config {
             lossless: true,
-            quality: 100.0,
+            quality: 100,
             method: 6,
             ..Config::default()
         });

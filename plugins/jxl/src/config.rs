@@ -7,7 +7,7 @@ use jxl_encoder::{EFFORT_RANGE, QUALITY_RANGE};
 pub struct Config {
     pub repeat: u32,
     pub color_format: ColorFormat,
-    pub quality: f32,
+    pub quality: u8,
     pub effort: u8,
     pub threads: usize,
 }
@@ -17,7 +17,7 @@ impl Default for Config {
         Self {
             repeat: 0,
             color_format: ColorFormat::default(),
-            quality: 90.0,
+            quality: 90,
             effort: 7,
             threads: default_threads(),
         }
@@ -33,7 +33,7 @@ impl IniConfig for Config {
         let repeat = read(section, "repeat", default.repeat).min(MAX_REPEAT);
         let color_format = read(section, "color_format", default.color_format);
         let quality = read(section, "quality", default.quality)
-            .clamp(*QUALITY_RANGE.start(), *QUALITY_RANGE.end());
+            .clamp(*QUALITY_RANGE.start() as u8, *QUALITY_RANGE.end() as u8);
         let effort = read(section, "effort", default.effort)
             .clamp(*EFFORT_RANGE.start(), *EFFORT_RANGE.end());
         let threads = read(section, "threads", default.threads).clamp(1, max_threads());
@@ -98,7 +98,7 @@ mod tests {
         let saved = Config {
             repeat: 3,
             color_format: ColorFormat::Rgba32,
-            quality: 100.0,
+            quality: 100,
             effort: 9,
             // 既定は論理CPU数の半分なので、値域の上端を採る
             threads: max_threads(),
@@ -130,20 +130,30 @@ effort=3
 
         assert_eq!(config.repeat, 5);
         assert!(config.color_format == ColorFormat::Rgba32);
-        assert_eq!(config.quality, 80.0);
+        assert_eq!(config.quality, 80);
         assert_eq!(config.effort, 3);
     }
 
     /// 値域の外の品質と均衡は、エンコーダが受け取れる範囲へ収まる
     #[test]
     fn out_of_range_quality_and_effort_are_clamped() {
-        let over = load(&[("quality", "1000"), ("effort", "99")]);
-        assert_eq!(over.quality, *QUALITY_RANGE.end());
+        let over = load(&[("quality", "200"), ("effort", "99")]);
+        assert_eq!(over.quality, *QUALITY_RANGE.end() as u8);
         assert_eq!(over.effort, *EFFORT_RANGE.end());
 
-        let under = load(&[("quality", "-1"), ("effort", "0")]);
-        assert_eq!(under.quality, *QUALITY_RANGE.start());
+        let under = load(&[("effort", "0")]);
         assert_eq!(under.effort, *EFFORT_RANGE.start());
+    }
+
+    /// 0から100の整数として読めない品質は既定値へ落ちる
+    ///
+    /// ダイアログは整数しか受け取らないので、iniもそこへ揃える。
+    #[test]
+    fn a_quality_the_ini_cannot_read_falls_back_to_default() {
+        let default = Config::default().quality;
+        for value in ["nan", "inf", "87.5", "-1.5", "-1", "1000"] {
+            assert_eq!(load(&[("quality", value)]).quality, default, "{value}");
+        }
     }
 
     /// 入力欄が扱えないループ回数は、扱える上限へ収まる

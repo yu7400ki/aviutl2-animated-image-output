@@ -8,7 +8,7 @@ pub struct Config {
     pub repeat: u32,
     pub color_format: ColorFormat,
     pub lossless: bool,
-    pub quality: f32,
+    pub quality: u8,
     pub method: u8,
     pub threads: usize,
 }
@@ -19,7 +19,7 @@ impl Default for Config {
             repeat: 0,
             color_format: ColorFormat::default(),
             lossless: false,
-            quality: 75.0,
+            quality: 75,
             method: 4,
             threads: default_threads(),
         }
@@ -36,7 +36,7 @@ impl IniConfig for Config {
         let color_format = read(section, "color_format", default.color_format);
         let lossless = read_flag(section, "lossless", default.lossless);
         let quality = read(section, "quality", default.quality)
-            .clamp(*QUALITY_RANGE.start(), *QUALITY_RANGE.end());
+            .clamp(*QUALITY_RANGE.start() as u8, *QUALITY_RANGE.end() as u8);
         let method = read(section, "method", default.method)
             .clamp(*METHOD_RANGE.start(), *METHOD_RANGE.end());
         let threads = read(section, "threads", default.threads).clamp(1, max_threads());
@@ -94,7 +94,7 @@ mod tests {
             repeat: 3,
             color_format: ColorFormat::Rgba32,
             lossless: true,
-            quality: 100.0,
+            quality: 100,
             method: 6,
             threads: max_threads(),
         };
@@ -128,7 +128,7 @@ method=3
         assert_eq!(config.repeat, 5);
         assert!(config.color_format == ColorFormat::Rgba32);
         assert!(config.lossless);
-        assert_eq!(config.quality, 90.0);
+        assert_eq!(config.quality, 90);
         assert_eq!(config.method, 3);
     }
 
@@ -167,10 +167,21 @@ method=3
     /// 値域の外の品質とメソッドは、エンコーダが受け取れる範囲へ収まる
     #[test]
     fn out_of_range_quality_and_method_are_clamped() {
-        let config = load(&[("quality", "1000"), ("method", "99")]);
+        let config = load(&[("quality", "200"), ("method", "99")]);
 
-        assert_eq!(config.quality, *QUALITY_RANGE.end());
+        assert_eq!(config.quality, *QUALITY_RANGE.end() as u8);
         assert_eq!(config.method, *METHOD_RANGE.end());
+    }
+
+    /// 0から100の整数として読めない品質は既定値へ落ちる
+    ///
+    /// ダイアログは整数しか受け取らないので、iniもそこへ揃える。
+    #[test]
+    fn a_quality_the_ini_cannot_read_falls_back_to_default() {
+        let default = Config::default().quality;
+        for value in ["nan", "inf", "87.5", "-1.5", "-1", "1000"] {
+            assert_eq!(load(&[("quality", value)]).quality, default, "{value}");
+        }
     }
 
     /// 負のループ回数は既定値へ落ちる

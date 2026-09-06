@@ -44,7 +44,7 @@ impl Inputs {
                 ColorFormat::Rgba32 => 1,
             }),
             lossless: CheckBox::new("ロスレス圧縮").checked(default_config.lossless),
-            quality: RangedInput::new("品質", quality_range(), default_config.quality as i32),
+            quality: RangedInput::new("品質", quality_range(), i32::from(default_config.quality)),
             method: RangedInput::new("メソッド", method_range(), default_config.method as i32),
             threads: RangedInput::new(
                 "スレッド数",
@@ -87,7 +87,7 @@ impl Inputs {
                 _ => Default::default(),
             },
             lossless: self.lossless.is_checked(),
-            quality: quality as f32,
+            quality: quality as u8,
             method: method as u8,
             threads: threads as usize,
         })
@@ -171,7 +171,7 @@ mod tests {
         let config = inputs.collect().expect("値域の内側なので組める");
 
         assert!(config.lossless);
-        assert_eq!(config.quality, 40.0);
+        assert_eq!(config.quality, 40);
         assert_eq!(config.method, 2);
     }
 

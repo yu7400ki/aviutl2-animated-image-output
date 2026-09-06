@@ -45,7 +45,7 @@ fn encoder_config(config: &Config, sequence: Sequence) -> EncoderConfig {
             ColorFormat::Rgb24 => ColorType::Rgb8,
             ColorFormat::Rgba32 => ColorType::Rgba8,
         },
-        quality: config.quality,
+        quality: f32::from(config.quality),
         effort: config.effort,
         num_plays: config.repeat,
         tps_numerator: sequence.tps_numerator,
@@ -258,7 +258,7 @@ mod tests {
 
         let lossy = encoder_config(
             &Config {
-                quality: 80.0,
+                quality: 80,
                 effort: 3,
                 repeat: 5,
                 threads: 4,
@@ -273,7 +273,7 @@ mod tests {
 
         let top_quality = encoder_config(
             &Config {
-                quality: 100.0,
+                quality: 100,
                 effort: 9,
                 repeat: 0,
                 threads: 1,
