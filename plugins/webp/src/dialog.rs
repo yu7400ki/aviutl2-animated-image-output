@@ -75,9 +75,9 @@ impl Inputs {
     /// 読めない欄か値域の外の欄があるとき、画面へ出す文言。
     fn collect(&self) -> Result<Config, String> {
         let repeat = self.repeat.read()?;
-        let threads = self.threads.read()?;
         let quality = self.quality.read()?;
         let method = self.method.read()?;
+        let threads = self.threads.read()?;
 
         Ok(Config {
             repeat: repeat as u32,
@@ -212,6 +212,24 @@ mod tests {
         assert!(inputs.collect().is_err(), "上限より上");
         inputs.threads.input().set_value(max);
         assert!(inputs.collect().is_ok(), "上限そのもの");
+    }
+
+    /// 無効な欄が複数あるとき、画面の並びで先に来る欄の文言が出る
+    #[test]
+    fn the_field_shown_first_is_the_one_reported() {
+        let inputs = inputs();
+        let (_, threads_max) = inputs
+            .threads
+            .input()
+            .range_bounds()
+            .expect("値域を持つ入力欄");
+        inputs.quality.input().set_text("high");
+        inputs.threads.input().set_value(threads_max + 1);
+
+        let Err(message) = inputs.collect() else {
+            panic!("どちらの欄も無効なので弾かれる");
+        };
+        assert!(message.starts_with("品質"), "{message}");
     }
 
     /// どの数値欄も、前後に空白のある入力を等しく受け取る
