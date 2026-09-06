@@ -1,4 +1,4 @@
-use crate::config::{ColorFormat, Config};
+use crate::config::{ColorFormat, Config, MAX_NUM_PLAYS};
 use aviutl2::dialog::{RangedInput, repeat_input};
 use aviutl2::{ConfigDialog, max_threads};
 use std::ops::RangeInclusive;
@@ -34,7 +34,7 @@ struct Inputs {
 impl Inputs {
     fn new(default_config: &Config) -> Self {
         Inputs {
-            repeat: repeat_input(Some(u32::from(u16::MAX)), default_config.repeat),
+            repeat: repeat_input(Some(MAX_NUM_PLAYS), default_config.repeat),
             color: ComboBox::new(vec![
                 ColorFormat::Rgb24.label(),
                 ColorFormat::Rgba32.label(),

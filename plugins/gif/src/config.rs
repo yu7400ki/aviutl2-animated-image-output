@@ -1,6 +1,6 @@
 pub use aviutl2::ColorFormat;
 use aviutl2::ini::{Ini, Properties};
-use aviutl2::{IniConfig, read};
+use aviutl2::{IniConfig, read, read_clamped};
 
 #[derive(Clone, Default)]
 pub struct Config {
@@ -14,8 +14,7 @@ impl IniConfig for Config {
     fn load_from(section: Option<&Properties>) -> Self {
         let default = Self::default();
 
-        let repeat = read(section, "repeat", u32::from(default.repeat));
-        let repeat = u16::try_from(repeat).unwrap_or(u16::MAX);
+        let repeat = read_clamped(section, "repeat", 0..=u16::MAX, default.repeat);
         let color_format = read(section, "color_format", default.color_format);
 
         Self {
@@ -95,12 +94,12 @@ mod tests {
     #[test]
     fn an_unreadable_repeat_falls_back_to_default() {
         let default = Config::default().repeat;
-        for value in ["-1", "many", ""] {
+        for value in ["many", "1.5", ""] {
             assert_eq!(load(&[("repeat", value)]).repeat, default);
         }
     }
 
-    /// NETSCAPE拡張が持てる回数を超えたループ回数は、上限へ収まる
+    /// NETSCAPE拡張が持てる回数の外のループ回数は、近い端へ収まる
     ///
     /// 既定は0で、GIFでは0が無限ループを指す。超過値をそこへ落とすと意味が反転する。
     #[test]
@@ -108,6 +107,7 @@ mod tests {
         assert_eq!(load(&[("repeat", "70000")]).repeat, u16::MAX);
         assert_eq!(load(&[("repeat", "65536")]).repeat, u16::MAX);
         assert_eq!(load(&[("repeat", "65535")]).repeat, u16::MAX);
+        assert_eq!(load(&[("repeat", "-1")]).repeat, 0);
         assert_eq!(load(&[("repeat", "3")]).repeat, 3);
     }
 

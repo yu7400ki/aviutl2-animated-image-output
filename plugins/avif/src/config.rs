@@ -1,7 +1,7 @@
 use avif_encoder::{QUALITY_RANGE, SPEED_RANGE};
 pub use aviutl2::ColorFormat;
 use aviutl2::ini::{Ini, Properties};
-use aviutl2::{IniConfig, MAX_REPEAT, default_threads, max_threads, read};
+use aviutl2::{IniConfig, MAX_REPEAT, default_threads, max_threads, read, read_clamped};
 use std::str::FromStr;
 
 #[derive(Copy, Clone, PartialEq, Default)]
@@ -84,14 +84,12 @@ impl IniConfig for Config {
     fn load_from(section: Option<&Properties>) -> Self {
         let default = Self::default();
 
-        let repeat = read(section, "repeat", default.repeat).min(MAX_REPEAT);
-        let quality = read(section, "quality", default.quality)
-            .clamp(*QUALITY_RANGE.start(), *QUALITY_RANGE.end());
-        let speed =
-            read(section, "speed", default.speed).clamp(*SPEED_RANGE.start(), *SPEED_RANGE.end());
+        let repeat = read_clamped(section, "repeat", 0..=MAX_REPEAT, default.repeat);
+        let quality = read_clamped(section, "quality", QUALITY_RANGE, default.quality);
+        let speed = read_clamped(section, "speed", SPEED_RANGE, default.speed);
         let color_format = read(section, "color_format", default.color_format);
         let yuv_format = read(section, "yuv_format", default.yuv_format);
-        let threads = read(section, "threads", default.threads).clamp(1, max_threads());
+        let threads = read_clamped(section, "threads", 1..=max_threads(), default.threads);
 
         Self {
             repeat,

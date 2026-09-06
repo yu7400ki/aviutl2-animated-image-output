@@ -1,7 +1,16 @@
 pub use aviutl2::ColorFormat;
 use aviutl2::ini::{Ini, Properties};
-use aviutl2::{IniConfig, default_threads, max_threads, read, read_flag};
+use aviutl2::{IniConfig, default_threads, max_threads, read, read_clamped, read_flag};
+use std::ops::RangeInclusive;
 use webp_encoder::{METHOD_RANGE, QUALITY_RANGE};
+
+/// ANIMのループ数欄に収まる回数の上限
+pub const MAX_NUM_PLAYS: u32 = u16::MAX as u32;
+
+/// iniが採る品質の値域
+fn quality_range() -> RangeInclusive<u8> {
+    *QUALITY_RANGE.start() as u8..=*QUALITY_RANGE.end() as u8
+}
 
 #[derive(Clone)]
 pub struct Config {
@@ -32,14 +41,12 @@ impl IniConfig for Config {
     fn load_from(section: Option<&Properties>) -> Self {
         let default = Self::default();
 
-        let repeat = read(section, "repeat", default.repeat).min(u32::from(u16::MAX));
+        let repeat = read_clamped(section, "repeat", 0..=MAX_NUM_PLAYS, default.repeat);
         let color_format = read(section, "color_format", default.color_format);
         let lossless = read_flag(section, "lossless", default.lossless);
-        let quality = read(section, "quality", default.quality)
-            .clamp(*QUALITY_RANGE.start() as u8, *QUALITY_RANGE.end() as u8);
-        let method = read(section, "method", default.method)
-            .clamp(*METHOD_RANGE.start(), *METHOD_RANGE.end());
-        let threads = read(section, "threads", default.threads).clamp(1, max_threads());
+        let quality = read_clamped(section, "quality", quality_range(), default.quality);
+        let method = read_clamped(section, "method", METHOD_RANGE, default.method);
+        let threads = read_clamped(section, "threads", 1..=max_threads(), default.threads);
 
         Self {
             repeat,
@@ -167,10 +174,13 @@ method=3
     /// 値域の外の品質とメソッドは、エンコーダが受け取れる範囲へ収まる
     #[test]
     fn out_of_range_quality_and_method_are_clamped() {
-        let config = load(&[("quality", "200"), ("method", "99")]);
+        let over = load(&[("quality", "1000"), ("method", "99")]);
+        assert_eq!(over.quality, *QUALITY_RANGE.end() as u8);
+        assert_eq!(over.method, *METHOD_RANGE.end());
 
-        assert_eq!(config.quality, *QUALITY_RANGE.end() as u8);
-        assert_eq!(config.method, *METHOD_RANGE.end());
+        let under = load(&[("quality", "-1"), ("method", "-1")]);
+        assert_eq!(under.quality, *QUALITY_RANGE.start() as u8);
+        assert_eq!(under.method, *METHOD_RANGE.start());
     }
 
     /// 0から100の整数として読めない品質は既定値へ落ちる
@@ -179,7 +189,7 @@ method=3
     #[test]
     fn a_quality_the_ini_cannot_read_falls_back_to_default() {
         let default = Config::default().quality;
-        for value in ["nan", "inf", "87.5", "-1.5", "-1", "1000"] {
+        for value in ["nan", "inf", "87.5", "-1.5"] {
             assert_eq!(load(&[("quality", value)]).quality, default, "{value}");
         }
     }

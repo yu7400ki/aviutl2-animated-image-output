@@ -1,7 +1,13 @@
 pub use aviutl2::ColorFormat;
 use aviutl2::ini::{Ini, Properties};
-use aviutl2::{IniConfig, MAX_REPEAT, default_threads, max_threads, read};
+use aviutl2::{IniConfig, MAX_REPEAT, default_threads, max_threads, read, read_clamped};
 use jxl_encoder::{EFFORT_RANGE, QUALITY_RANGE};
+use std::ops::RangeInclusive;
+
+/// iniが採る品質の値域
+fn quality_range() -> RangeInclusive<u8> {
+    *QUALITY_RANGE.start() as u8..=*QUALITY_RANGE.end() as u8
+}
 
 #[derive(Clone)]
 pub struct Config {
@@ -30,13 +36,11 @@ impl IniConfig for Config {
     fn load_from(section: Option<&Properties>) -> Self {
         let default = Self::default();
 
-        let repeat = read(section, "repeat", default.repeat).min(MAX_REPEAT);
+        let repeat = read_clamped(section, "repeat", 0..=MAX_REPEAT, default.repeat);
         let color_format = read(section, "color_format", default.color_format);
-        let quality = read(section, "quality", default.quality)
-            .clamp(*QUALITY_RANGE.start() as u8, *QUALITY_RANGE.end() as u8);
-        let effort = read(section, "effort", default.effort)
-            .clamp(*EFFORT_RANGE.start(), *EFFORT_RANGE.end());
-        let threads = read(section, "threads", default.threads).clamp(1, max_threads());
+        let quality = read_clamped(section, "quality", quality_range(), default.quality);
+        let effort = read_clamped(section, "effort", EFFORT_RANGE, default.effort);
+        let threads = read_clamped(section, "threads", 1..=max_threads(), default.threads);
 
         Self {
             repeat,
@@ -137,11 +141,12 @@ effort=3
     /// 値域の外の品質と均衡は、エンコーダが受け取れる範囲へ収まる
     #[test]
     fn out_of_range_quality_and_effort_are_clamped() {
-        let over = load(&[("quality", "200"), ("effort", "99")]);
+        let over = load(&[("quality", "1000"), ("effort", "99")]);
         assert_eq!(over.quality, *QUALITY_RANGE.end() as u8);
         assert_eq!(over.effort, *EFFORT_RANGE.end());
 
-        let under = load(&[("effort", "0")]);
+        let under = load(&[("quality", "-1"), ("effort", "0")]);
+        assert_eq!(under.quality, *QUALITY_RANGE.start() as u8);
         assert_eq!(under.effort, *EFFORT_RANGE.start());
     }
 
@@ -151,7 +156,7 @@ effort=3
     #[test]
     fn a_quality_the_ini_cannot_read_falls_back_to_default() {
         let default = Config::default().quality;
-        for value in ["nan", "inf", "87.5", "-1.5", "-1", "1000"] {
+        for value in ["nan", "inf", "87.5", "-1.5"] {
             assert_eq!(load(&[("quality", value)]).quality, default, "{value}");
         }
     }

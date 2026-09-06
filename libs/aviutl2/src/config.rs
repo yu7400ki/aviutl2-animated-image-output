@@ -2,6 +2,7 @@
 
 use ini::{Ini, Properties};
 use std::num::NonZeroUsize;
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::thread::available_parallelism;
@@ -38,6 +39,32 @@ pub fn read<T: FromStr>(section: Option<&Properties>, key: &str, default: T) -> 
         .and_then(|s| s.get(key))
         .and_then(|s| s.parse::<T>().ok())
         .unwrap_or(default)
+}
+
+/// セクションからキーを整数として読み、`range` の内側へ収める
+///
+/// セクションが無い・キーが無い・整数として解釈できない場合は `default` を返す。
+/// 値域の外の値は近い端へ収める。
+pub fn read_clamped<T>(
+    section: Option<&Properties>,
+    key: &str,
+    range: RangeInclusive<T>,
+    default: T,
+) -> T
+where
+    T: Copy + TryFrom<i64>,
+    i64: TryFrom<T>,
+{
+    let (Ok(min), Ok(max)) = (i64::try_from(*range.start()), i64::try_from(*range.end())) else {
+        return default;
+    };
+    let Some(value) = section
+        .and_then(|s| s.get(key))
+        .and_then(|s| s.parse::<i64>().ok())
+    else {
+        return default;
+    };
+    T::try_from(value.clamp(min, max)).unwrap_or(default)
 }
 
 /// セクションからキーを読み、`0` を偽・`1` を真として解釈する
@@ -158,6 +185,44 @@ mod tests {
         let properties = properties(&[("repeat", "3")]);
         let value: u32 = read(Some(&properties), "repeat", 5);
         assert_eq!(value, 3);
+    }
+
+    /// 値域の外の値は近い端へ収まる
+    ///
+    /// 目的の型に収まらない大きさでも、上限まで読めれば端へ落ちる。
+    #[test]
+    fn a_value_outside_the_range_is_clamped() {
+        for (written, clamped) in [("1000", 100u8), ("-1", 0), ("100", 100), ("0", 0)] {
+            let properties = properties(&[("quality", written)]);
+            assert_eq!(
+                read_clamped(Some(&properties), "quality", 0..=100, 75),
+                clamped,
+                "{written}"
+            );
+        }
+    }
+
+    /// 整数として読めない値は既定値へ落ちる
+    #[test]
+    fn a_value_that_is_not_a_whole_number_falls_back_to_default() {
+        for written in ["nan", "inf", "87.5", "high", ""] {
+            let properties = properties(&[("quality", written)]);
+            assert_eq!(
+                read_clamped(Some(&properties), "quality", 0..=100, 75),
+                75,
+                "{written}"
+            );
+        }
+        assert_eq!(read_clamped(None, "quality", 0..=100u8, 75), 75);
+        assert_eq!(
+            read_clamped(
+                Some(&properties(&[("other", "1")])),
+                "quality",
+                0..=100u8,
+                75
+            ),
+            75
+        );
     }
 
     /// 真偽値は0と1で読む

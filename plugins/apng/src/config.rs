@@ -1,7 +1,7 @@
 use apng_encoder::COMPRESSION_LEVELS;
 pub use aviutl2::ColorFormat;
 use aviutl2::ini::{Ini, Properties};
-use aviutl2::{IniConfig, MAX_REPEAT, default_threads, max_threads, read};
+use aviutl2::{IniConfig, MAX_REPEAT, default_threads, max_threads, read, read_clamped};
 
 #[derive(Clone)]
 pub struct Config {
@@ -28,12 +28,15 @@ impl IniConfig for Config {
     fn load_from(section: Option<&Properties>) -> Self {
         let default = Self::default();
 
-        let repeat = read(section, "repeat", default.repeat).min(MAX_REPEAT);
+        let repeat = read_clamped(section, "repeat", 0..=MAX_REPEAT, default.repeat);
         let color_format = read(section, "color_format", default.color_format);
-
-        let compression_level = read(section, "compression_level", default.compression_level)
-            .clamp(*COMPRESSION_LEVELS.start(), *COMPRESSION_LEVELS.end());
-        let threads = read(section, "threads", default.threads).clamp(1, max_threads());
+        let compression_level = read_clamped(
+            section,
+            "compression_level",
+            COMPRESSION_LEVELS,
+            default.compression_level,
+        );
+        let threads = read_clamped(section, "threads", 1..=max_threads(), default.threads);
 
         Self {
             repeat,
@@ -105,17 +108,20 @@ mod tests {
             load(&[("compression_level", "10")]).compression_level,
             *COMPRESSION_LEVELS.end()
         );
-        assert_eq!(
-            load(&[("compression_level", "0")]).compression_level,
-            *COMPRESSION_LEVELS.start()
-        );
+        for value in ["0", "-1"] {
+            assert_eq!(
+                load(&[("compression_level", value)]).compression_level,
+                *COMPRESSION_LEVELS.start(),
+                "{value}"
+            );
+        }
     }
 
     /// 読めない圧縮レベルは既定値へ落ちる
     #[test]
     fn an_unreadable_compression_level_falls_back_to_default() {
         let default = Config::default().compression_level;
-        for value in ["-1", "high", ""] {
+        for value in ["high", "6.5", ""] {
             assert_eq!(
                 load(&[("compression_level", value)]).compression_level,
                 default
