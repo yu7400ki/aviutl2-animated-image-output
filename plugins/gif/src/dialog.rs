@@ -6,19 +6,63 @@ use win32_ui::{
 };
 use windows::Win32::Foundation::HWND;
 
+/// ダイアログの入力欄
+#[derive(Clone)]
+struct Inputs {
+    repeat: Number,
+    color: ComboBox,
+}
+
+impl Inputs {
+    fn new(default_config: &Config) -> Self {
+        Inputs {
+            repeat: Number::new()
+                .value(default_config.repeat as i32)
+                .range(0, u16::MAX as i32),
+            color: ComboBox::new(vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()])
+                .selected(match default_config.color_format {
+                    ColorFormat::Rgb24 => 0,
+                    ColorFormat::Rgba32 => 1,
+                }),
+        }
+    }
+
+    /// 設定項目を縦へ並べる
+    fn layout(&self) -> FlexLayout {
+        FlexLayout::column()
+            .with_width(SizeValue::Points(300.0))
+            .with_padding(15.0)
+            .with_gap(10.0)
+            .with_layout(labeled("ループ回数 (0=無限ループ)", self.repeat.clone()))
+            .with_layout(labeled("カラーフォーマット", self.color.clone()))
+    }
+
+    /// 入力欄の値を設定へ組む
+    ///
+    /// # Errors
+    /// 読めない欄があるとき、画面へ出す文言。
+    fn collect(&self) -> std::result::Result<Config, String> {
+        let repeat = self
+            .repeat
+            .get_value::<u16>()
+            .map_err(|_| "ループ回数の値が無効です。正しい数値を入力してください。".to_string())?;
+
+        Ok(Config {
+            repeat,
+            color_format: match self.color.selected_index() {
+                0 => ColorFormat::Rgb24,
+                1 => ColorFormat::Rgba32,
+                _ => Default::default(),
+            },
+        })
+    }
+}
+
 pub fn show_config_dialog(
     parent_hwnd: HWND,
     default_config: Config,
 ) -> std::result::Result<Option<Config>, ()> {
-    let repeat_input = Number::new()
-        .value(default_config.repeat as i32)
-        .range(0, u16::MAX as i32);
-
-    let color_options = vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()];
-    let color_combobox = ComboBox::new(color_options).selected(match default_config.color_format {
-        ColorFormat::Rgb24 => 0,
-        ColorFormat::Rgba32 => 1,
-    });
+    let inputs = Inputs::new(&default_config);
 
     let dialog = Dialog::new("GIF出力設定");
     let handle = dialog.handle();
@@ -26,18 +70,10 @@ pub fn show_config_dialog(
     // 入力値を検証してからダイアログを閉じる。無効ならダイアログは開いたまま
     let ok_button = Button::primary("OK").on_click({
         let handle = handle.clone();
-        let repeat_input = repeat_input.clone();
-        move || {
-            let owner = handle.hwnd();
-            if repeat_input.get_value::<u16>().is_err() {
-                MessageBox::error(
-                    owner,
-                    "ループ回数の値が無効です。正しい数値を入力してください。",
-                    "エラー",
-                );
-                return;
-            }
-            handle.accept();
+        let inputs = inputs.clone();
+        move || match inputs.collect() {
+            Ok(_) => handle.accept(),
+            Err(message) => MessageBox::error(handle.hwnd(), &message, "エラー"),
         }
     });
 
@@ -46,20 +82,14 @@ pub fn show_config_dialog(
         move || handle.cancel()
     });
 
-    let layout = FlexLayout::column()
-        .with_width(SizeValue::Points(300.0))
-        .with_padding(15.0)
-        .with_gap(10.0)
-        .with_layout(labeled("ループ回数 (0=無限ループ)", repeat_input.clone()))
-        .with_layout(labeled("カラーフォーマット", color_combobox.clone()))
-        .with_layout(
-            FlexLayout::row()
-                .with_gap(10.0)
-                .with_padding_rect(0.0, 0.0, 5.0, 0.0)
-                .with_justify_content(JustifyContent::End)
-                .with_widget(ok_button)
-                .with_widget(cancel_button),
-        );
+    let layout = inputs.layout().with_layout(
+        FlexLayout::row()
+            .with_gap(10.0)
+            .with_padding_rect(0.0, 0.0, 5.0, 0.0)
+            .with_justify_content(JustifyContent::End)
+            .with_widget(ok_button)
+            .with_widget(cancel_button),
+    );
 
     let accepted = dialog
         .with_layout(layout)
@@ -69,13 +99,5 @@ pub fn show_config_dialog(
         return Ok(None);
     }
 
-    // acceptはOKハンドラの検証を通過した場合のみ呼ばれるため、ここでのパースは成功する
-    Ok(Some(Config {
-        repeat: repeat_input.get_value().map_err(|_| ())?,
-        color_format: match color_combobox.selected_index() {
-            0 => ColorFormat::Rgb24,
-            1 => ColorFormat::Rgba32,
-            _ => Default::default(),
-        },
-    }))
+    inputs.collect().map(Some).map_err(|_| ())
 }
