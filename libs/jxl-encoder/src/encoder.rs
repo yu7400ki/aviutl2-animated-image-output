@@ -4,6 +4,7 @@ use crate::delta::{Delta, Pending, Region};
 use crate::error::{EncodingError, Error};
 use crate::layout::Layout;
 use crate::{Config, EFFORT_RANGE, QUALITY_RANGE};
+use anim_core::ColorType;
 use jxl_sys::{
     JXL_ENC_ERR_OOM, JXL_ENC_ERROR, JXL_ENC_FRAME_SETTING_EFFORT, JXL_ENC_NEED_MORE_OUTPUT,
     JXL_ENC_SUCCESS, JXL_FALSE, JXL_NATIVE_ENDIAN, JXL_TRUE, JXL_TYPE_UINT8, JxlBasicInfo,
@@ -215,7 +216,7 @@ impl<W: Write> Encoder<W> {
         info.bits_per_sample = 8;
         info.num_color_channels = 3;
         info.uses_original_profile = jxl_bool(lossless);
-        if layout.color_type.has_alpha() {
+        if layout.color_type == ColorType::Rgba8 {
             info.num_extra_channels = 1;
             info.alpha_bits = 8;
             info.alpha_exponent_bits = 0;
@@ -256,7 +257,7 @@ impl<W: Write> Encoder<W> {
             raw,
             settings,
             format: JxlPixelFormat {
-                num_channels: layout.color_type.num_channels(),
+                num_channels: layout.bytes_per_pixel as u32,
                 data_type: JXL_TYPE_UINT8,
                 endianness: JXL_NATIVE_ENDIAN,
                 align: 0,

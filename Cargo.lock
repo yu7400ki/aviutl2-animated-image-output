@@ -52,6 +52,7 @@ dependencies = [
 name = "avif_encoder"
 version = "0.1.0"
 dependencies = [
+ "anim_core",
  "avif-sys",
 ]
 

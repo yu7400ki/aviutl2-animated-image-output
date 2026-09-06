@@ -1,25 +1,7 @@
 //! キャンバスの大きさと、入力フレームのバイト並び
 
 use crate::error::Error;
-
-/// 画素の色種別 (ビット深度8固定)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColorType {
-    /// 8bit/chのRGB
-    Rgb8,
-    /// 8bit/chのRGBA
-    Rgba8,
-}
-
-impl ColorType {
-    /// 1画素あたりのバイト数
-    pub fn bytes_per_pixel(self) -> usize {
-        match self {
-            ColorType::Rgb8 => 3,
-            ColorType::Rgba8 => 4,
-        }
-    }
-}
+use anim_core::ColorType;
 
 /// キャンバスの大きさと、入力フレームのバイト並び
 #[derive(Debug, Clone, Copy)]

@@ -12,9 +12,9 @@ mod split;
 #[cfg(test)]
 mod tests;
 
+pub use anim_core::ColorType;
 pub use encoder::Encoder;
 pub use error::{EncodingError, Error, ErrorCode};
-pub use layout::ColorType;
 
 use std::ops::RangeInclusive;
 

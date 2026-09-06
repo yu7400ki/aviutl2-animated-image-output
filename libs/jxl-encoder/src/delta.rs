@@ -280,11 +280,7 @@ impl Delta {
         let basis = if config.is_lossless() {
             Basis::Inputs
         } else {
-            Basis::Rewritten(Rewrite::new(
-                layout.width,
-                layout.height,
-                layout.color_type.into(),
-            ))
+            Basis::Rewritten(Rewrite::new(layout.width, layout.height, layout.color_type))
         };
         Delta {
             previous: Vec::new(),

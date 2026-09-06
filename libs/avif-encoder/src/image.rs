@@ -1,7 +1,8 @@
 //! `avifImage` / `avifRGBImage` / `avifRWData` のRAII
 
 use crate::error::{EncodingError, Error};
-use crate::layout::{ColorType, Layout};
+use crate::layout::Layout;
+use anim_core::ColorType;
 use avif_sys::{
     AVIF_COLOR_PRIMARIES_BT709, AVIF_MATRIX_COEFFICIENTS_BT601, AVIF_PIXEL_FORMAT_YUV420,
     AVIF_PIXEL_FORMAT_YUV422, AVIF_PIXEL_FORMAT_YUV444, AVIF_RANGE_FULL, AVIF_RESULT_OK,

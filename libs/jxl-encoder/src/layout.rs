@@ -1,51 +1,7 @@
 //! キャンバスの大きさと、入力フレームのバイト並び
 
 use crate::error::Error;
-use anim_core::Rect;
-
-/// 画素の色種別 (ビット深度8固定)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColorType {
-    /// 8bit/chのRGB
-    Rgb8,
-    /// 8bit/chのRGBA
-    Rgba8,
-}
-
-impl ColorType {
-    /// 1画素あたりのバイト数
-    pub fn bytes_per_pixel(self) -> usize {
-        match self {
-            ColorType::Rgb8 => 3,
-            ColorType::Rgba8 => 4,
-        }
-    }
-
-    /// 1画素あたりのチャネル数
-    pub(crate) fn num_channels(self) -> u32 {
-        match self {
-            ColorType::Rgb8 => 3,
-            ColorType::Rgba8 => 4,
-        }
-    }
-
-    /// αを持つか
-    pub(crate) fn has_alpha(self) -> bool {
-        match self {
-            ColorType::Rgb8 => false,
-            ColorType::Rgba8 => true,
-        }
-    }
-}
-
-impl From<ColorType> for anim_core::ColorType {
-    fn from(color_type: ColorType) -> Self {
-        match color_type {
-            ColorType::Rgb8 => anim_core::ColorType::Rgb8,
-            ColorType::Rgba8 => anim_core::ColorType::Rgba8,
-        }
-    }
-}
+use anim_core::{ColorType, Rect};
 
 /// キャンバスの大きさと、入力フレームのバイト並び
 #[derive(Debug, Clone, Copy)]
@@ -127,16 +83,6 @@ mod tests {
                 "{width}x{height}"
             );
         }
-    }
-
-    #[test]
-    fn the_color_type_decides_the_channels_and_the_alpha() {
-        assert_eq!(ColorType::Rgb8.bytes_per_pixel(), 3);
-        assert_eq!(ColorType::Rgb8.num_channels(), 3);
-        assert!(!ColorType::Rgb8.has_alpha());
-        assert_eq!(ColorType::Rgba8.bytes_per_pixel(), 4);
-        assert_eq!(ColorType::Rgba8.num_channels(), 4);
-        assert!(ColorType::Rgba8.has_alpha());
     }
 
     /// 長さの計算はusizeで行う。u32演算なら折り返して小さな期待値を通してしまう

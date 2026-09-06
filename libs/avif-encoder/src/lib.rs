@@ -5,10 +5,10 @@ mod error;
 mod image;
 mod layout;
 
+pub use anim_core::ColorType;
 pub use encoder::{Encoder, OperatingPoint, Usage};
 pub use error::{EncodingError, Error};
 pub use image::YuvFormat;
-pub use layout::ColorType;
 
 use std::ops::RangeInclusive;
 
