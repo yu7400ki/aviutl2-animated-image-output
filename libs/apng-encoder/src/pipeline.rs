@@ -428,6 +428,39 @@ mod tests {
         assert!(buffer.is_empty(), "配ったバッファに中身がある");
     }
 
+    /// 切り出しのジョブを受け取ると、切り出し先が戻り、フレームを手放している
+    ///
+    /// ワーカーは結末を返す前にフレームを手放すので、受け取った側はそのフレームを
+    /// 次の写し先へ回せる。
+    #[test]
+    fn a_taken_crop_job_gives_back_its_region_and_frame() {
+        const RECT: Rect = Rect {
+            x: 1,
+            y: 1,
+            width: 8,
+            height: 6,
+        };
+
+        for workers in [2, 4] {
+            let mut pipeline = pipeline(workers);
+            let frame = Arc::new(region(9));
+
+            let index = pipeline.submit_crop(Arc::clone(&frame), RECT);
+            drop(pipeline.take(index));
+
+            assert_eq!(
+                pipeline.pooled(),
+                1,
+                "ワーカー{workers}個: 切り出し先の戻り"
+            );
+            assert_eq!(
+                Arc::strong_count(&frame),
+                1,
+                "ワーカー{workers}個: フレームを指している数"
+            );
+        }
+    }
+
     /// 群れを畳むと、抜ける前に旗が立つ
     ///
     /// 旗を読む側と立てる側を別々に問う。立てるのは畳むときだけなので、
