@@ -182,7 +182,7 @@ impl OutputPlugin for GifOutputPlugin {
             .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
 
             info.encode_frames(config.color_format, |frame_data| {
-                encoder.add_frame(&frame_data, delay)
+                encoder.add_frame(frame_data, delay)
             })
             .map_err(|e| e.to_string())?;
 

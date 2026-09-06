@@ -62,7 +62,7 @@ fn encode_with(
         config,
     )?;
     for (index, data) in frames.iter().enumerate() {
-        encoder.add_frame(data, delay_of(index))?;
+        encoder.add_frame(data.clone(), delay_of(index))?;
     }
     let (writer, report) = encoder.finish()?;
     Ok((writer.into_inner(), report))
@@ -1629,7 +1629,7 @@ fn encode_delays(frames: &[Vec<u8>], delays: &[FrameDelay]) -> (Vec<u8>, Report)
     )
     .unwrap();
     for (data, delay) in frames.iter().zip(delays) {
-        encoder.add_frame(data, *delay).unwrap();
+        encoder.add_frame(data.clone(), *delay).unwrap();
     }
     let (writer, report) = encoder.finish().unwrap();
     (writer.into_inner(), report)
@@ -1954,7 +1954,7 @@ fn a_frame_of_the_wrong_length_is_rejected() {
     let config = Config::default();
     let mut encoder = Encoder::new(Cursor::new(Vec::new()), 4, 4, 1, config).unwrap();
     assert!(matches!(
-        encoder.add_frame(&[0; 47], delay_of(0)),
+        encoder.add_frame(vec![0; 47], delay_of(0)),
         Err(Error::FrameSizeMismatch {
             expected: 48,
             actual: 47
@@ -1975,9 +1975,9 @@ fn a_missing_or_extra_frame_is_rejected() {
     ));
 
     let mut encoder = Encoder::new(Cursor::new(Vec::new()), 1, 1, 1, config).unwrap();
-    encoder.add_frame(&[1, 2, 3], delay_of(0)).unwrap();
+    encoder.add_frame(vec![1, 2, 3], delay_of(0)).unwrap();
     assert!(matches!(
-        encoder.add_frame(&[1, 2, 3], delay_of(1)),
+        encoder.add_frame(vec![1, 2, 3], delay_of(1)),
         Err(Error::FrameCountMismatch {
             expected: 1,
             actual: 2
@@ -2079,7 +2079,7 @@ fn a_table_that_was_never_written_back_stays_visible() {
     let failure = frames
         .iter()
         .enumerate()
-        .find_map(|(index, frame)| encoder.add_frame(frame, delay_of(index)).err());
+        .find_map(|(index, frame)| encoder.add_frame(frame.clone(), delay_of(index)).err());
     assert!(matches!(failure, Some(Error::Io(_))), "{failure:?}");
 
     let bytes = written.borrow();
@@ -2107,11 +2107,11 @@ fn a_failed_write_poisons_the_encoder() {
     let failure = frames
         .iter()
         .enumerate()
-        .find_map(|(index, frame)| encoder.add_frame(frame, delay_of(index)).err());
+        .find_map(|(index, frame)| encoder.add_frame(frame.clone(), delay_of(index)).err());
     assert!(matches!(failure, Some(Error::Io(_))), "{failure:?}");
 
     assert!(matches!(
-        encoder.add_frame(&frames[0], delay_of(0)),
+        encoder.add_frame(frames[0].clone(), delay_of(0)),
         Err(Error::Poisoned)
     ));
     assert!(matches!(encoder.finish(), Err(Error::Poisoned)));
@@ -2135,7 +2135,7 @@ fn a_write_that_fails_after_a_frame_leaves_the_stream_unterminated() {
     let mut encoder = Encoder::new(writer, 8, 8, FRAMES, config).unwrap();
     let mut first_frame_bytes = 0;
     for (index, frame) in frames.iter().enumerate() {
-        encoder.add_frame(frame, delay_of(index)).unwrap();
+        encoder.add_frame(frame.clone(), delay_of(index)).unwrap();
         if first_frame_bytes == 0 {
             first_frame_bytes = complete.borrow().len();
         }
@@ -2151,7 +2151,7 @@ fn a_write_that_fails_after_a_frame_leaves_the_stream_unterminated() {
     let mut accepted = 0;
     let mut failure = None;
     for (index, frame) in frames.iter().enumerate() {
-        match encoder.add_frame(frame, delay_of(index)) {
+        match encoder.add_frame(frame.clone(), delay_of(index)) {
             Ok(()) => accepted += 1,
             Err(error) => {
                 failure = Some(error);
@@ -2163,7 +2163,7 @@ fn a_write_that_fails_after_a_frame_leaves_the_stream_unterminated() {
     assert!(matches!(failure, Some(Error::Io(_))), "{failure:?}");
 
     assert!(matches!(
-        encoder.add_frame(&frames[0], delay_of(0)),
+        encoder.add_frame(frames[0].clone(), delay_of(0)),
         Err(Error::Poisoned)
     ));
     assert!(matches!(encoder.finish(), Err(Error::Poisoned)));

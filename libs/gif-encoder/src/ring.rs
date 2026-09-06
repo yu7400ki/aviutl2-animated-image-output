@@ -19,8 +19,6 @@ pub(crate) struct Ring {
     frames: VecDeque<Held>,
     /// リングに留めておくフレーム数
     capacity: usize,
-    /// 書き出しを終えて戻ってきた緩衝
-    spare: Option<Vec<u8>>,
 }
 
 impl Ring {
@@ -29,30 +27,17 @@ impl Ring {
         Ring {
             frames: VecDeque::new(),
             capacity: lookahead.saturating_sub(1),
-            spare: None,
         }
     }
 
-    /// `pixels` を写したフレームを1つ入れ、窓から溢れたぶんを返す
-    pub(crate) fn push(&mut self, pixels: &[u8], delay: FrameDelay) -> Option<Held> {
-        let mut held = self.spare.take().unwrap_or_default();
-        held.clear();
-        held.extend_from_slice(pixels);
-
-        self.frames.push_back(Held {
-            pixels: held,
-            delay,
-        });
+    /// フレームを1つ入れ、窓から溢れたぶんを返す
+    pub(crate) fn push(&mut self, pixels: Vec<u8>, delay: FrameDelay) -> Option<Held> {
+        self.frames.push_back(Held { pixels, delay });
         if self.frames.len() > self.capacity {
             self.frames.pop_front()
         } else {
             None
         }
-    }
-
-    /// 書き出しを終えた緩衝を返し、次のフレームで使い回せるようにする
-    pub(crate) fn recycle(&mut self, buffer: Vec<u8>) {
-        self.spare = Some(buffer);
     }
 
     /// 残っているフレームのうち最も古いものを取り出す
@@ -82,12 +67,12 @@ mod tests {
 
         for value in 0..LOOKAHEAD as u8 - 1 {
             assert!(
-                ring.push(&[value], delay()).is_none(),
+                ring.push(vec![value], delay()).is_none(),
                 "窓が埋まる前に溢れた"
             );
         }
         for value in LOOKAHEAD as u8 - 1..LOOKAHEAD as u8 + 3 {
-            let due = ring.push(&[value], delay()).expect("溢れていない");
+            let due = ring.push(vec![value], delay()).expect("溢れていない");
             assert_eq!(due.pixels, [value - (LOOKAHEAD as u8 - 1)]);
         }
 
@@ -97,23 +82,11 @@ mod tests {
         assert_eq!(rest, [4, 5, 6]);
     }
 
-    /// 戻した緩衝を使い回しても、入れた画素がそのまま出てくる
-    #[test]
-    fn a_recycled_buffer_carries_the_pixels_it_was_given() {
-        let mut ring = Ring::new(1);
-        let first = ring.push(&[1, 2, 3], delay()).expect("留めている");
-        ring.recycle(first.pixels);
-
-        // 入れる画素列は使い回す緩衝より短い
-        let due = ring.push(&[9], delay()).expect("留めている");
-        assert_eq!(due.pixels, [9], "前のフレームが残っている");
-    }
-
     /// 窓が1フレームなら留めずにそのまま流す
     #[test]
     fn a_window_of_one_frame_holds_nothing_back() {
         let mut ring = Ring::new(1);
-        let due = ring.push(&[7], delay()).expect("留めている");
+        let due = ring.push(vec![7], delay()).expect("留めている");
         assert_eq!(due.pixels, [7]);
         assert!(ring.take().is_none());
     }

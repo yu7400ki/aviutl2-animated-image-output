@@ -14,7 +14,6 @@ use crate::quantize::{Histogram, material};
 use crate::ring::Ring;
 use crate::table::{ColorTable, Palette, QUANTIZED_COLORS};
 use anim_core::{ColorType, Colors, FrameDelay, Pacing, Rect};
-use std::borrow::Cow;
 use std::io::{Seek, SeekFrom, Write};
 
 /// エンコード設定
@@ -532,13 +531,13 @@ impl<W: Write + Seek> Encoder<W> {
     /// フレームを1つ投入する
     ///
     /// `data` は [`Config::color_type`] の画素が左上から右下へ隙間なく
-    /// 並んでいること。
+    /// 並んでいること。渡した面はそのままエンコーダが抱える。
     ///
     /// # Errors
     /// バイト数が寸法と色種別から決まる長さと違うとき
     /// [`Error::FrameSizeMismatch`]。宣言したフレーム数を超えたとき
     /// [`Error::FrameCountMismatch`]。
-    pub fn add_frame(&mut self, data: &[u8], delay: FrameDelay) -> Result<(), Error> {
+    pub fn add_frame(&mut self, data: Vec<u8>, delay: FrameDelay) -> Result<(), Error> {
         if self.poisoned {
             return Err(Error::Poisoned);
         }
@@ -555,17 +554,16 @@ impl<W: Write + Seek> Encoder<W> {
             });
         }
 
-        let pixels = match self.layout.color_type {
-            ColorType::Rgb8 => Cow::Borrowed(data),
+        let mut pixels = data;
+        match self.layout.color_type {
+            ColorType::Rgb8 => {}
             ColorType::Rgba8 => {
-                let mut pixels = data.to_vec();
                 self.binarized += normalize::binarize(&mut pixels);
-                Cow::Owned(pixels)
             }
-        };
+        }
 
         // 途中で失敗するとブロックの列が中断した状態で残るため、以降の投入を拒否する
-        self.accept(&pixels, delay)
+        self.accept(pixels, delay)
             .inspect_err(|_| self.poisoned = true)?;
 
         self.frames_accepted += 1;
@@ -648,14 +646,12 @@ impl<W: Write + Seek> Encoder<W> {
     }
 
     /// 正規化したフレームを先読みリングへ入れ、溢れたぶんを書き出しへ渡す
-    fn accept(&mut self, pixels: &[u8], delay: FrameDelay) -> Result<(), Error> {
+    fn accept(&mut self, pixels: Vec<u8>, delay: FrameDelay) -> Result<(), Error> {
         let (ring, writing, mut parts) = self.split();
         let Some(due) = ring.push(pixels, delay) else {
             return Ok(());
         };
-        parts.write_frame(writing, ring, &due.pixels, due.delay)?;
-        ring.recycle(due.pixels);
-        Ok(())
+        parts.write_frame(writing, ring, &due.pixels, due.delay)
     }
 }
 
@@ -1176,7 +1172,7 @@ mod tests {
         let mut encoder = Encoder::new(Cursor::new(Vec::new()), 32, 4, count, config).unwrap();
         let delay = FrameDelay::new(1, 30).unwrap();
         for frame in moving_sprite(count) {
-            encoder.add_frame(&frame, delay).unwrap();
+            encoder.add_frame(frame, delay).unwrap();
         }
 
         encoder.writing.pacing
