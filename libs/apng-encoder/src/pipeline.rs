@@ -5,12 +5,12 @@ use crate::error::Error;
 use crate::layout::Layout;
 use anim_core::{Rect, crop};
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 
 /// ワーカーに付ける名前
@@ -80,10 +80,76 @@ struct Done {
     region: Vec<u8>,
 }
 
+/// 取り出しを待つジョブ
+///
+/// [`Source::Restored`] のジョブは `ahead` へ入り、`behind` に溜まっているジョブを
+/// 追い越して取られる。どちらの列も投入の順に取る。
+#[derive(Default)]
+struct Queue {
+    /// 追い越して取るジョブ
+    ahead: VecDeque<(usize, Job)>,
+    /// 投入の順に取るジョブ
+    behind: VecDeque<(usize, Job)>,
+    /// 投入口を閉じたか
+    closed: bool,
+}
+
+/// ジョブの投入口と、ワーカーの取り出し口
+#[derive(Default)]
+struct Jobs {
+    queue: Mutex<Queue>,
+    /// 取れるジョブが増えたことと、投入口が閉じたことを知らせる
+    available: Condvar,
+}
+
+impl Jobs {
+    /// 毒された錠も通して列を開く
+    fn lock(&self) -> MutexGuard<'_, Queue> {
+        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// ジョブを1つ投入する
+    fn push(&self, index: usize, job: Job) {
+        let mut queue = self.lock();
+        let lane = match job.source {
+            Source::Restored { .. } => &mut queue.ahead,
+            Source::Ready { .. } | Source::Crop { .. } => &mut queue.behind,
+        };
+        lane.push_back((index, job));
+        drop(queue);
+        self.available.notify_one();
+    }
+
+    /// ジョブを1つ取り出す
+    ///
+    /// 取れるジョブが無ければ待ち、投入口が閉じて列が尽きたとき `None` を返す。
+    fn pop(&self) -> Option<(usize, Job)> {
+        let mut queue = self.lock();
+        loop {
+            if let Some(job) = queue.ahead.pop_front().or_else(|| queue.behind.pop_front()) {
+                return Some(job);
+            }
+            if queue.closed {
+                return None;
+            }
+            queue = self
+                .available
+                .wait(queue)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// 投入口を閉じ、待っているワーカーを全て起こす
+    fn close(&self) {
+        self.lock().closed = true;
+        self.available.notify_all();
+    }
+}
+
 /// 圧縮を回すワーカーの群れ
 struct Pool {
-    /// ジョブの投入口。落とすとワーカーが順に抜ける
-    jobs: Option<Sender<(usize, Job)>>,
+    /// ジョブの列。投入口を閉じるとワーカーが順に抜ける
+    jobs: Arc<Jobs>,
     /// 投入済みのジョブを圧縮せずに捨てるか
     abandoned: Arc<AtomicBool>,
     results: Receiver<Done>,
@@ -98,7 +164,7 @@ struct Pool {
 impl Drop for Pool {
     fn drop(&mut self) {
         self.abandoned.store(true, Ordering::Relaxed);
-        self.jobs = None;
+        self.jobs.close();
         for worker in self.workers.drain(..) {
             drop(worker.join());
         }
@@ -156,7 +222,7 @@ fn run(codec: &mut Codec, layout: &Layout, job: Job) -> (Outcome, Vec<u8>) {
 /// ジョブを1つずつ取り、圧縮して結末を返す
 ///
 /// 巻き戻しで抜けたワーカーは抱えていたジョブの結末を返さず、駆動はその番号を
-/// 待ち続ける。ジョブの巻き戻しは結末として持ち帰り、受け口の毒も取り出しだけは
+/// 待ち続ける。ジョブの巻き戻しは結末として持ち帰り、列の毒も取り出しだけは
 /// 通して、この関数から巻き戻しの出口を無くす。
 ///
 /// `abandoned` が立った後に取り出したジョブは捨てて抜ける。立てるのは群れを
@@ -164,13 +230,12 @@ fn run(codec: &mut Codec, layout: &Layout, job: Job) -> (Outcome, Vec<u8>) {
 fn work(
     codec: &mut Codec,
     layout: &Layout,
-    jobs: &Mutex<Receiver<(usize, Job)>>,
+    jobs: &Jobs,
     results: &Sender<Done>,
     abandoned: &AtomicBool,
 ) {
     loop {
-        let received = jobs.lock().unwrap_or_else(PoisonError::into_inner).recv();
-        let Ok((index, job)) = received else {
+        let Some((index, job)) = jobs.pop() else {
             return;
         };
         if abandoned.load(Ordering::Relaxed) {
@@ -196,18 +261,16 @@ fn work(
 /// # Errors
 /// スレッドを起こせないとき [`Error::Io`]。
 fn spawn(level: u32, workers: NonZeroUsize, layout: Layout) -> Result<Pool, Error> {
-    let (sender, receiver) = channel();
     let (results, done) = channel();
-    let jobs = Arc::new(Mutex::new(receiver));
 
     let mut pool = Pool {
-        jobs: Some(sender),
+        jobs: Arc::new(Jobs::default()),
         abandoned: Arc::new(AtomicBool::new(false)),
         results: done,
         workers: Vec::with_capacity(workers.get()),
     };
     for _ in 0..workers.get() {
-        let jobs = Arc::clone(&jobs);
+        let jobs = Arc::clone(&pool.jobs);
         let results = results.clone();
         let abandoned = Arc::clone(&pool.abandoned);
         let worker = thread::Builder::new()
@@ -340,10 +403,7 @@ impl Pipeline {
         self.submitted += 1;
 
         match &self.pool {
-            Some(pool) => {
-                let jobs = pool.jobs.as_ref().expect("投入口は畳むときだけ落とす");
-                jobs.send((index, job)).expect("ワーカーは畳むまで受け取る");
-            }
+            Some(pool) => pool.jobs.push(index, job),
             None => {
                 let (outcome, region) = run(&mut self.codec, &self.layout, job);
                 self.buffers.give(region);
@@ -536,6 +596,67 @@ mod tests {
         }
     }
 
+    /// 列は復元のジョブを先に返し、残りは投入の順に返す
+    #[test]
+    fn the_queue_hands_out_restored_jobs_first() {
+        let jobs = Jobs::default();
+        let ready = |seed: u32| Job {
+            region: region(seed),
+            body: Vec::new(),
+            source: Source::Ready {
+                region_stride: STRIDE,
+            },
+        };
+        let restored = Job {
+            region: Vec::new(),
+            body: Vec::new(),
+            source: Source::Restored {
+                canvas: Arc::new(region(31)),
+                data: Arc::new(region(32)),
+                kept_area: u64::MAX,
+            },
+        };
+
+        jobs.push(0, ready(1));
+        jobs.push(1, ready(2));
+        jobs.push(2, restored);
+        jobs.push(3, ready(3));
+        jobs.close();
+
+        let order: Vec<usize> = std::iter::from_fn(|| jobs.pop().map(|(index, _)| index)).collect();
+        assert_eq!(order, [2, 0, 1, 3]);
+    }
+
+    /// 復元のジョブは、溜まっているジョブを追い越して取られる
+    ///
+    /// 復元より先に届くのは、投入の時点で走っていたぶんだけになる。
+    #[test]
+    fn a_restored_job_overtakes_the_queued_jobs() {
+        const WORKERS: usize = 2;
+        const QUEUED: usize = 8;
+        /// 投入の間にワーカーが汲み尽くさない大きさ
+        const HEAVY: usize = 256 * 1024;
+
+        let heavy: Vec<Vec<u8>> = (0..QUEUED as u32).map(|seed| noise(HEAVY, seed)).collect();
+        let canvas = Arc::new(region(21));
+        let mut frame = canvas.as_ref().clone();
+        frame[0] ^= 0xFF;
+        let frame = Arc::new(frame);
+
+        let mut pipeline = pipeline(WORKERS);
+        for region in heavy {
+            pipeline.submit_region(region, STRIDE);
+        }
+        let restored = pipeline.submit_restored(canvas, frame, u64::MAX);
+
+        drop(pipeline.take_restored(restored).expect("復元の候補"));
+        assert!(
+            pipeline.ready.len() <= WORKERS,
+            "復元より先に届いた結末が{}件",
+            pipeline.ready.len()
+        );
+    }
+
     /// 結果を受け取ったジョブの領域と、返した本体は配り直す先へ戻る
     #[test]
     fn the_buffer_of_a_taken_job_comes_back() {
@@ -611,22 +732,24 @@ mod tests {
     #[test]
     fn a_job_taken_from_an_abandoned_pool_is_discarded() {
         for abandoned in [false, true] {
-            let (sender, receiver) = channel();
             let (results, done) = channel();
-            let job = Job {
-                region: region(0),
-                body: Vec::new(),
-                source: Source::Ready {
-                    region_stride: STRIDE,
+            let jobs = Jobs::default();
+            jobs.push(
+                0,
+                Job {
+                    region: region(0),
+                    body: Vec::new(),
+                    source: Source::Ready {
+                        region_stride: STRIDE,
+                    },
                 },
-            };
-            sender.send((0, job)).unwrap();
-            drop(sender);
+            );
+            jobs.close();
 
             work(
                 &mut Codec::new(LEVEL),
                 &layout(),
-                &Mutex::new(receiver),
+                &jobs,
                 &results,
                 &AtomicBool::new(abandoned),
             );
