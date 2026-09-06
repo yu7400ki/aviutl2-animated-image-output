@@ -25,6 +25,11 @@ pub fn default_threads() -> usize {
     (max_threads() / 2).max(1)
 }
 
+/// スレッド数を1以上のワーカー数にする
+pub fn workers(threads: usize) -> NonZeroUsize {
+    NonZeroUsize::new(threads).unwrap_or(NonZeroUsize::MIN)
+}
+
 /// セクションからキーを読み、`FromStr` で解釈する
 ///
 /// セクションが無い・キーが無い・値が解釈できない場合は `default` を返す。
@@ -103,6 +108,18 @@ mod tests {
             properties.insert(*key, *value);
         }
         properties
+    }
+
+    #[test]
+    fn a_zero_worker_count_becomes_one() {
+        assert_eq!(workers(0).get(), 1);
+    }
+
+    #[test]
+    fn threads_at_or_above_one_pass_through_unchanged() {
+        for threads in [1, 2, 7] {
+            assert_eq!(workers(threads).get(), threads);
+        }
     }
 
     #[test]

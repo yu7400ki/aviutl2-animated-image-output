@@ -4,11 +4,10 @@ mod dialog;
 use apng_encoder::{ColorType, Config as EncoderConfig, Encoder};
 use aviutl2::{
     ConfigDialog, FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, register_logger,
-    register_output_plugin, write_or_discard,
+    register_output_plugin, workers, write_or_discard,
 };
 use config::{ColorFormat, Config};
 use std::io::BufWriter;
-use std::num::NonZeroUsize;
 use windows::Win32::Foundation::HWND;
 
 /// プラグイン設定をエンコーダの設定へ対応付ける
@@ -21,11 +20,6 @@ fn encoder_config(config: &Config) -> EncoderConfig {
         compression_level: config.compression_level,
         num_plays: config.repeat,
     }
-}
-
-/// 設定のスレッド数をエンコーダのワーカー数へ渡す形にする
-fn encoder_workers(config: &Config) -> NonZeroUsize {
-    NonZeroUsize::new(config.threads).unwrap_or(NonZeroUsize::MIN)
 }
 
 struct ApngOutputPlugin;
@@ -64,7 +58,7 @@ impl OutputPlugin for ApngOutputPlugin {
                 height,
                 num_frames,
                 encoder_config(config),
-                encoder_workers(config),
+                workers(config.threads),
             )
             .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
 
@@ -216,32 +210,5 @@ mod tests {
         });
         assert_eq!(encoder_config.num_plays, 5);
         assert_eq!(encoder_config.compression_level, 3);
-    }
-
-    #[test]
-    fn threads_are_passed_through_as_the_number_to_wake() {
-        for threads in [1, 2, 7] {
-            assert_eq!(
-                encoder_workers(&Config {
-                    threads,
-                    ..Config::default()
-                })
-                .get(),
-                threads
-            );
-        }
-    }
-
-    /// 0 は起こせないので1へ寄る
-    #[test]
-    fn a_zero_worker_count_becomes_one() {
-        assert_eq!(
-            encoder_workers(&Config {
-                threads: 0,
-                ..Config::default()
-            })
-            .get(),
-            1
-        );
     }
 }
