@@ -1,13 +1,29 @@
-//! DLLと同じディレクトリのiniファイルへ設定を読み書きするトレイトと関数
+//! プラグイン設定の読み書きと、設定値の既定・上限
 
 use ini::{Ini, Properties};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::thread::available_parallelism;
 
 /// 設定が採れるループ回数の上限
 ///
 /// ダイアログの数値欄が扱える上限。
 pub const MAX_REPEAT: u32 = i32::MAX as u32;
+
+/// 設定が採れるスレッド数の上限
+///
+/// 走らせる機械の論理CPU数。読めなければ1を返す。
+pub fn max_threads() -> usize {
+    available_parallelism().map_or(1, NonZeroUsize::get)
+}
+
+/// 既定で使うスレッド数
+///
+/// 上限の半分。上限が1の機械では1になる。
+pub fn default_threads() -> usize {
+    (max_threads() / 2).max(1)
+}
 
 /// セクションからキーを読み、`FromStr` で解釈する
 ///
@@ -114,5 +130,23 @@ mod tests {
         let properties = properties(&[("repeat", "3")]);
         let value: u32 = read(Some(&properties), "repeat", 5);
         assert_eq!(value, 3);
+    }
+
+    /// 既定のスレッド数は上限の内側で控えめに採る
+    ///
+    /// 上限が1の機械では1つしか採れないので、そこだけ上限と一致する。
+    #[test]
+    fn default_threads_stay_inside_the_ceiling() {
+        let default = default_threads();
+        let ceiling = max_threads();
+
+        assert!(default >= 1, "{default}");
+        assert!(default <= ceiling, "{default} / {ceiling}");
+        if ceiling >= 2 {
+            assert!(
+                default < ceiling,
+                "上限をそのまま採っている: {default} / {ceiling}"
+            );
+        }
     }
 }
