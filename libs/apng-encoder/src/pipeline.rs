@@ -59,8 +59,8 @@ enum Source {
 /// ジョブ1つの結末
 enum Outcome {
     Compressed(Candidate),
-    /// 走査で求めた矩形と、そこを圧縮した候補
-    Restored {
+    /// 切り出した矩形と、そこを圧縮した候補
+    Cut {
         rect: Rect,
         candidate: Candidate,
     },
@@ -171,6 +171,24 @@ impl Drop for Pool {
     }
 }
 
+/// `data` から `rect` を切り出して圧縮する
+fn cut(
+    codec: &mut Codec,
+    layout: &Layout,
+    region: &mut Vec<u8>,
+    data: &[u8],
+    rect: Rect,
+    body: Vec<u8>,
+) -> Outcome {
+    let bpp = layout.bytes_per_pixel;
+    crop(data, rect, layout.stride, bpp, bpp, region);
+
+    Outcome::Cut {
+        rect,
+        candidate: codec.compress(region, rect.width as usize * bpp, bpp, body),
+    }
+}
+
 /// ジョブ1つを片付け、結末と領域のバッファを返す
 ///
 /// フレームから埋めるジョブは走査と切り出しを済ませてから圧縮する。そこまでの
@@ -189,11 +207,7 @@ fn run(codec: &mut Codec, layout: &Layout, job: Job) -> (Outcome, Vec<u8>) {
         Source::Ready { region_stride } => {
             Outcome::Compressed(codec.compress(&region, region_stride, bpp, body))
         }
-        Source::Crop { data, rect } => {
-            crop(&data, rect, layout.stride, bpp, bpp, &mut region);
-            let region_stride = rect.width as usize * bpp;
-            Outcome::Compressed(codec.compress(&region, region_stride, bpp, body))
-        }
+        Source::Crop { data, rect } => cut(codec, layout, &mut region, &data, rect, body),
         Source::Restored {
             canvas,
             data,
@@ -204,12 +218,7 @@ fn run(codec: &mut Codec, layout: &Layout, job: Job) -> (Outcome, Vec<u8>) {
                 return Outcome::Rejected { body };
             }
 
-            crop(&data, rect, layout.stride, bpp, bpp, &mut region);
-            let region_stride = rect.width as usize * bpp;
-            Outcome::Restored {
-                rect,
-                candidate: codec.compress(&region, region_stride, bpp, body),
-            }
+            cut(codec, layout, &mut region, &data, rect, body)
         }
     };
     let outcome = match panic::catch_unwind(AssertUnwindSafe(compress)) {
@@ -423,8 +432,19 @@ impl Pipeline {
         match self.wait(index) {
             Outcome::Compressed(candidate) => candidate,
             Outcome::Panicked(payload) => panic::resume_unwind(payload),
-            Outcome::Restored { .. } | Outcome::Rejected { .. } => {
+            Outcome::Cut { .. } | Outcome::Rejected { .. } => {
                 panic!("領域を圧縮するジョブの番号を指している")
+            }
+        }
+    }
+
+    /// `index` の切り出して圧縮するジョブの結果を、切り出した矩形とともに受け取る
+    pub(crate) fn take_cut(&mut self, index: usize) -> (Rect, Candidate) {
+        match self.wait(index) {
+            Outcome::Cut { rect, candidate } => (rect, candidate),
+            Outcome::Panicked(payload) => panic::resume_unwind(payload),
+            Outcome::Compressed(_) | Outcome::Rejected { .. } => {
+                panic!("切り出して圧縮するジョブの番号を指している")
             }
         }
     }
@@ -434,7 +454,7 @@ impl Pipeline {
     /// 候補にしなかったときは本体のバッファを配り直して `None` を返す。
     pub(crate) fn take_restored(&mut self, index: usize) -> Option<(Rect, Candidate)> {
         match self.wait(index) {
-            Outcome::Restored { rect, candidate } => Some((rect, candidate)),
+            Outcome::Cut { rect, candidate } => Some((rect, candidate)),
             Outcome::Rejected { body } => {
                 self.buffers.give(body);
                 None
@@ -512,7 +532,7 @@ mod tests {
         }
     }
 
-    /// 切り出しのジョブは、同じ矩形を切り出した領域のジョブと同じ候補を返す
+    /// 切り出しのジョブは、渡した矩形と、同じ矩形を切り出した領域のジョブと同じ候補を返す
     #[test]
     fn a_crop_job_compresses_what_the_rect_cuts_out() {
         const RECT: Rect = Rect {
@@ -532,11 +552,9 @@ mod tests {
             let expected = pipeline.take(index).into_body();
 
             let index = pipeline.submit_crop(Arc::clone(&frame), RECT);
-            assert_eq!(
-                pipeline.take(index).into_body(),
-                expected,
-                "ワーカー{workers}個"
-            );
+            let (rect, candidate) = pipeline.take_cut(index);
+            assert_eq!(rect, RECT, "ワーカー{workers}個: 切り出した矩形");
+            assert_eq!(candidate.into_body(), expected, "ワーカー{workers}個");
         }
     }
 
@@ -580,7 +598,7 @@ mod tests {
             );
 
             let index = pipeline.submit_crop(Arc::clone(&frame), RECT);
-            let expected = pipeline.take(index).into_body();
+            let expected = pipeline.take_cut(index).1.into_body();
 
             let index =
                 pipeline.submit_restored(Arc::clone(&canvas), Arc::clone(&frame), RECT.area() + 1);
@@ -694,7 +712,7 @@ mod tests {
             let frame = Arc::new(region(9));
 
             let index = pipeline.submit_crop(Arc::clone(&frame), RECT);
-            drop(pipeline.take(index));
+            drop(pipeline.take_cut(index));
 
             assert_eq!(
                 pipeline.pooled(),

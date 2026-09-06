@@ -381,16 +381,16 @@ impl<W: Write> Encoder<W> {
             index,
             data,
             delay,
-            kept,
             job,
             restored,
+            ..
         } = self.staged.pop_front().expect("決めるフレームがある");
 
         let Disposal {
             op: dispose,
             rect,
             candidate: source,
-        } = self.choose_dispose(kept, job, restored);
+        } = self.choose_dispose(job, restored);
         let over = self.submit_over(&data, index, dispose, rect);
 
         self.writing.advance(
@@ -448,9 +448,9 @@ impl<W: Write> Encoder<W> {
     /// 捨てない。
     ///
     /// 捨てるときの候補は矩形が狭いときだけ立ち、その判定は投入した先で済んでいる。
-    fn choose_dispose(&mut self, kept: Rect, job: usize, restored: Option<usize>) -> Disposal {
+    fn choose_dispose(&mut self, job: usize, restored: Option<usize>) -> Disposal {
         let restored = restored.and_then(|job| self.pipeline.take_restored(job));
-        let kept_candidate = self.pipeline.take(job);
+        let (kept, kept_candidate) = self.pipeline.take_cut(job);
 
         let keep = |candidate| Disposal {
             op: DISPOSE_OP_NONE,
