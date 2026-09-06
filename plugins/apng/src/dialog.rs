@@ -203,6 +203,11 @@ mod tests {
     #[test]
     fn an_invalid_repeat_count_is_refused() {
         let inputs = inputs();
+        let (min, max) = inputs
+            .repeat
+            .input()
+            .range_bounds()
+            .expect("値域を持つ入力欄");
 
         for text in ["abc", "", "2147483648", "-1"] {
             inputs.repeat.input().set_text(text);
@@ -211,7 +216,7 @@ mod tests {
             };
             assert_eq!(
                 message,
-                "ループ回数の値が無効です。0以上の数値を入力してください。"
+                format!("ループ回数の値が無効です。{min}-{max}の値を入力してください。")
             );
         }
     }

@@ -263,6 +263,11 @@ mod tests {
     #[test]
     fn a_negative_number_of_plays_is_refused() {
         let inputs = inputs();
+        let (min, max) = inputs
+            .repeat
+            .input()
+            .range_bounds()
+            .expect("値域を持つ入力欄");
         inputs.repeat.input().set_value(-1);
 
         let Err(message) = inputs.collect() else {
@@ -270,7 +275,7 @@ mod tests {
         };
         assert_eq!(
             message,
-            "ループ回数の値が無効です。0以上の数値を入力してください。"
+            format!("ループ回数の値が無効です。{min}-{max}の値を入力してください。")
         );
     }
 }
