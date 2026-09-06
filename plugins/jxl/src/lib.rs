@@ -126,7 +126,7 @@ impl OutputPlugin for JxlOutputPlugin {
             config,
             |encoder| {
                 info.encode_frames(config.color_format, |frame_data| {
-                    encoder.add_frame(&frame_data, sequence.duration)
+                    encoder.add_frame(frame_data, sequence.duration)
                 })
                 .map_err(|e| e.to_string())
             },
@@ -193,7 +193,7 @@ mod tests {
             |encoder| {
                 for seed in 0..frames {
                     encoder
-                        .add_frame(&frame_of(seed), sequence.duration)
+                        .add_frame(frame_of(seed), sequence.duration)
                         .map_err(|e| e.to_string())?;
                 }
                 Ok(())

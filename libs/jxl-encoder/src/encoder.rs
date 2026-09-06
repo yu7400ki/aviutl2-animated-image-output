@@ -272,9 +272,9 @@ impl<W: Write> Encoder<W> {
     /// フレームを1つ投入する
     ///
     /// `data` は [`Config::color_type`] の画素が左上から右下へ隙間なく並んで
-    /// いること。`duration` は [`Config::tps_numerator`] と
-    /// [`Config::tps_denominator`] が決める tick 数の表示時間で、静止画では
-    /// 書かれない。
+    /// いること。渡した面はそのままエンコーダが抱える。`duration` は
+    /// [`Config::tps_numerator`] と [`Config::tps_denominator`] が決める tick 数の
+    /// 表示時間で、静止画では書かれない。
     ///
     /// 投入されたフレームはその場では書き出さず、書き直す範囲が決まる次の
     /// 呼び出し、または [`Encoder::finish`] で書き出す。直前に投入されたフレームと
@@ -288,7 +288,7 @@ impl<W: Write> Encoder<W> {
     ///
     /// 符号化と書き出しの失敗は1つ前に投入されたフレームのものになる。最後に
     /// 投入したフレームの書き出しは [`Encoder::finish`] で報告される。
-    pub fn add_frame(&mut self, data: &[u8], duration: u32) -> Result<(), Error> {
+    pub fn add_frame(&mut self, data: Vec<u8>, duration: u32) -> Result<(), Error> {
         if self.frames_accepted == self.num_frames {
             return Err(Error::FrameCountMismatch {
                 expected: self.num_frames,
@@ -298,7 +298,7 @@ impl<W: Write> Encoder<W> {
         if duration == 0 {
             return Err(Error::InvalidDuration);
         }
-        self.layout.check_frame(data)?;
+        self.layout.check_frame(&data)?;
 
         self.frames_accepted += 1;
         if let Some(pending) = self.delta.advance(&self.layout, data, duration) {
@@ -446,6 +446,23 @@ mod tests {
         frame
     }
 
+    /// 投入された面が、写されずに直前のフレームとして残る
+    #[test]
+    fn a_submitted_face_moves_into_the_delta() {
+        let mut encoder = encoder(3, config()).unwrap();
+        for index in 0..3 {
+            let frame = dot(index);
+            let head = frame.as_ptr();
+            encoder.add_frame(frame, 1).unwrap();
+            assert_eq!(
+                encoder.delta().previous().as_ptr(),
+                head,
+                "フレーム{index}の面が直前のフレームに無い"
+            );
+        }
+        encoder.finish().unwrap();
+    }
+
     /// 渡された長さと `flush` の回数を控える writer
     #[derive(Default)]
     struct Recorder {
@@ -486,7 +503,7 @@ mod tests {
             ..config()
         };
         let mut encoder = Encoder::new(Recorder::default(), side, side, 1, config).unwrap();
-        encoder.add_frame(&noise_rgba(side, side), 1).unwrap();
+        encoder.add_frame(noise_rgba(side, side), 1).unwrap();
         let recorder = encoder.finish().unwrap();
 
         let filled = recorder
@@ -504,7 +521,7 @@ mod tests {
     #[test]
     fn finishing_flushes_the_writer() {
         let mut encoder = Encoder::new(Recorder::default(), 16, 16, 1, config()).unwrap();
-        encoder.add_frame(&[0; 16 * 16 * 3], 1).unwrap();
+        encoder.add_frame(vec![0; 16 * 16 * 3], 1).unwrap();
         assert_eq!(encoder.writer.flushes, 0, "投入の途中で flush している");
         assert_eq!(encoder.finish().unwrap().flushes, 1);
     }
@@ -641,8 +658,8 @@ mod tests {
             },
         )
         .unwrap();
-        encoder.add_frame(&dot(0), 1).unwrap();
-        encoder.add_frame(&dot(1), 1).unwrap();
+        encoder.add_frame(dot(0), 1).unwrap();
+        encoder.add_frame(dot(1), 1).unwrap();
         encoder.finish().unwrap();
     }
 
@@ -710,7 +727,7 @@ mod tests {
     fn a_zero_duration_is_rejected() {
         let mut encoder = encoder(2, config()).unwrap();
         assert!(matches!(
-            encoder.add_frame(&[0; 16 * 16 * 3], 0),
+            encoder.add_frame(vec![0; 16 * 16 * 3], 0),
             Err(Error::InvalidDuration)
         ));
     }
@@ -719,7 +736,7 @@ mod tests {
     fn a_frame_of_another_length_is_rejected() {
         let mut encoder = encoder(2, config()).unwrap();
         assert!(matches!(
-            encoder.add_frame(&[0; 16 * 16 * 4], 1),
+            encoder.add_frame(vec![0; 16 * 16 * 4], 1),
             Err(Error::FrameSizeMismatch {
                 expected: 768,
                 actual: 1024
@@ -733,7 +750,7 @@ mod tests {
         let mut encoder = encoder(3, config()).unwrap();
         let mut written = Vec::new();
         for index in 0..3 {
-            encoder.add_frame(&dot(index), 1).unwrap();
+            encoder.add_frame(dot(index), 1).unwrap();
             written.push(encoder.writer.position());
         }
         assert_eq!(written[0], 0, "1枚目が投入と同時に書き出されている");
@@ -744,9 +761,9 @@ mod tests {
     #[test]
     fn more_frames_than_declared_are_rejected() {
         let mut encoder = encoder(1, config()).unwrap();
-        encoder.add_frame(&[0; 16 * 16 * 3], 1).unwrap();
+        encoder.add_frame(vec![0; 16 * 16 * 3], 1).unwrap();
         assert!(matches!(
-            encoder.add_frame(&[0; 16 * 16 * 3], 1),
+            encoder.add_frame(vec![0; 16 * 16 * 3], 1),
             Err(Error::FrameCountMismatch {
                 expected: 1,
                 actual: 2
@@ -757,7 +774,7 @@ mod tests {
     #[test]
     fn fewer_frames_than_declared_are_rejected() {
         let mut encoder = encoder(3, config()).unwrap();
-        encoder.add_frame(&[0; 16 * 16 * 3], 1).unwrap();
+        encoder.add_frame(vec![0; 16 * 16 * 3], 1).unwrap();
         assert!(matches!(
             encoder.finish(),
             Err(Error::FrameCountMismatch {

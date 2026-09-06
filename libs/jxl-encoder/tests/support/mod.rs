@@ -97,7 +97,7 @@ pub fn encode_into<W: Write>(
 ) -> W {
     let mut encoder = Encoder::new(writer, width, height, frames.len() as u32, config).unwrap();
     for (frame, duration) in frames.iter().zip(durations) {
-        encoder.add_frame(frame, *duration).unwrap();
+        encoder.add_frame(frame.clone(), *duration).unwrap();
     }
     encoder.finish().unwrap()
 }

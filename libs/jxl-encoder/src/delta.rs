@@ -305,13 +305,12 @@ impl Delta {
     pub(crate) fn advance(
         &mut self,
         layout: &Layout,
-        data: &[u8],
+        data: Vec<u8>,
         duration: u32,
     ) -> Option<Pending> {
         let Some(mut pending) = self.pending else {
             // 先頭フレームには土台にする直前のフレームが無い
-            self.previous.clear();
-            self.previous.extend_from_slice(data);
+            self.previous = data;
             self.pending = Some(Pending {
                 shape: Shape::Whole,
                 slot: Slot::First,
@@ -320,7 +319,7 @@ impl Delta {
             return None;
         };
 
-        let shape = match self.commit(layout, data) {
+        let shape = match self.commit(layout, &data) {
             Some(shape) => shape,
             None => match pending.duration.checked_add(duration) {
                 Some(total) => {
@@ -328,14 +327,13 @@ impl Delta {
                     self.pending = Some(pending);
                     return None;
                 }
-                None => self.commit_unchanged(layout, data),
+                None => self.commit_unchanged(layout, &data),
             },
         };
 
         self.stage(layout, pending.shape);
-        self.rotate();
-        self.previous.clear();
-        self.previous.extend_from_slice(data);
+        // 直前に投入されたフレームが2つ前のキャンバスになる
+        self.canvas = std::mem::replace(&mut self.previous, data);
         self.pending = Some(Pending {
             shape,
             slot: pending.slot.other(),
@@ -362,6 +360,12 @@ impl Delta {
         &self.staged
     }
 
+    /// 直前に投入されたフレームの面
+    #[cfg(test)]
+    pub(crate) fn previous(&self) -> &[u8] {
+        &self.previous
+    }
+
     /// 直前の投入で変わった画素も書き直すか
     #[cfg(test)]
     pub(crate) fn carries_the_previous_change(&self) -> bool {
@@ -383,11 +387,6 @@ impl Delta {
             previous, basis, ..
         } = self;
         basis.commit_unchanged(layout, previous, data)
-    }
-
-    /// 直前に投入されたフレームを2つ前のキャンバスへ送る
-    fn rotate(&mut self) {
-        std::mem::swap(&mut self.canvas, &mut self.previous);
     }
 
     /// 直前のフレームのうち `shape` が書き直す画素を [`Self::staged`] へ移す
