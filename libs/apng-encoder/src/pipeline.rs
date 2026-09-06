@@ -464,7 +464,8 @@ impl Pipeline {
         }
     }
 
-    /// `index` の切り出して圧縮するジョブの結果を、切り出した矩形とともに受け取る
+    /// `index` の [`Source::Crop`] か [`Source::Diff`] のジョブの結果を、切り出した
+    /// 矩形とともに受け取る
     pub(crate) fn take_cut(&mut self, index: usize) -> (Rect, Candidate) {
         match self.wait(index) {
             Outcome::Cut { rect, candidate } => (rect, candidate),
@@ -475,7 +476,7 @@ impl Pipeline {
         }
     }
 
-    /// `index` の差分を走査するジョブの結果を受け取る
+    /// `index` の [`Source::Restored`] のジョブの結果を受け取る
     ///
     /// 候補にしなかったときは本体のバッファを配り直して `None` を返す。
     pub(crate) fn take_restored(&mut self, index: usize) -> Option<(Rect, Candidate)> {
@@ -628,18 +629,17 @@ mod tests {
                     expected,
                     "ワーカー{workers}個: 圧縮した本体"
                 );
+                assert_eq!(
+                    Arc::strong_count(&previous),
+                    1,
+                    "ワーカー{workers}個: 差分を採る相手を指している数"
+                );
+                assert_eq!(
+                    Arc::strong_count(&changed),
+                    1,
+                    "ワーカー{workers}個: フレームを指している数"
+                );
             }
-
-            assert_eq!(
-                Arc::strong_count(&previous),
-                1,
-                "ワーカー{workers}個: 差分を採る相手を指している数"
-            );
-            assert_eq!(
-                Arc::strong_count(&changed),
-                1,
-                "ワーカー{workers}個: フレームを指している数"
-            );
         }
     }
 

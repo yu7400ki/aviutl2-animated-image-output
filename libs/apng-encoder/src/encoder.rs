@@ -505,7 +505,7 @@ impl<W: Write> Encoder<W> {
     /// そのフレームは、捨てないときの候補を決定の場で受け取る。
     fn prepare_next(&mut self) {
         let canvas = self.delta.canvas();
-        let Some(next) = self.staged.front() else {
+        let Some(next) = self.staged.front_mut() else {
             return;
         };
         if next.index < 2 {
@@ -514,14 +514,12 @@ impl<W: Write> Encoder<W> {
         let Kept::Submitted(job) = next.kept else {
             panic!("捨てないときの候補を2度受け取っている")
         };
-        let data = Arc::clone(&next.data);
 
         let (rect, candidate) = self.pipeline.take_cut(job);
-        let restored = self.pipeline.submit_restored(canvas, data, rect.area());
-        self.staged
-            .front_mut()
-            .expect("受け取ったフレームが残る")
-            .kept = Kept::Taken {
+        let restored = self
+            .pipeline
+            .submit_restored(canvas, Arc::clone(&next.data), rect.area());
+        next.kept = Kept::Taken {
             rect,
             candidate,
             restored,
