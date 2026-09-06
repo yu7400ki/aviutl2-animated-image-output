@@ -1,6 +1,6 @@
-use crate::config::{ColorFormat, Config, max_threads};
-use aviutl2::MAX_REPEAT;
+use crate::config::{ColorFormat, Config};
 use aviutl2::dialog::{RangedInput, repeat_input};
+use aviutl2::{MAX_REPEAT, max_threads};
 use jxl_encoder::{EFFORT_RANGE, QUALITY_RANGE};
 use std::ops::RangeInclusive;
 use win32_ui::{
@@ -82,7 +82,7 @@ impl Inputs {
             },
             quality: quality as f32,
             effort: effort as u8,
-            threads: threads as u32,
+            threads: threads as usize,
         })
     }
 }

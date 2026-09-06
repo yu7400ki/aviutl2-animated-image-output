@@ -1,15 +1,7 @@
 pub use aviutl2::ColorFormat;
 use aviutl2::ini::{Ini, Properties};
-use aviutl2::{IniConfig, MAX_REPEAT, read};
+use aviutl2::{IniConfig, MAX_REPEAT, default_threads, max_threads, read};
 use jxl_encoder::{EFFORT_RANGE, QUALITY_RANGE};
-use std::thread::available_parallelism;
-
-/// 設定が採れるスレッド数の上限
-///
-/// この機械の論理CPU数。読めなければ1を返す。
-pub fn max_threads() -> u32 {
-    available_parallelism().map_or(1, |p| p.get() as u32)
-}
 
 #[derive(Clone)]
 pub struct Config {
@@ -17,7 +9,7 @@ pub struct Config {
     pub color_format: ColorFormat,
     pub quality: f32,
     pub effort: u8,
-    pub threads: u32,
+    pub threads: usize,
 }
 
 impl Default for Config {
@@ -27,7 +19,7 @@ impl Default for Config {
             color_format: ColorFormat::default(),
             quality: 90.0,
             effort: 7,
-            threads: (max_threads() / 2).max(1),
+            threads: default_threads(),
         }
     }
 }
