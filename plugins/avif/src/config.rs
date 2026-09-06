@@ -1,3 +1,4 @@
+use avif_encoder::{QUALITY_RANGE, SPEED_RANGE};
 pub use aviutl2::ColorFormat;
 use aviutl2::ini::{Ini, Properties};
 use aviutl2::{IniConfig, MAX_REPEAT, default_threads, max_threads, read};
@@ -84,8 +85,10 @@ impl IniConfig for Config {
         let default = Self::default();
 
         let repeat = read(section, "repeat", default.repeat).min(MAX_REPEAT);
-        let quality = read(section, "quality", default.quality).clamp(0, 100);
-        let speed = read(section, "speed", default.speed).clamp(0, 10);
+        let quality = read(section, "quality", default.quality)
+            .clamp(*QUALITY_RANGE.start(), *QUALITY_RANGE.end());
+        let speed =
+            read(section, "speed", default.speed).clamp(*SPEED_RANGE.start(), *SPEED_RANGE.end());
         let color_format = read(section, "color_format", default.color_format);
         let yuv_format = read(section, "yuv_format", default.yuv_format);
         let threads = read(section, "threads", default.threads).clamp(1, max_threads());
@@ -166,8 +169,8 @@ mod tests {
     fn out_of_range_quality_and_speed_are_clamped() {
         let config = load(&[("quality", "200"), ("speed", "99")]);
 
-        assert_eq!(config.quality, 100);
-        assert_eq!(config.speed, 10);
+        assert_eq!(config.quality, *QUALITY_RANGE.end());
+        assert_eq!(config.speed, *SPEED_RANGE.end());
     }
 
     /// 入力欄が扱えないループ回数は、扱える上限へ収まる
