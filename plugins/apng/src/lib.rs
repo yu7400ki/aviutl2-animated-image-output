@@ -1,7 +1,7 @@
 mod config;
 mod dialog;
 
-use apng_encoder::{ColorType, Config as EncoderConfig, Encoder, FrameDelay};
+use apng_encoder::{ColorType, Config as EncoderConfig, Encoder};
 use aviutl2::{
     FileFilter, IniConfig, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
     register_logger, register_output_plugin, write_or_discard,
@@ -12,11 +12,6 @@ use std::io::BufWriter;
 use std::num::NonZeroUsize;
 use win32_ui::MessageBox;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
-
-/// 負の値をエンコーダへ渡さないためのi32からu32への変換
-fn to_u32(value: i32, name: &str) -> std::result::Result<u32, String> {
-    u32::try_from(value).map_err(|_| format!("{}が不正です: {}", name, value))
-}
 
 /// プラグイン設定をエンコーダの設定へ対応付ける
 fn encoder_config(config: &Config) -> EncoderConfig {
@@ -35,18 +30,11 @@ fn encoder_workers(config: &Config) -> NonZeroUsize {
     NonZeroUsize::new(config.threads).unwrap_or(NonZeroUsize::MIN)
 }
 
-/// 1フレームの表示時間 (scale / rate 秒) を求める
-fn frame_delay(scale: i32, rate: i32) -> std::result::Result<FrameDelay, String> {
-    let scale = to_u32(scale, "フレームレートのスケール")?;
-    let rate = to_u32(rate, "フレームレート")?;
-    FrameDelay::new(scale, rate).map_err(|e| format!("フレームレート設定エラー: {}", e))
-}
-
 fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
-    let delay = frame_delay(info.scale(), info.rate())?;
-    let width = to_u32(info.width(), "幅")?;
-    let height = to_u32(info.height(), "高さ")?;
-    let num_frames = to_u32(info.num_frames(), "フレーム数")?;
+    let delay = info.frame_delay()?;
+    let width = info.width_u32()?;
+    let height = info.height_u32()?;
+    let num_frames = info.num_frames_u32()?;
 
     write_or_discard(&info.savefile(), |output_file| {
         let mut encoder = Encoder::with_workers(
@@ -133,7 +121,7 @@ register_logger!();
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apng_encoder::{Error as EncoderError, delay_parts};
+    use apng_encoder::{Error as EncoderError, FrameDelay};
     use std::fs::File;
     use std::io::Write;
     use std::num::NonZeroUsize;
@@ -192,7 +180,7 @@ mod tests {
         const BUDGET: usize = 8 + 25 + 20 + 38;
 
         let path = temp_path();
-        let delay = frame_delay(1, 30).unwrap();
+        let delay = FrameDelay::new(1, 30).unwrap();
         let frame = vec![0u8; 8 * 8 * 4];
 
         let result = write_or_discard(&path, |file| {
@@ -227,34 +215,6 @@ mod tests {
 
         result.expect_err("書き出しが失敗するので残らない");
         assert!(!path.exists(), "{}", path.display());
-    }
-
-    #[test]
-    fn frame_rate_becomes_a_delay_in_seconds() {
-        // 29.97fps
-        assert_eq!(
-            delay_parts(frame_delay(1001, 30000).unwrap()),
-            delay_parts(FrameDelay::new(1001, 30000).unwrap())
-        );
-        // レートがu16を超えても切り詰めない
-        assert_eq!(
-            delay_parts(frame_delay(1001, 120000).unwrap()),
-            (342, 40999)
-        );
-        assert_eq!(delay_parts(frame_delay(1, 60).unwrap()), (1, 60));
-    }
-
-    #[test]
-    fn invalid_frame_rates_are_rejected() {
-        assert!(frame_delay(1, 0).is_err());
-        assert!(frame_delay(1, -30).is_err());
-        assert!(frame_delay(-1, 30).is_err());
-    }
-
-    #[test]
-    fn negative_dimensions_are_rejected() {
-        assert_eq!(to_u32(1920, "幅").unwrap(), 1920);
-        assert!(to_u32(-1, "幅").is_err());
     }
 
     #[test]

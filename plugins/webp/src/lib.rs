@@ -9,14 +9,9 @@ use config::{ColorFormat, Config};
 use dialog::show_config_dialog;
 use std::io::BufWriter;
 use std::num::NonZeroUsize;
-use webp_encoder::{ColorType, Config as EncoderConfig, Encoder, FrameDelay, Report};
+use webp_encoder::{ColorType, Config as EncoderConfig, Encoder, Report};
 use win32_ui::MessageBox;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
-
-/// 負の値をエンコーダへ渡さないためのi32からu32への変換
-fn to_u32(value: i32, name: &str) -> std::result::Result<u32, String> {
-    u32::try_from(value).map_err(|_| format!("{}が不正です: {}", name, value))
-}
 
 /// プラグイン設定をエンコーダの設定へ対応付ける
 fn encoder_config(config: &Config) -> EncoderConfig {
@@ -70,19 +65,12 @@ fn report_messages(report: &Report, num_frames: u32) -> Vec<(Severity, String)> 
     messages
 }
 
-/// 1フレームの表示時間 (scale / rate 秒) を求める
-fn frame_delay(scale: i32, rate: i32) -> std::result::Result<FrameDelay, String> {
-    let scale = to_u32(scale, "フレームレートのスケール")?;
-    let rate = to_u32(rate, "フレームレート")?;
-    FrameDelay::new(scale, rate).map_err(|e| format!("フレームレート設定エラー: {}", e))
-}
-
 fn create_webp_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
-    let delay = frame_delay(info.scale(), info.rate())?;
+    let delay = info.frame_delay()?;
 
-    let width = to_u32(info.width(), "幅")?;
-    let height = to_u32(info.height(), "高さ")?;
-    let num_frames = to_u32(info.num_frames(), "フレーム数")?;
+    let width = info.width_u32()?;
+    let height = info.height_u32()?;
+    let num_frames = info.num_frames_u32()?;
 
     write_or_discard(&info.savefile(), |output_file| {
         let mut encoder = Encoder::with_workers(
@@ -177,6 +165,7 @@ mod tests {
     use aviutl2::MAX_REPEAT;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use webp_encoder::FrameDelay;
 
     /// テストで使うフレーム数
     const NUM_FRAMES: u32 = 120;
@@ -215,7 +204,7 @@ mod tests {
             color_format: ColorFormat::Rgba32,
             ..Config::default()
         };
-        let delay = frame_delay(1, 30).unwrap();
+        let delay = FrameDelay::new(1, 30).unwrap();
 
         write_or_discard(path, |output_file| {
             let mut encoder = Encoder::with_workers(
@@ -279,20 +268,6 @@ mod tests {
             merged_frames: 0,
             delay_clamped: false,
         }
-    }
-
-    #[test]
-    fn invalid_frame_rates_are_rejected() {
-        assert!(frame_delay(1, 0).is_err());
-        assert!(frame_delay(1, -30).is_err());
-        assert!(frame_delay(-1, 30).is_err());
-        assert!(frame_delay(1001, 30000).is_ok());
-    }
-
-    #[test]
-    fn negative_dimensions_are_rejected() {
-        assert_eq!(to_u32(1920, "幅").unwrap(), 1920);
-        assert!(to_u32(-1, "幅").is_err());
     }
 
     #[test]

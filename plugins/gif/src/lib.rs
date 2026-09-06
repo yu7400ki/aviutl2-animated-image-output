@@ -7,15 +7,10 @@ use aviutl2::{
 };
 use config::{ColorFormat, Config};
 use dialog::show_config_dialog;
-use gif_encoder::{ColorType, Config as EncoderConfig, Encoder, FrameDelay, PaletteKind, Report};
+use gif_encoder::{ColorType, Config as EncoderConfig, Encoder, PaletteKind, Report};
 use std::io::BufWriter;
 use win32_ui::MessageBox;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
-
-/// 負の値をエンコーダへ渡さないためのi32からu32への変換
-fn to_u32(value: i32, name: &str) -> std::result::Result<u32, String> {
-    u32::try_from(value).map_err(|_| format!("{}が不正です: {}", name, value))
-}
 
 /// プラグイン設定をエンコーダの設定へ対応付ける
 fn encoder_config(config: &Config) -> EncoderConfig {
@@ -153,19 +148,12 @@ fn report_messages(report: &Report, total_pixels: u64) -> Vec<(Severity, String)
     messages
 }
 
-/// 1フレームの表示時間 (scale / rate 秒) を求める
-fn frame_delay(scale: i32, rate: i32) -> std::result::Result<FrameDelay, String> {
-    let scale = to_u32(scale, "フレームレートのスケール")?;
-    let rate = to_u32(rate, "フレームレート")?;
-    FrameDelay::new(scale, rate).map_err(|e| format!("フレームレート設定エラー: {}", e))
-}
-
 fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
-    let delay = frame_delay(info.scale(), info.rate())?;
+    let delay = info.frame_delay()?;
 
-    let width = to_u32(info.width(), "幅")?;
-    let height = to_u32(info.height(), "高さ")?;
-    let num_frames = to_u32(info.num_frames(), "フレーム数")?;
+    let width = info.width_u32()?;
+    let height = info.height_u32()?;
+    let num_frames = info.num_frames_u32()?;
     let total_pixels = u64::from(width) * u64::from(height) * u64::from(num_frames);
 
     write_or_discard(&info.savefile(), |output_file| {
@@ -280,20 +268,6 @@ mod tests {
             .into_iter()
             .map(|(_, message)| message)
             .collect()
-    }
-
-    #[test]
-    fn invalid_frame_rates_are_rejected() {
-        assert!(frame_delay(1, 0).is_err());
-        assert!(frame_delay(1, -30).is_err());
-        assert!(frame_delay(-1, 30).is_err());
-        assert!(frame_delay(1001, 30000).is_ok());
-    }
-
-    #[test]
-    fn negative_dimensions_are_rejected() {
-        assert_eq!(to_u32(1920, "幅").unwrap(), 1920);
-        assert!(to_u32(-1, "幅").is_err());
     }
 
     #[test]
