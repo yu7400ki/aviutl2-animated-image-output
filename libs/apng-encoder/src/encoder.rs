@@ -616,6 +616,7 @@ mod tests {
     use anim_core::dirty_rect;
     use flate2::read::ZlibDecoder;
     use std::io::{Cursor, Read};
+    use std::sync::Weak;
 
     const WIDTH: u32 = 64;
     const HEIGHT: u32 = 48;
@@ -1245,6 +1246,53 @@ mod tests {
                     allocated,
                     encoder.staged_depth + 3,
                     "{color:?} ワーカー{workers}個: 写し先に確保した面"
+                );
+            }
+        }
+    }
+
+    /// 生のフレームの面は決定が進むと落ち、同時に生きる数が列の深さで頭打ちになる
+    ///
+    /// 投入されたフレームを指すのは、決定を待つ列と、直前に決定したフレームおよびその
+    /// キャンバス。ワーカーは結末を返す前に面を手放すので、列が満ちた後に生きているのは
+    /// この3つぶんに落ち着く。終端まで流し切ると、どの面も残らない。
+    #[test]
+    fn the_raw_frames_are_released_as_the_queue_drains() {
+        for (config, input) in jumping_material() {
+            let color = config.color_type;
+            let delay = FrameDelay::new(1, 30).unwrap();
+
+            for workers in [1, 3] {
+                let mut encoder = Encoder::with_workers(
+                    Cursor::new(Vec::new()),
+                    WIDTH,
+                    HEIGHT,
+                    input.len() as u32,
+                    config,
+                    NonZeroUsize::new(workers).unwrap(),
+                )
+                .unwrap();
+
+                let settled = encoder.staged_depth + 2;
+                let mut faces: Vec<Weak<Vec<u8>>> = Vec::new();
+                let live = |faces: &[Weak<Vec<u8>>]| {
+                    faces.iter().filter(|face| face.strong_count() > 0).count()
+                };
+                for (index, frame) in input.iter().enumerate() {
+                    encoder.add_frame(frame, delay).unwrap();
+                    faces.push(Arc::downgrade(encoder.delta.previous()));
+                    assert_eq!(
+                        live(&faces),
+                        (index + 1).min(settled),
+                        "{color:?} ワーカー{workers}個 フレーム {index}: 生きている面"
+                    );
+                }
+
+                encoder.finish().unwrap();
+                assert_eq!(
+                    live(&faces),
+                    0,
+                    "{color:?} ワーカー{workers}個: 書き出し切った後に生きている面"
                 );
             }
         }

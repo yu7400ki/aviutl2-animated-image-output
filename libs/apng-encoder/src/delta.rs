@@ -87,4 +87,10 @@ impl Delta {
     pub(crate) fn spare(&self) -> &[Vec<u8>] {
         &self.spare
     }
+
+    /// 直前に投入されたフレームの面
+    #[cfg(test)]
+    pub(crate) fn previous(&self) -> &Arc<Vec<u8>> {
+        &self.previous
+    }
 }
