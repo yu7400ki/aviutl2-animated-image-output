@@ -27,7 +27,8 @@ mod macros;
 pub use anim_core::FrameDelay;
 pub use config::{IniConfig, MAX_REPEAT, default_threads, max_threads, read, workers};
 pub use output::{
-    ConfigDialog, FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, write_or_discard,
+    Audio, ConfigDialog, FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, Video,
+    write_or_discard,
 };
 pub use pipeline::PipelineError;
 pub use pixel::ColorFormat;

@@ -166,8 +166,8 @@ impl OutputPlugin for GifOutputPlugin {
     fn encode(info: &OutputInfo, config: &Config) -> Result<(), String> {
         let delay = info.frame_delay()?;
 
-        let width = info.width()?;
-        let height = info.height()?;
+        let video = info.video()?;
+        let (width, height) = (video.width(), video.height());
         let num_frames = info.num_frames()?;
         let total_pixels = u64::from(width) * u64::from(height) * u64::from(num_frames);
 
@@ -181,10 +181,11 @@ impl OutputPlugin for GifOutputPlugin {
             )
             .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
 
-            info.encode_frames(config.color_format, |frame_data| {
-                encoder.add_frame(frame_data, delay)
-            })
-            .map_err(|e| e.to_string())?;
+            video
+                .encode_frames(config.color_format, |frame_data| {
+                    encoder.add_frame(frame_data, delay)
+                })
+                .map_err(|e| e.to_string())?;
 
             let (writer, report) = encoder
                 .finish()

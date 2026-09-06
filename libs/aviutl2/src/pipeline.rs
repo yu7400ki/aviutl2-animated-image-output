@@ -1,6 +1,6 @@
 //! フレームの取り込みと符号化を別々のスレッドで重ねて走らせる
 
-use crate::output::OutputInfo;
+use crate::output::Video;
 use crate::pixel::ColorFormat;
 use std::sync::mpsc::{SyncSender, sync_channel};
 
@@ -105,7 +105,7 @@ where
     Ok(())
 }
 
-impl OutputInfo<'_> {
+impl Video<'_> {
     /// 全フレームをホストから取り込み、`sink` へ順に渡す
     ///
     /// ホストの関数 (フレーム取得・中断確認・残り時間表示) は呼び出し元の
@@ -122,17 +122,18 @@ impl OutputInfo<'_> {
         S: FnMut(Vec<u8>) -> Result<(), E> + Send,
         E: Send,
     {
-        let frames = self.raw_num_frames();
+        let info = self.info();
+        let frames = info.raw_num_frames();
 
         run(
             frames,
             |frame| {
-                if self.is_abort() {
+                if info.is_abort() {
                     return Fetched::Aborted;
                 }
-                match self.get_video_frame(frame, format) {
+                match self.get_frame(frame, format) {
                     Some(data) => {
-                        self.rest_time_disp(frame, frames);
+                        info.rest_time_disp(frame, frames);
                         Fetched::Frame(data)
                     }
                     None => Fetched::Missing,

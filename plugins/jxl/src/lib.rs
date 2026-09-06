@@ -114,8 +114,8 @@ impl OutputPlugin for JxlOutputPlugin {
     }
 
     fn encode(info: &OutputInfo, config: &Config) -> Result<(), String> {
-        let width = info.width()?;
-        let height = info.height()?;
+        let video = info.video()?;
+        let (width, height) = (video.width(), video.height());
         let sequence = Sequence::new(info.num_frames()?, info.scale()?, info.rate()?);
 
         write_frames(
@@ -125,10 +125,11 @@ impl OutputPlugin for JxlOutputPlugin {
             sequence,
             config,
             |encoder| {
-                info.encode_frames(config.color_format, |frame_data| {
-                    encoder.add_frame(frame_data, sequence.duration)
-                })
-                .map_err(|e| e.to_string())
+                video
+                    .encode_frames(config.color_format, |frame_data| {
+                        encoder.add_frame(frame_data, sequence.duration)
+                    })
+                    .map_err(|e| e.to_string())
             },
         )
     }

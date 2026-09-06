@@ -139,8 +139,10 @@ fn encode(frames: i32) -> (Result<(), PipelineError<String>>, Encoded) {
     let raw = output_info(frames);
     let info = unsafe { OutputInfo::from_raw(&raw) }.expect("OUTPUT_INFOがnull");
 
+    let video = info.video().expect("寸法");
+
     let encoded = Mutex::new(Encoded::default());
-    let result = info.encode_frames(ColorFormat::Rgba32, |data| {
+    let result = video.encode_frames(ColorFormat::Rgba32, |data| {
         let mut encoded = encoded.lock().unwrap();
         encoded.frames.push(data);
         encoded.threads.push(std::thread::current().id());
@@ -234,7 +236,9 @@ fn an_encoding_failure_stops_the_host() {
     let raw = output_info(4096);
     let info = unsafe { OutputInfo::from_raw(&raw) }.expect("OUTPUT_INFOがnull");
 
-    let result = info.encode_frames(ColorFormat::Rgba32, |_| Err("書き出しに失敗".to_string()));
+    let video = info.video().expect("寸法");
+
+    let result = video.encode_frames(ColorFormat::Rgba32, |_| Err("書き出しに失敗".to_string()));
 
     assert_eq!(result, Err(PipelineError::Encode("書き出しに失敗".into())));
     let fetched = host().get_video.len();
@@ -249,8 +253,10 @@ fn a_frame_the_host_returns_comes_back_converted() {
     let raw = output_info(4);
     let info = unsafe { OutputInfo::from_raw(&raw) }.expect("OUTPUT_INFOがnull");
 
+    let video = info.video().expect("寸法");
+
     assert_eq!(
-        info.get_video_frame(2, ColorFormat::Rgba32),
+        video.get_frame(2, ColorFormat::Rgba32),
         Some(rgba8_frame(2))
     );
     assert_eq!(host().get_video, vec![(2, sys::PA64)]);
@@ -265,8 +271,10 @@ fn a_frame_the_host_refuses_is_not_read() {
     let raw = output_info(4);
     let info = unsafe { OutputInfo::from_raw(&raw) }.expect("OUTPUT_INFOがnull");
 
-    assert_eq!(info.get_video_frame(1, ColorFormat::Rgba32), None);
-    assert_eq!(info.get_video_frame(1, ColorFormat::Rgb24), None);
+    let video = info.video().expect("寸法");
+
+    assert_eq!(video.get_frame(1, ColorFormat::Rgba32), None);
+    assert_eq!(video.get_frame(1, ColorFormat::Rgb24), None);
 }
 
 /// ループ回数だけを持つ設定

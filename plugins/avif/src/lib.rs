@@ -98,8 +98,8 @@ impl OutputPlugin for AvifOutputPlugin {
     }
 
     fn encode(info: &OutputInfo, config: &Config) -> Result<(), String> {
-        let width = info.width()?;
-        let height = info.height()?;
+        let video = info.video()?;
+        let (width, height) = (video.width(), video.height());
         let sequence = Sequence::new(info.num_frames()?, info.scale()?, info.rate()?);
 
         let encoder_config = encoder_config(config, sequence.timescale);
@@ -116,10 +116,11 @@ impl OutputPlugin for AvifOutputPlugin {
 
             logger::info(&operating_point_message(&encoder_config, &sequence));
 
-            info.encode_frames(config.color_format, |frame_data| {
-                encoder.add_frame(&frame_data, sequence.duration)
-            })
-            .map_err(|e| e.to_string())?;
+            video
+                .encode_frames(config.color_format, |frame_data| {
+                    encoder.add_frame(&frame_data, sequence.duration)
+                })
+                .map_err(|e| e.to_string())?;
 
             let writer = encoder
                 .finish()

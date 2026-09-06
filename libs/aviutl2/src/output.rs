@@ -18,6 +18,7 @@ fn to_u32(value: i32, name: &str) -> Result<u32, String> {
 }
 
 /// [`sys::OUTPUT_INFO`] の安全なラッパー
+#[derive(Clone, Copy)]
 pub struct OutputInfo<'a> {
     raw: &'a sys::OUTPUT_INFO,
 }
@@ -41,14 +42,27 @@ impl<'a> OutputInfo<'a> {
         PathBuf::from(s.to_string_lossy())
     }
 
-    /// 検めた幅
-    pub fn width(&self) -> Result<u32, String> {
-        to_u32(self.raw.w, "幅")
+    /// 寸法を検めて画像の取り込み口を作る
+    pub fn video(&self) -> Result<Video<'a>, String> {
+        Ok(Video {
+            info: *self,
+            width: to_u32(self.raw.w, "幅")?,
+            height: to_u32(self.raw.h, "高さ")?,
+        })
     }
 
-    /// 検めた高さ
-    pub fn height(&self) -> Result<u32, String> {
-        to_u32(self.raw.h, "高さ")
+    /// チャンネル数・サンプリングレート・サンプリング数を検めて音声の取り込み口を作る
+    pub fn audio(&self) -> Result<Audio<'a>, String> {
+        let channels = to_u32(self.raw.audio_ch, "音声チャンネル数")?;
+        if channels == 0 {
+            return Err("音声チャンネル数が不正です: 0".to_string());
+        }
+        Ok(Audio {
+            info: *self,
+            channels,
+            rate: to_u32(self.raw.audio_rate, "音声サンプリングレート")?,
+            samples: to_u32(self.raw.audio_n, "音声サンプリング数")?,
+        })
     }
 
     /// 検めたフレームレート (分子)
@@ -76,21 +90,6 @@ impl<'a> OutputInfo<'a> {
         let scale = self.scale()?;
         let rate = self.rate()?;
         FrameDelay::new(scale, rate).map_err(|e| format!("フレームレート設定エラー: {}", e))
-    }
-
-    /// 音声サンプリングレート
-    pub fn audio_rate(&self) -> i32 {
-        self.raw.audio_rate
-    }
-
-    /// 音声チャンネル数
-    pub fn audio_ch(&self) -> i32 {
-        self.raw.audio_ch
-    }
-
-    /// 音声サンプリング数
-    pub fn audio_samples(&self) -> i32 {
-        self.raw.audio_n
     }
 
     /// 画像データがあるか
@@ -134,11 +133,39 @@ impl<'a> OutputInfo<'a> {
         let ptr = unsafe { f(frame, format) };
         (!ptr.is_null()).then_some(ptr)
     }
+}
+
+/// 検めた寸法に結び付いた画像の取り込み口
+///
+/// フレームの長さはこの寸法から決まるので、[`OutputInfo::video`] を通った
+/// 寸法だけがホストのバッファの読み出しに使われる。
+#[derive(Clone, Copy)]
+pub struct Video<'a> {
+    info: OutputInfo<'a>,
+    width: u32,
+    height: u32,
+}
+
+impl<'a> Video<'a> {
+    /// 幅
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// 高さ
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// フレームを取り込むホストの情報
+    pub(crate) fn info(&self) -> OutputInfo<'a> {
+        self.info
+    }
 
     /// BGRフォーマットのフレームデータをRGBに変換して取得
-    pub fn get_video_rgb(&self, frame: i32) -> Option<Vec<u8>> {
-        let data_ptr = unsafe { self.get_video_raw(frame, sys::BI_RGB) }?;
-        let (w, h) = (self.raw.w as usize, self.raw.h as usize);
+    pub fn get_rgb(&self, frame: i32) -> Option<Vec<u8>> {
+        let data_ptr = unsafe { self.info.get_video_raw(frame, sys::BI_RGB) }?;
+        let (w, h) = (self.width as usize, self.height as usize);
 
         let input_stride = (w * 3).next_multiple_of(4); // RGB24のストライド（4バイト境界アライメント）
         let data_slice =
@@ -148,9 +175,9 @@ impl<'a> OutputInfo<'a> {
     }
 
     /// PA64フォーマットのフレームデータをRGBAに変換して取得（アルファチャンネル付き）
-    pub fn get_video_rgba(&self, frame: i32) -> Option<Vec<u8>> {
-        let data_ptr = unsafe { self.get_video_raw(frame, sys::PA64) }?;
-        let (w, h) = (self.raw.w as usize, self.raw.h as usize);
+    pub fn get_rgba(&self, frame: i32) -> Option<Vec<u8>> {
+        let data_ptr = unsafe { self.info.get_video_raw(frame, sys::PA64) }?;
+        let (w, h) = (self.width as usize, self.height as usize);
 
         let data_slice = unsafe { std::slice::from_raw_parts(data_ptr as *const u16, w * h * 4) };
 
@@ -158,35 +185,63 @@ impl<'a> OutputInfo<'a> {
     }
 
     /// [`ColorFormat`] に応じてフレームデータを取得する
-    pub fn get_video_frame(&self, frame: i32, format: ColorFormat) -> Option<Vec<u8>> {
+    pub fn get_frame(&self, frame: i32, format: ColorFormat) -> Option<Vec<u8>> {
         match format {
-            ColorFormat::Rgb24 => self.get_video_rgb(frame),
-            ColorFormat::Rgba32 => self.get_video_rgba(frame),
+            ColorFormat::Rgb24 => self.get_rgb(frame),
+            ColorFormat::Rgba32 => self.get_rgba(frame),
         }
+    }
+}
+
+/// 検めたチャンネル数に結び付いた音声の取り込み口
+///
+/// サンプルの長さはこのチャンネル数から決まるので、[`OutputInfo::audio`] を
+/// 通ったチャンネル数だけがホストのバッファの読み出しに使われる。
+#[derive(Clone, Copy)]
+pub struct Audio<'a> {
+    info: OutputInfo<'a>,
+    channels: u32,
+    rate: u32,
+    samples: u32,
+}
+
+impl Audio<'_> {
+    /// チャンネル数 (1以上)
+    pub fn channels(&self) -> u32 {
+        self.channels
+    }
+
+    /// サンプリングレート
+    pub fn rate(&self) -> u32 {
+        self.rate
+    }
+
+    /// サンプリング数
+    pub fn samples(&self) -> u32 {
+        self.samples
     }
 
     /// PCM 16bit形式の音声データを取得する (読み込まれたサンプル数×チャンネル数の長さ)
-    pub fn get_audio_pcm16(&self, start: i32, length: i32) -> Option<Vec<i16>> {
-        let f = self.raw.func_get_audio?;
-        let mut readed = 0;
-        let ptr = unsafe { f(start, length, &mut readed, sys::WAVE_FORMAT_PCM) };
-        if ptr.is_null() || readed <= 0 {
-            return None;
-        }
-        let len = readed as usize * self.raw.audio_ch.max(1) as usize;
+    pub fn get_pcm16(&self, start: i32, length: i32) -> Option<Vec<i16>> {
+        let (ptr, len) = self.get_raw(start, length, sys::WAVE_FORMAT_PCM)?;
         Some(unsafe { std::slice::from_raw_parts(ptr as *const i16, len) }.to_vec())
     }
 
     /// PCM (float) 32bit形式の音声データを取得する (読み込まれたサンプル数×チャンネル数の長さ)
-    pub fn get_audio_f32(&self, start: i32, length: i32) -> Option<Vec<f32>> {
-        let f = self.raw.func_get_audio?;
+    pub fn get_f32(&self, start: i32, length: i32) -> Option<Vec<f32>> {
+        let (ptr, len) = self.get_raw(start, length, sys::WAVE_FORMAT_IEEE_FLOAT)?;
+        Some(unsafe { std::slice::from_raw_parts(ptr as *const f32, len) }.to_vec())
+    }
+
+    /// 音声データの位置と、そこに並ぶサンプルの数を取得する
+    fn get_raw(&self, start: i32, length: i32, format: u32) -> Option<(*mut c_void, usize)> {
+        let f = self.info.raw.func_get_audio?;
         let mut readed = 0;
-        let ptr = unsafe { f(start, length, &mut readed, sys::WAVE_FORMAT_IEEE_FLOAT) };
+        let ptr = unsafe { f(start, length, &mut readed, format) };
         if ptr.is_null() || readed <= 0 {
             return None;
         }
-        let len = readed as usize * self.raw.audio_ch.max(1) as usize;
-        Some(unsafe { std::slice::from_raw_parts(ptr as *const f32, len) }.to_vec())
+        Some((ptr, readed as usize * self.channels as usize))
     }
 }
 
@@ -382,6 +437,16 @@ mod tests {
         }
     }
 
+    /// 音声の欄だけを持つ `OUTPUT_INFO`
+    fn raw_audio(rate: i32, ch: i32, n: i32) -> sys::OUTPUT_INFO {
+        sys::OUTPUT_INFO {
+            audio_rate: rate,
+            audio_ch: ch,
+            audio_n: n,
+            ..raw_info(1920, 1080, 30, 1, 24)
+        }
+    }
+
     fn info(raw: &sys::OUTPUT_INFO) -> OutputInfo<'_> {
         unsafe { OutputInfo::from_raw(raw) }.expect("OUTPUT_INFOがnull")
     }
@@ -390,9 +455,10 @@ mod tests {
     fn the_checked_values_carry_the_fields_as_they_are() {
         let raw = raw_info(1920, 1080, 30000, 1001, 24);
         let info = info(&raw);
+        let video = info.video().unwrap();
 
-        assert_eq!(info.width().unwrap(), 1920);
-        assert_eq!(info.height().unwrap(), 1080);
+        assert_eq!(video.width(), 1920);
+        assert_eq!(video.height(), 1080);
         assert_eq!(info.rate().unwrap(), 30000);
         assert_eq!(info.scale().unwrap(), 1001);
         assert_eq!(info.num_frames().unwrap(), 24);
@@ -403,14 +469,82 @@ mod tests {
         let raw = raw_info(-1, -2, -3, -4, -5);
         let info = info(&raw);
 
-        assert_eq!(info.width().unwrap_err(), "幅が不正です: -1");
-        assert_eq!(info.height().unwrap_err(), "高さが不正です: -2");
         assert_eq!(info.rate().unwrap_err(), "フレームレートが不正です: -3");
         assert_eq!(
             info.scale().unwrap_err(),
             "フレームレートのスケールが不正です: -4"
         );
         assert_eq!(info.num_frames().unwrap_err(), "フレーム数が不正です: -5");
+    }
+
+    /// 寸法が負なら取り込み口を作れないので、フレームの長さもそこから決まらない
+    #[test]
+    fn a_negative_dimension_keeps_the_frames_out_of_reach() {
+        let negative_width = raw_info(-1, 1080, 30, 1, 24);
+        let negative_height = raw_info(1920, -2, 30, 1, 24);
+
+        assert_eq!(
+            info(&negative_width)
+                .video()
+                .err()
+                .expect("寸法を検めていない"),
+            "幅が不正です: -1"
+        );
+        assert_eq!(
+            info(&negative_height)
+                .video()
+                .err()
+                .expect("寸法を検めていない"),
+            "高さが不正です: -2"
+        );
+    }
+
+    /// 音声の欄も検めてからでないと取り込み口にならない
+    #[test]
+    fn the_checked_audio_fields_carry_themselves_as_they_are() {
+        let raw = raw_audio(48000, 2, 96000);
+        let audio = info(&raw).audio().unwrap();
+
+        assert_eq!(audio.channels(), 2);
+        assert_eq!(audio.rate(), 48000);
+        assert_eq!(audio.samples(), 96000);
+    }
+
+    #[test]
+    fn a_channel_count_that_names_no_sample_keeps_the_audio_out_of_reach() {
+        let no_channel = raw_audio(48000, 0, 96000);
+        let negative_channel = raw_audio(48000, -2, 96000);
+        let negative_rate = raw_audio(-48000, 2, 96000);
+        let negative_samples = raw_audio(48000, 2, -96000);
+
+        assert_eq!(
+            info(&no_channel)
+                .audio()
+                .err()
+                .expect("音声の欄を検めていない"),
+            "音声チャンネル数が不正です: 0"
+        );
+        assert_eq!(
+            info(&negative_channel)
+                .audio()
+                .err()
+                .expect("音声の欄を検めていない"),
+            "音声チャンネル数が不正です: -2"
+        );
+        assert_eq!(
+            info(&negative_rate)
+                .audio()
+                .err()
+                .expect("音声の欄を検めていない"),
+            "音声サンプリングレートが不正です: -48000"
+        );
+        assert_eq!(
+            info(&negative_samples)
+                .audio()
+                .err()
+                .expect("音声の欄を検めていない"),
+            "音声サンプリング数が不正です: -96000"
+        );
     }
 
     /// 1フレームはscale / rate秒なので、スケールが分子、レートが分母
