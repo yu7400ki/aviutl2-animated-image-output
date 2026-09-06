@@ -1,7 +1,7 @@
 use apng_encoder::COMPRESSION_LEVELS;
 pub use aviutl2::ColorFormat;
-use aviutl2::IniConfig;
 use aviutl2::ini::{Ini, Properties};
+use aviutl2::{IniConfig, MAX_REPEAT};
 use std::num::NonZeroUsize;
 use std::thread::available_parallelism;
 
@@ -40,7 +40,8 @@ impl IniConfig for Config {
         let repeat = section
             .and_then(|s| s.get("repeat"))
             .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(default.repeat);
+            .unwrap_or(default.repeat)
+            .min(MAX_REPEAT);
 
         let color_format = section
             .and_then(|s| s.get("color_format"))
@@ -131,6 +132,15 @@ mod tests {
                 default
             );
         }
+    }
+
+    /// 入力欄が扱えないループ回数は、扱える上限へ収まる
+    ///
+    /// i32へ折り返す値をそのまま持つと、ダイアログの初期値が負になる。
+    #[test]
+    fn out_of_range_num_plays_are_clamped() {
+        assert_eq!(load(&[("repeat", "3000000000")]).repeat, MAX_REPEAT);
+        assert_eq!(load(&[("repeat", "3")]).repeat, 3);
     }
 
     /// 値域の外のスレッド数は、走らせる機械の並列度の内側へ収まる
