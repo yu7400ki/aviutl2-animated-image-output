@@ -310,9 +310,8 @@ impl Pipeline {
         })
     }
 
-    /// キャンバスとフレームの差分を走査する圧縮を投入し、結果を指すための番号を返す
+    /// [`Source::Restored`] の圧縮を投入し、結果を指すための番号を返す
     ///
-    /// 差分の外接矩形の面積が `kept_area` に満たないときだけ切り出して圧縮する。
     /// 領域と本体は [`Pipeline::buffer`] から借り、どちらの結末でも配り直す。
     pub(crate) fn submit_restored(
         &mut self,

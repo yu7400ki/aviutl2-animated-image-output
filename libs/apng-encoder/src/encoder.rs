@@ -477,29 +477,26 @@ impl<W: Write> Encoder<W> {
     /// 次に決定するフレームの、保留中のフレームを捨てるときの候補を投入する
     ///
     /// 捨てたときに復元されるキャンバスは直前の決定で確定するため、決定の1手前に
-    /// あたるこの時点で投入できる。ワーカーは走査した矩形が捨てないときより狭い
-    /// ときだけ切り出して圧縮する。
+    /// あたるこの時点で投入できる。列の深さは2以上なので、決定の後も列には次の
+    /// フレームが残る。空なのは終端で流し切る最後の決定だけで、そのときは投入する
+    /// 相手がない。
     ///
     /// 投入された順の位置が2に満たないフレームは投入しない。キャンバスがまだ
     /// 埋まっておらず、先頭のfcTLのdispose_op=PREVIOUSもBACKGROUNDとして扱われて
     /// キャンバスを復元しないため。
     fn submit_restored(&mut self) {
-        let Some(next) = self.staged.front() else {
+        let canvas = self.delta.canvas();
+        let Some(next) = self.staged.front_mut() else {
             return;
         };
         if next.index < 2 {
             return;
         }
 
-        let job = self.pipeline.submit_restored(
-            self.delta.canvas(),
-            Arc::clone(&next.data),
-            next.kept.area(),
-        );
-        self.staged
-            .front_mut()
-            .expect("決定を待つフレームがある")
-            .restored = Some(job);
+        let job = self
+            .pipeline
+            .submit_restored(canvas, Arc::clone(&next.data), next.kept.area());
+        next.restored = Some(job);
     }
 
     /// 投入されたフレームをキャンバスへ重ねる候補を詰め直し、圧縮を投入する
