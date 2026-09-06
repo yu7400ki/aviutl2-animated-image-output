@@ -17,30 +17,30 @@ use std::thread::{self, JoinHandle};
 const WORKER_NAME: &str = "apng-compress";
 
 /// 圧縮を待つ仕事1つ
-enum Job {
-    /// 切り出し済みの領域
+struct Job {
+    /// 隙間なく並んだ矩形の中の画素を置くバッファ
+    region: Vec<u8>,
+    /// 圧縮した本体を組み立てるバッファ
+    body: Vec<u8>,
+    /// 領域の埋め方
+    source: Source,
+}
+
+/// ジョブの領域を何から埋めるか
+enum Source {
+    /// 切り出し済み
     ///
-    /// 切り出した時点でフレームから独立し、圧縮はこのバッファだけを読む。
-    Region {
-        /// 隙間なく並んだ矩形の中の画素
-        region: Vec<u8>,
+    /// 領域は投入の時点でフレームから独立していて、圧縮はそのバッファだけを読む。
+    Ready {
         /// 領域の1行のバイト数
         region_stride: usize,
-        /// 圧縮した本体を組み立てるバッファ
-        body: Vec<u8>,
     },
-    /// フレームと、そこから切り出す矩形
-    ///
-    /// 切り出しも圧縮を回す側で行う。
+    /// フレームから `rect` を切り出して埋める
     Crop {
         /// 切り出す元のフレーム
         data: Arc<Vec<u8>>,
         /// 切り出す矩形
         rect: Rect,
-        /// 切り出し先のバッファ
-        region: Vec<u8>,
-        /// 圧縮した本体を組み立てるバッファ
-        body: Vec<u8>,
     },
 }
 
@@ -86,34 +86,30 @@ impl Drop for Pool {
 
 /// ジョブ1つを片付け、結末と領域のバッファを返す
 ///
-/// 切り出しのジョブは領域を切り出してから圧縮する。切り出しと圧縮の巻き戻しは
-/// 結末として持ち帰るので、領域のバッファは巻き戻しても返る。
+/// フレームから埋めるジョブは領域を切り出してから圧縮する。切り出しと圧縮の
+/// 巻き戻しは結末として持ち帰るので、領域のバッファは巻き戻しても返る。
 ///
 /// 返る時点でフレームを手放している。
 fn run(codec: &mut Codec, layout: &Layout, job: Job) -> (Outcome, Vec<u8>) {
+    let Job {
+        mut region,
+        body,
+        source,
+    } = job;
     let bpp = layout.bytes_per_pixel;
-    let (mut region, region_stride, body, source) = match job {
-        Job::Region {
-            region,
-            region_stride,
-            body,
-        } => (region, region_stride, body, None),
-        Job::Crop {
-            data,
-            rect,
-            region,
-            body,
-        } => (region, rect.width as usize * bpp, body, Some((data, rect))),
-    };
 
-    let compress = || {
-        if let Some((data, rect)) = &source {
-            crop(data, *rect, layout.stride, bpp, bpp, &mut region);
+    let compress = || match source {
+        Source::Ready { region_stride } => {
+            Outcome::Compressed(codec.compress(&region, region_stride, bpp, body))
         }
-        codec.compress(&region, region_stride, bpp, body)
+        Source::Crop { data, rect } => {
+            crop(&data, rect, layout.stride, bpp, bpp, &mut region);
+            let region_stride = rect.width as usize * bpp;
+            Outcome::Compressed(codec.compress(&region, region_stride, bpp, body))
+        }
     };
     let outcome = match panic::catch_unwind(AssertUnwindSafe(compress)) {
-        Ok(candidate) => Outcome::Compressed(candidate),
+        Ok(outcome) => outcome,
         Err(payload) => Outcome::Panicked(payload),
     };
     (outcome, region)
@@ -263,10 +259,10 @@ impl Pipeline {
     /// `region` はパイプラインが引き取り、[`Pipeline::buffer`] から配り直す。
     pub(crate) fn submit_region(&mut self, region: Vec<u8>, region_stride: usize) -> usize {
         let body = self.buffer();
-        self.submit(Job::Region {
+        self.submit(Job {
             region,
-            region_stride,
             body,
+            source: Source::Ready { region_stride },
         })
     }
 
@@ -276,11 +272,10 @@ impl Pipeline {
     pub(crate) fn submit_crop(&mut self, data: Arc<Vec<u8>>, rect: Rect) -> usize {
         let region = self.buffer();
         let body = self.buffer();
-        self.submit(Job::Crop {
-            data,
-            rect,
+        self.submit(Job {
             region,
             body,
+            source: Source::Crop { data, rect },
         })
     }
 
@@ -486,10 +481,12 @@ mod tests {
         for abandoned in [false, true] {
             let (sender, receiver) = channel();
             let (results, done) = channel();
-            let job = Job::Region {
+            let job = Job {
                 region: region(0),
-                region_stride: STRIDE,
                 body: Vec::new(),
+                source: Source::Ready {
+                    region_stride: STRIDE,
+                },
             };
             sender.send((0, job)).unwrap();
             drop(sender);
