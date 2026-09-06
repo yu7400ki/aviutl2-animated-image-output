@@ -1,7 +1,7 @@
 use crate::config::{ColorFormat, Config};
 use apng_encoder::COMPRESSION_LEVELS;
 use aviutl2::dialog::{RangedInput, repeat_input};
-use aviutl2::{ConfigDialog, MAX_REPEAT, max_threads};
+use aviutl2::{ConfigDialog, max_threads};
 use std::ops::RangeInclusive;
 use win32_ui::{
     Dialog, MessageBox,
@@ -27,7 +27,7 @@ struct Inputs {
 impl Inputs {
     fn new(default_config: &Config) -> Self {
         Inputs {
-            repeat: repeat_input(MAX_REPEAT, default_config.repeat),
+            repeat: repeat_input(None, default_config.repeat),
             color: ComboBox::new(vec![
                 ColorFormat::Rgb24.label(),
                 ColorFormat::Rgba32.label(),
@@ -206,11 +206,6 @@ mod tests {
     #[test]
     fn an_invalid_repeat_count_is_refused() {
         let inputs = inputs();
-        let (min, max) = inputs
-            .repeat
-            .input()
-            .range_bounds()
-            .expect("値域を持つ入力欄");
 
         for text in ["abc", "", "2147483648", "-1"] {
             inputs.repeat.input().set_text(text);
@@ -219,7 +214,7 @@ mod tests {
             };
             assert_eq!(
                 message,
-                format!("ループ回数の値が無効です。{min}-{max}の値を入力してください。")
+                "ループ回数の値が無効です。0以上の数値を入力してください。"
             );
         }
     }

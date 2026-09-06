@@ -18,19 +18,20 @@ impl RangedInput {
     ///
     /// 画面へ出す項目名も弾いたときの文言も、この値域を名乗る。
     pub fn new(name: &str, range: RangeInclusive<i32>, value: i32) -> Self {
-        Self::build(name, &range, value, None)
+        let span = format!("{}-{}", range.start(), range.end());
+        Self::build(
+            format!("{name} ({span})"),
+            format!("{name}の値が無効です。{span}の値を入力してください。"),
+            &range,
+            value,
+        )
     }
 
-    /// 値域を名乗る入力欄を組み、`note` があれば値域に続けて項目名へ書き添える。
-    fn build(name: &str, range: &RangeInclusive<i32>, value: i32, note: Option<&str>) -> Self {
-        let span = format!("{}-{}", range.start(), range.end());
-        let label = match note {
-            Some(note) => format!("{name} ({span}, {note})"),
-            None => format!("{name} ({span})"),
-        };
+    /// 項目名と弾いたときの文言を与えて、値域を検める入力欄を組む。
+    fn build(label: String, error: String, range: &RangeInclusive<i32>, value: i32) -> Self {
         RangedInput {
             label,
-            error: format!("{name}の値が無効です。{span}の値を入力してください。"),
+            error,
             input: Number::new()
                 .value(value)
                 .range(*range.start(), *range.end()),
@@ -56,13 +57,25 @@ impl RangedInput {
     }
 }
 
-/// ループ回数の入力欄。上限は書き出す形式が持てる回数で決まる。
+/// ループ回数の入力欄
 ///
-/// 項目名は値域に続けて0の意味も名乗る。
-pub fn repeat_input(max: u32, value: u32) -> RangedInput {
-    let max = i32::try_from(max).unwrap_or(i32::MAX);
-    let value = i32::try_from(value).unwrap_or(max);
-    RangedInput::build("ループ回数", &(0..=max), value, Some("0=無限ループ"))
+/// `max` は書き出す形式が持てる回数。形式が上限を持つときだけ、項目名も
+/// 弾いたときの文言もその値域を名乗る。上限を持たないときは入力欄が扱える
+/// 回数まで受け取る。
+pub fn repeat_input(max: Option<u32>, value: u32) -> RangedInput {
+    let ceiling = max.map_or(i32::MAX, |max| i32::try_from(max).unwrap_or(i32::MAX));
+    let value = i32::try_from(value).unwrap_or(ceiling);
+    let (label, error) = match max {
+        Some(_) => (
+            format!("ループ回数 (0-{ceiling}, 0=無限ループ)"),
+            format!("ループ回数の値が無効です。0-{ceiling}の値を入力してください。"),
+        ),
+        None => (
+            "ループ回数 (0=無限ループ)".to_string(),
+            "ループ回数の値が無効です。0以上の数値を入力してください。".to_string(),
+        ),
+    };
+    RangedInput::build(label, error, &(0..=ceiling), value)
 }
 
 #[cfg(test)]
@@ -92,41 +105,45 @@ mod tests {
         assert_eq!(field.read(), Ok(max), "上限そのもの");
     }
 
-    /// ループ回数の欄は、検める値域に続けて0の意味を名乗る
+    /// 上限を持たない形式のループ回数の欄は、0の意味だけを名乗る
     #[test]
-    fn the_repeat_field_names_its_range_and_what_zero_means() {
-        let field = repeat_input(MAX_REPEAT, 3);
+    fn the_repeat_field_of_a_format_without_a_ceiling_only_names_what_zero_means() {
+        let field = repeat_input(None, 3);
 
-        let (min, max) = field.input().range_bounds().expect("値域を持つ入力欄");
-        assert_eq!((min, max), (0, MAX_REPEAT as i32), "受け取る回数の上限");
         assert_eq!(
-            field.label(),
-            format!("ループ回数 ({min}-{max}, 0=無限ループ)")
+            field.input().range_bounds(),
+            Some((0, MAX_REPEAT as i32)),
+            "入力欄が扱える回数の上限"
         );
+        assert_eq!(field.label(), "ループ回数 (0=無限ループ)");
 
         field.input().set_value(-1);
         assert_eq!(
             field.read(),
-            Err(format!(
-                "ループ回数の値が無効です。{min}-{max}の値を入力してください。"
-            ))
+            Err("ループ回数の値が無効です。0以上の数値を入力してください。".to_string())
         );
         field.input().set_text(" 12 ");
         assert_eq!(field.read(), Ok(12), "前後の空白");
     }
 
-    /// 上限を踏める欄でも、弾いたときの文言は検める値域をそのまま名乗る
+    /// 上限を持つ形式のループ回数の欄は、検める値域に続けて0の意味を名乗る
     #[test]
-    fn a_repeat_above_the_ceiling_is_refused_with_the_range() {
-        let field = repeat_input(u32::from(u16::MAX), 3);
+    fn the_repeat_field_of_a_format_with_a_ceiling_names_its_range() {
+        let field = repeat_input(Some(u32::from(u16::MAX)), 3);
 
         let (min, max) = field.input().range_bounds().expect("値域を持つ入力欄");
-        assert_eq!((min, max), (0, 65535));
-
-        field.input().set_value(max + 1);
+        assert_eq!((min, max), (0, 65535), "形式が持てる回数の上限");
         assert_eq!(
-            field.read(),
-            Err("ループ回数の値が無効です。0-65535の値を入力してください。".to_string())
+            field.label(),
+            format!("ループ回数 ({min}-{max}, 0=無限ループ)")
         );
+
+        let message = format!("ループ回数の値が無効です。{min}-{max}の値を入力してください。");
+        field.input().set_value(max + 1);
+        assert_eq!(field.read(), Err(message.clone()), "上限より上");
+        field.input().set_value(min - 1);
+        assert_eq!(field.read(), Err(message), "下限より下");
+        field.input().set_value(max);
+        assert_eq!(field.read(), Ok(max), "上限そのもの");
     }
 }

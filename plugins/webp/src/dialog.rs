@@ -1,6 +1,6 @@
 use crate::config::{ColorFormat, Config};
 use aviutl2::dialog::{RangedInput, repeat_input};
-use aviutl2::{ConfigDialog, MAX_REPEAT, max_threads};
+use aviutl2::{ConfigDialog, max_threads};
 use std::ops::RangeInclusive;
 use webp_encoder::{METHOD_RANGE, QUALITY_RANGE};
 use win32_ui::{
@@ -34,7 +34,7 @@ struct Inputs {
 impl Inputs {
     fn new(default_config: &Config) -> Self {
         Inputs {
-            repeat: repeat_input(MAX_REPEAT, default_config.repeat),
+            repeat: repeat_input(Some(u32::from(u16::MAX)), default_config.repeat),
             color: ComboBox::new(vec![
                 ColorFormat::Rgb24.label(),
                 ColorFormat::Rgba32.label(),
@@ -249,33 +249,35 @@ mod tests {
         }
     }
 
-    /// ループ回数は0以上を受け取り、弾いたときの文言もそれを名乗る
+    /// ループ回数の欄は、ANIMのループ数欄が持てる回数を名乗る
     #[test]
-    fn a_negative_repeat_is_refused() {
+    fn a_repeat_outside_the_range_is_refused() {
         let inputs = inputs();
         let (min, max) = inputs
             .repeat
             .input()
             .range_bounds()
             .expect("値域を持つ入力欄");
-        inputs.repeat.input().set_value(-1);
+        assert_eq!((min, max), (0, i32::from(u16::MAX)));
 
-        let Err(message) = inputs.collect() else {
-            panic!("0より小さいループ回数は弾かれる");
-        };
-        assert_eq!(
-            message,
-            format!("ループ回数の値が無効です。{min}-{max}の値を入力してください。")
-        );
+        let message = format!("ループ回数の値が無効です。{min}-{max}の値を入力してください。");
+        for value in [min - 1, max + 1] {
+            inputs.repeat.input().set_value(value);
+            let Err(refused) = inputs.collect() else {
+                panic!("{value}: 値域の外なので弾かれる");
+            };
+            assert_eq!(refused, message);
+        }
     }
 
-    /// i32へ折り返す回数を持つiniを読み直しても、ダイアログはその値のまま開ける
+    /// 欄が持てない回数を書いたiniを読み直しても、ダイアログはその値のまま開ける
     #[test]
     fn a_number_of_plays_read_from_the_ini_fits_the_input() {
         let mut ini = Ini::new();
         ini.with_section(Some(Config::SECTION))
             .set("repeat", "3000000000");
         let config = Config::load_from(ini.section(Some(Config::SECTION)));
+        assert_eq!(config.repeat, u32::from(u16::MAX));
 
         let collected = Inputs::new(&config)
             .collect()

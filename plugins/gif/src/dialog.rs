@@ -18,7 +18,7 @@ struct Inputs {
 impl Inputs {
     fn new(default_config: &Config) -> Self {
         Inputs {
-            repeat: repeat_input(u32::from(u16::MAX), u32::from(default_config.repeat)),
+            repeat: repeat_input(Some(u32::from(u16::MAX)), u32::from(default_config.repeat)),
             color: ComboBox::new(vec![
                 ColorFormat::Rgb24.label(),
                 ColorFormat::Rgba32.label(),

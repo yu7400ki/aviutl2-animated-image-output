@@ -1,6 +1,6 @@
 pub use aviutl2::ColorFormat;
 use aviutl2::ini::{Ini, Properties};
-use aviutl2::{IniConfig, MAX_REPEAT, default_threads, max_threads, read, read_flag};
+use aviutl2::{IniConfig, default_threads, max_threads, read, read_flag};
 use webp_encoder::{METHOD_RANGE, QUALITY_RANGE};
 
 #[derive(Clone)]
@@ -32,7 +32,7 @@ impl IniConfig for Config {
     fn load_from(section: Option<&Properties>) -> Self {
         let default = Self::default();
 
-        let repeat = read(section, "repeat", default.repeat).min(MAX_REPEAT);
+        let repeat = read(section, "repeat", default.repeat).min(u32::from(u16::MAX));
         let color_format = read(section, "color_format", default.color_format);
         let lossless = read_flag(section, "lossless", default.lossless);
         let quality = read(section, "quality", default.quality)
@@ -191,12 +191,13 @@ method=3
         assert_eq!(load(&[("repeat", "-5")]).repeat, default.repeat);
     }
 
-    /// 入力欄が扱えないループ回数は、扱える上限へ収まる
-    ///
-    /// i32へ折り返す値をそのまま持つと、ダイアログの初期値が負になる。
+    /// ANIMのループ数欄に収まらないループ回数は、収まる上限へ丸められる
     #[test]
     fn out_of_range_num_plays_are_clamped() {
-        assert_eq!(load(&[("repeat", "3000000000")]).repeat, MAX_REPEAT);
+        let ceiling = u32::from(u16::MAX);
+
+        assert_eq!(load(&[("repeat", "3000000000")]).repeat, ceiling);
+        assert_eq!(load(&[("repeat", "70000")]).repeat, ceiling);
         assert_eq!(load(&[("repeat", "3")]).repeat, 3);
     }
 
