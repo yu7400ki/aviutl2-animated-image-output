@@ -1275,23 +1275,13 @@ mod tests {
     /// 休みが1つ減る。
     #[test]
     fn the_write_path_consults_the_pacing() {
-        const PIXELS: usize = (WIDTH * HEIGHT) as usize;
-        /// まだらに置き換える画素の間隔
-        const STEP: usize = 7;
+        // 交互の列は一様な面から始まり、まだらな半透明の面がその次に来る
+        let frames = resting_frames();
+        let (uniform, speckled) = (frames[0].clone(), frames[1].clone());
 
-        let uniform = with_alpha(&vec![0x30u8; PIXELS * 3]);
-        let mut speckled = uniform.clone();
-        for pixel in (0..PIXELS).step_by(STEP) {
-            speckled[pixel * 4..pixel * 4 + 4].copy_from_slice(&[0xC0, 0xB0, 0xA0, 0x80]);
-        }
-
-        let mut input = vec![uniform.clone()];
-        for _ in 0..BLEND_LOSS_STREAK {
-            input.push(speckled.clone());
-            input.push(uniform.clone());
-        }
+        let mut input = frames[..LOSING_FRAMES].to_vec();
         // 連敗が閾値に届くフレームを書き出しへ届かせる
-        input.push(speckled.clone());
+        input.push(speckled);
         let delay = FrameDelay::new(1, 30).unwrap();
 
         let mut encoder = Encoder::new(
