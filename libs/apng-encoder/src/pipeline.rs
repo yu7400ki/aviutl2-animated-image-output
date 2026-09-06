@@ -2,6 +2,7 @@
 
 use crate::codec::{BufferPool, Candidate, Codec};
 use crate::error::Error;
+use crate::layout::Layout;
 use std::any::Any;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -22,8 +23,6 @@ struct Job {
     region: Vec<u8>,
     /// 領域の1行のバイト数
     region_stride: usize,
-    /// 1画素のバイト数
-    bpp: usize,
     /// 圧縮した本体を組み立てるバッファ
     body: Vec<u8>,
 }
@@ -78,6 +77,7 @@ impl Drop for Pool {
 /// 畳むときだけで、そこから先は結末を指す相手がいない。
 fn work(
     codec: &mut Codec,
+    layout: &Layout,
     jobs: &Mutex<Receiver<(usize, Job)>>,
     results: &Sender<Done>,
     abandoned: &AtomicBool,
@@ -94,10 +94,9 @@ fn work(
         let Job {
             region,
             region_stride,
-            bpp,
             body,
         } = job;
-        let compress = || codec.compress(&region, region_stride, bpp, body);
+        let compress = || codec.compress(&region, region_stride, layout.bytes_per_pixel, body);
         let outcome = match panic::catch_unwind(AssertUnwindSafe(compress)) {
             Ok(candidate) => Outcome::Compressed(candidate),
             Err(payload) => Outcome::Panicked(payload),
@@ -119,7 +118,7 @@ fn work(
 ///
 /// # Errors
 /// スレッドを起こせないとき [`Error::Io`]。
-fn spawn(level: u32, workers: NonZeroUsize) -> Result<Pool, Error> {
+fn spawn(level: u32, workers: NonZeroUsize, layout: Layout) -> Result<Pool, Error> {
     let (sender, receiver) = channel();
     let (results, done) = channel();
     let jobs = Arc::new(Mutex::new(receiver));
@@ -136,7 +135,7 @@ fn spawn(level: u32, workers: NonZeroUsize) -> Result<Pool, Error> {
         let abandoned = Arc::clone(&pool.abandoned);
         let worker = thread::Builder::new()
             .name(WORKER_NAME.to_owned())
-            .spawn(move || work(&mut Codec::new(level), &jobs, &results, &abandoned))?;
+            .spawn(move || work(&mut Codec::new(level), &layout, &jobs, &results, &abandoned))?;
         pool.workers.push(worker);
     }
     Ok(pool)
@@ -161,17 +160,20 @@ pub(crate) struct Pipeline {
     buffers: BufferPool,
     /// 圧縮を回すワーカー数
     workers: NonZeroUsize,
+    /// キャンバスの大きさと入力フレームのバイト並び
+    layout: Layout,
 }
 
 impl Pipeline {
-    /// 圧縮レベル `level` (1..=9) を `workers` 個のワーカーで回すパイプラインを作る
+    /// `layout` に並ぶフレームを、圧縮レベル `level` (1..=9) で圧縮する
+    /// `workers` 個のワーカーを持つパイプラインを作る
     ///
     /// # Errors
     /// スレッドを起こせないとき [`Error::Io`]。
-    pub(crate) fn new(level: u32, workers: NonZeroUsize) -> Result<Self, Error> {
+    pub(crate) fn new(level: u32, workers: NonZeroUsize, layout: Layout) -> Result<Self, Error> {
         let pool = match workers.get() {
             1 => None,
-            _ => Some(spawn(level, workers)?),
+            _ => Some(spawn(level, workers, layout)?),
         };
 
         Ok(Pipeline {
@@ -181,6 +183,7 @@ impl Pipeline {
             ready: HashMap::new(),
             buffers: BufferPool::new(),
             workers,
+            layout,
         })
     }
 
@@ -206,26 +209,21 @@ impl Pipeline {
     }
 
     /// 駆動スレッドで領域を圧縮する
-    pub(crate) fn compress(
-        &mut self,
-        region: &[u8],
-        region_stride: usize,
-        bpp: usize,
-    ) -> Candidate {
+    pub(crate) fn compress(&mut self, region: &[u8], region_stride: usize) -> Candidate {
         let body = self.buffer();
-        self.codec.compress(region, region_stride, bpp, body)
+        self.codec
+            .compress(region, region_stride, self.layout.bytes_per_pixel, body)
     }
 
     /// 領域の圧縮を投入し、結果を指すための番号を返す
     ///
     /// `region` はパイプラインが引き取り、[`Pipeline::buffer`] から配り直す。
-    pub(crate) fn submit(&mut self, region: Vec<u8>, region_stride: usize, bpp: usize) -> usize {
+    pub(crate) fn submit(&mut self, region: Vec<u8>, region_stride: usize) -> usize {
         let index = self.submitted;
         self.submitted += 1;
         let job = Job {
             region,
             region_stride,
-            bpp,
             body: self.buffer(),
         };
 
@@ -238,10 +236,11 @@ impl Pipeline {
                 let Job {
                     region,
                     region_stride,
-                    bpp,
                     body,
                 } = job;
-                let candidate = self.codec.compress(&region, region_stride, bpp, body);
+                let candidate =
+                    self.codec
+                        .compress(&region, region_stride, self.layout.bytes_per_pixel, body);
                 self.buffers.give(region);
                 self.ready.insert(index, Outcome::Compressed(candidate));
             }
@@ -276,6 +275,7 @@ impl Pipeline {
 mod tests {
     use super::*;
     use crate::testing::noise;
+    use anim_core::ColorType;
 
     const LEVEL: u32 = 6;
     const BPP: usize = 4;
@@ -283,8 +283,12 @@ mod tests {
     const HEIGHT: usize = 12;
     const STRIDE: usize = WIDTH * BPP;
 
+    fn layout() -> Layout {
+        Layout::new(WIDTH as u32, HEIGHT as u32, ColorType::Rgba8).unwrap()
+    }
+
     fn pipeline(workers: usize) -> Pipeline {
-        Pipeline::new(LEVEL, NonZeroUsize::new(workers).unwrap()).unwrap()
+        Pipeline::new(LEVEL, NonZeroUsize::new(workers).unwrap(), layout()).unwrap()
     }
 
     fn region(seed: u32) -> Vec<u8> {
@@ -300,7 +304,7 @@ mod tests {
         let expected: Vec<Vec<u8>> = regions
             .iter()
             .map(|region| {
-                let index = sequential.submit(region.clone(), STRIDE, BPP);
+                let index = sequential.submit(region.clone(), STRIDE);
                 sequential.take(index).into_body()
             })
             .collect();
@@ -308,7 +312,7 @@ mod tests {
         let mut parallel = pipeline(4);
         let indices: Vec<usize> = regions
             .iter()
-            .map(|region| parallel.submit(region.clone(), STRIDE, BPP))
+            .map(|region| parallel.submit(region.clone(), STRIDE))
             .collect();
         for (index, expected) in indices.into_iter().zip(&expected).rev() {
             assert_eq!(&parallel.take(index).into_body(), expected);
@@ -322,7 +326,7 @@ mod tests {
         let mut pipeline = pipeline(2);
         assert_eq!(pipeline.pooled(), 0, "配る前から抱えている");
 
-        let index = pipeline.submit(region.clone(), STRIDE, BPP);
+        let index = pipeline.submit(region.clone(), STRIDE);
         let body = pipeline.take(index).into_body();
         assert_eq!(pipeline.pooled(), 1, "領域のバッファが戻っていない");
 
@@ -340,7 +344,7 @@ mod tests {
     /// 起こした直後は倒れている。
     #[test]
     fn dropping_the_pool_raises_the_flag() {
-        let pool = spawn(LEVEL, NonZeroUsize::new(2).unwrap()).unwrap();
+        let pool = spawn(LEVEL, NonZeroUsize::new(2).unwrap(), layout()).unwrap();
         let abandoned = Arc::clone(&pool.abandoned);
 
         assert!(
@@ -362,7 +366,6 @@ mod tests {
             let job = Job {
                 region: region(0),
                 region_stride: STRIDE,
-                bpp: BPP,
                 body: Vec::new(),
             };
             sender.send((0, job)).unwrap();
@@ -370,6 +373,7 @@ mod tests {
 
             work(
                 &mut Codec::new(LEVEL),
+                &layout(),
                 &Mutex::new(receiver),
                 &results,
                 &AtomicBool::new(abandoned),

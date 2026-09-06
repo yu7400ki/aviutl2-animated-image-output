@@ -256,7 +256,7 @@ impl<W: Write> Encoder<W> {
         }
 
         let layout = Layout::new(width, height, config.color_type)?;
-        let pipeline = Pipeline::new(config.compression_level, workers)?;
+        let pipeline = Pipeline::new(config.compression_level, workers, layout)?;
         let mut chunks = ChunkWriter::new(writer);
         Self::open(&mut chunks, &layout, num_frames, config)?;
 
@@ -360,7 +360,7 @@ impl<W: Write> Encoder<W> {
 
         let bpp = self.layout.bytes_per_pixel;
         let region = self.crop_rect(&data, kept);
-        let job = self.pipeline.submit(region, kept.width as usize * bpp, bpp);
+        let job = self.pipeline.submit(region, kept.width as usize * bpp);
 
         self.staged.push_back(Staged {
             index,
@@ -448,9 +448,7 @@ impl<W: Write> Encoder<W> {
 
         let restored = restored.map(|rect| {
             let region = self.crop_rect(data, rect);
-            let candidate = self
-                .pipeline
-                .compress(&region, rect.width as usize * bpp, bpp);
+            let candidate = self.pipeline.compress(&region, rect.width as usize * bpp);
             self.pipeline.recycle(region);
             (rect, candidate)
         });
@@ -502,7 +500,7 @@ impl<W: Write> Encoder<W> {
         }
 
         let bpp = self.layout.bytes_per_pixel;
-        Over::Packed(self.pipeline.submit(region, rect.width as usize * bpp, bpp))
+        Over::Packed(self.pipeline.submit(region, rect.width as usize * bpp))
     }
 
     /// 書き出すフレームをキャンバスへ重ねる方法を決める
