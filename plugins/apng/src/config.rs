@@ -31,13 +31,8 @@ impl IniConfig for Config {
         let repeat = read(section, "repeat", default.repeat).min(MAX_REPEAT);
         let color_format = read(section, "color_format", default.color_format);
 
-        let compression_level = read(section, "compression_level", default.compression_level);
-        let compression_level = if COMPRESSION_LEVELS.contains(&compression_level) {
-            compression_level
-        } else {
-            default.compression_level
-        };
-
+        let compression_level = read(section, "compression_level", default.compression_level)
+            .clamp(*COMPRESSION_LEVELS.start(), *COMPRESSION_LEVELS.end());
         let threads = read(section, "threads", default.threads).clamp(1, max_threads());
 
         Self {
@@ -103,10 +98,24 @@ mod tests {
         assert_eq!(loaded.threads, saved.threads);
     }
 
+    /// 値域の外の圧縮レベルは、エンコーダが受け取れる範囲へ収まる
     #[test]
-    fn out_of_range_compression_level_falls_back_to_default() {
+    fn out_of_range_compression_level_is_clamped() {
+        assert_eq!(
+            load(&[("compression_level", "10")]).compression_level,
+            *COMPRESSION_LEVELS.end()
+        );
+        assert_eq!(
+            load(&[("compression_level", "0")]).compression_level,
+            *COMPRESSION_LEVELS.start()
+        );
+    }
+
+    /// 読めない圧縮レベルは既定値へ落ちる
+    #[test]
+    fn an_unreadable_compression_level_falls_back_to_default() {
         let default = Config::default().compression_level;
-        for value in ["0", "10", "-1", "high", ""] {
+        for value in ["-1", "high", ""] {
             assert_eq!(
                 load(&[("compression_level", value)]).compression_level,
                 default
