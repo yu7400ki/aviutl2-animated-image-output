@@ -1,8 +1,6 @@
-//! 投入と決定それぞれが見るフレームの追跡、およびそこから決まる差分矩形
+//! 投入と決定それぞれが見るフレームの追跡
 
 use crate::chunk::DISPOSE_OP_NONE;
-use crate::layout::Layout;
-use anim_core::Rect;
 use std::sync::Arc;
 
 /// 直前に投入されたフレームと、直前に決定したフレームとそのキャンバス
@@ -39,14 +37,16 @@ impl Delta {
 
     /// フレームを写し取り、直前に投入されたフレームとして覚える
     ///
-    /// 写し先は配り直された面を使う。返した面は投入されたフレームとして分け持つ。
-    pub(crate) fn stage(&mut self, data: &[u8]) -> Arc<Vec<u8>> {
+    /// 写し先は配り直された面を使う。それまで直前に投入されていたフレームと、写し取った
+    /// フレームを返し、どちらの面も投入されたフレームとして分け持つ。先頭フレームの
+    /// 直前は空の面になる。
+    pub(crate) fn stage(&mut self, data: &[u8]) -> (Arc<Vec<u8>>, Arc<Vec<u8>>) {
         let mut frame = self.spare.pop().unwrap_or_default();
         frame.clear();
         frame.extend_from_slice(data);
 
-        self.previous = Arc::new(frame);
-        Arc::clone(&self.previous)
+        let previous = std::mem::replace(&mut self.previous, Arc::new(frame));
+        (previous, Arc::clone(&self.previous))
     }
 
     /// 決定を終えたフレームを覚え、保留中のフレームの `dispose` でキャンバスを進める
@@ -86,17 +86,5 @@ impl Delta {
     #[cfg(test)]
     pub(crate) fn spare(&self) -> &[Vec<u8>] {
         &self.spare
-    }
-
-    /// 保留中のフレームを捨てないときの、投入されたフレームの矩形
-    ///
-    /// `index` は投入された順の位置。先頭フレームはIDATに入るためキャンバス全体とし、
-    /// 以降は直前に投入されたフレームとの差分の外接矩形を使う。
-    pub(crate) fn kept_rect(&self, layout: &Layout, data: &[u8], index: u32) -> Rect {
-        if index == 0 {
-            return layout.whole();
-        }
-
-        layout.bounding_rect(&self.previous, data)
     }
 }

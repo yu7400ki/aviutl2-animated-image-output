@@ -69,6 +69,21 @@ struct Disposal {
     candidate: Candidate,
 }
 
+/// 保留中のフレームを捨てないときの候補
+///
+/// 矩形も候補も投入した先で決まるため、受け取るまで矩形は分からない。
+enum Kept {
+    /// 圧縮を投入した番号
+    Submitted(usize),
+    /// 受け取った矩形と、それをblend_op=SOURCEで圧縮した候補
+    Taken {
+        rect: Rect,
+        candidate: Candidate,
+        /// 保留中のフレームを捨てるときの候補を走査する投入の番号
+        restored: usize,
+    },
+}
+
 /// 投入済み・未決定のフレーム
 ///
 /// 決定点はここから、保留中のフレームのdispose_opを決め、キャンバスへ重ねる候補を
@@ -79,14 +94,8 @@ struct Staged {
     /// 投入されたフレームの画素
     data: Arc<Vec<u8>>,
     delay: FrameDelay,
-    /// 保留中のフレームを捨てないときの矩形
-    kept: Rect,
-    /// `kept` をblend_op=SOURCEで圧縮する投入の番号
-    job: usize,
-    /// 保留中のフレームを捨てるときの候補を走査する投入の番号
-    ///
-    /// 決定の1手前で投入したフレームだけが持つ。
-    restored: Option<usize>,
+    /// 保留中のフレームを捨てないときの候補
+    kept: Kept,
 }
 
 /// 決定点が組み立てた、blend_op=OVERの候補
@@ -354,24 +363,26 @@ impl<W: Write> Encoder<W> {
         Ok(())
     }
 
-    /// フレームを写し取り、捨てないときの矩形の圧縮を投入する
+    /// フレームを写し取り、捨てないときの候補の圧縮を投入する
     ///
-    /// 矩形は直前に投入されたフレームとの差分で決まるため、写し取るより先に求める。
-    /// 切り出しは圧縮を回す側で行う。
+    /// 先頭フレームはIDATに入るためキャンバス全体を切り出し、以降は直前に投入された
+    /// フレームとの差分を採る。走査も切り出しも圧縮を回す側で行う。
     fn stage(&mut self, data: &[u8], delay: FrameDelay) {
         let index = self.frames_accepted;
-        let kept = self.delta.kept_rect(&self.layout, data, index);
-        let data = self.delta.stage(data);
+        let (previous, data) = self.delta.stage(data);
 
-        let job = self.pipeline.submit_crop(Arc::clone(&data), kept);
+        let job = if index == 0 {
+            self.pipeline
+                .submit_crop(Arc::clone(&data), self.layout.whole())
+        } else {
+            self.pipeline.submit_diff(previous, Arc::clone(&data))
+        };
 
         self.staged.push_back(Staged {
             index,
             data,
             delay,
-            kept,
-            job,
-            restored: None,
+            kept: Kept::Submitted(job),
         });
     }
 
@@ -381,16 +392,14 @@ impl<W: Write> Encoder<W> {
             index,
             data,
             delay,
-            job,
-            restored,
-            ..
+            kept,
         } = self.staged.pop_front().expect("決めるフレームがある");
 
         let Disposal {
             op: dispose,
             rect,
             candidate: source,
-        } = self.choose_dispose(job, restored);
+        } = self.choose_dispose(kept);
         let over = self.submit_over(&data, index, dispose, rect);
 
         self.writing.advance(
@@ -403,7 +412,7 @@ impl<W: Write> Encoder<W> {
             },
         );
         self.delta.advance(data, dispose);
-        self.submit_restored();
+        self.prepare_next();
 
         while let Some(pending) = self.writing.overflowing(self.pending_depth.get()) {
             self.write(pending)?;
@@ -448,13 +457,22 @@ impl<W: Write> Encoder<W> {
     /// 捨てない。
     ///
     /// 捨てるときの候補は矩形が狭いときだけ立ち、その判定は投入した先で済んでいる。
-    fn choose_dispose(&mut self, job: usize, restored: Option<usize>) -> Disposal {
-        let restored = restored.and_then(|job| self.pipeline.take_restored(job));
-        let (kept, kept_candidate) = self.pipeline.take_cut(job);
+    fn choose_dispose(&mut self, kept: Kept) -> Disposal {
+        let (kept_rect, kept_candidate, restored) = match kept {
+            Kept::Submitted(job) => {
+                let (rect, candidate) = self.pipeline.take_cut(job);
+                (rect, candidate, None)
+            }
+            Kept::Taken {
+                rect,
+                candidate,
+                restored,
+            } => (rect, candidate, self.pipeline.take_restored(restored)),
+        };
 
         let keep = |candidate| Disposal {
             op: DISPOSE_OP_NONE,
-            rect: kept,
+            rect: kept_rect,
             candidate,
         };
         let Some((rect, restored_candidate)) = restored else {
@@ -474,29 +492,40 @@ impl<W: Write> Encoder<W> {
         }
     }
 
-    /// 次に決定するフレームの、保留中のフレームを捨てるときの候補を投入する
+    /// 次に決定するフレームの、捨てないときの候補を受け取り、捨てるときの候補を投入する
     ///
     /// 捨てたときに復元されるキャンバスは直前の決定で確定するため、決定の1手前に
-    /// あたるこの時点で投入できる。列の深さは2以上なので、決定の後も列には次の
-    /// フレームが残る。空なのは終端で流し切る最後の決定だけで、そのときは投入する
-    /// 相手がない。
+    /// あたるこの時点で投入できる。投入には比べる相手の面積が要るので、捨てないときの
+    /// 候補もここで受け取る。列の深さは2以上なので、決定の後も列には次のフレームが
+    /// 残る。空なのは終端で流し切る最後の決定だけで、そのときは投入する相手がない。
     ///
-    /// 投入された順の位置が2に満たないフレームは投入しない。キャンバスがまだ
-    /// 埋まっておらず、先頭のfcTLのdispose_op=PREVIOUSもBACKGROUNDとして扱われて
-    /// キャンバスを復元しないため。
-    fn submit_restored(&mut self) {
+    /// 投入された順の位置が2に満たないフレームは、捨てるときの候補が立たない。
+    /// キャンバスがまだ埋まっておらず、先頭のfcTLのdispose_op=PREVIOUSも
+    /// BACKGROUNDとして扱われてキャンバスを復元しないため。比べる相手の要らない
+    /// そのフレームは、捨てないときの候補を決定の場で受け取る。
+    fn prepare_next(&mut self) {
         let canvas = self.delta.canvas();
-        let Some(next) = self.staged.front_mut() else {
+        let Some(next) = self.staged.front() else {
             return;
         };
         if next.index < 2 {
             return;
         }
+        let Kept::Submitted(job) = next.kept else {
+            panic!("捨てないときの候補を2度受け取っている")
+        };
+        let data = Arc::clone(&next.data);
 
-        let job = self
-            .pipeline
-            .submit_restored(canvas, Arc::clone(&next.data), next.kept.area());
-        next.restored = Some(job);
+        let (rect, candidate) = self.pipeline.take_cut(job);
+        let restored = self.pipeline.submit_restored(canvas, data, rect.area());
+        self.staged
+            .front_mut()
+            .expect("受け取ったフレームが残る")
+            .kept = Kept::Taken {
+            rect,
+            candidate,
+            restored,
+        };
     }
 
     /// 投入されたフレームをキャンバスへ重ねる候補を詰め直し、圧縮を投入する
@@ -1119,18 +1148,19 @@ mod tests {
                 encoder.add_frame(frame, delay).unwrap();
             }
 
-            let restored = |staged: &VecDeque<Staged>| {
+            // 捨てる候補を投入したフレームだけが、捨てないときの候補を受け取っている
+            let prepared = |staged: &VecDeque<Staged>| {
                 usize::from(
                     staged
                         .front()
-                        .is_some_and(|staged| staged.restored.is_some()),
+                        .is_some_and(|staged| matches!(staged.kept, Kept::Taken { .. })),
                 )
             };
             for index in 0..input.len() {
-                let taken = restored(&encoder.staged);
+                let taken = prepared(&encoder.staged);
                 let before = encoder.pipeline.pooled();
                 encoder.decide().unwrap();
-                let submitted = restored(&encoder.staged);
+                let submitted = prepared(&encoder.staged);
                 let decided = encoder.writing.open.as_ref().expect("決めたフレームが残る");
                 let packed = usize::from(matches!(decided.over, Over::Packed(_)));
                 assert_eq!(

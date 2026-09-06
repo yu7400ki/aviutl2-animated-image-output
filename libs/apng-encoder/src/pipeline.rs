@@ -42,6 +42,13 @@ enum Source {
         /// 切り出す矩形
         rect: Rect,
     },
+    /// 2つのフレームの差分の外接矩形を求め、そこを切り出して埋める
+    Diff {
+        /// 差分を採る相手のフレーム
+        previous: Arc<Vec<u8>>,
+        /// 切り出す元のフレーム
+        data: Arc<Vec<u8>>,
+    },
     /// キャンバスとフレームの差分の外接矩形を求め、そこを切り出して埋める
     ///
     /// 矩形の面積が `kept_area` に満たないときだけ切り出して圧縮する。それ以外は
@@ -113,7 +120,7 @@ impl Jobs {
         let mut queue = self.lock();
         let lane = match job.source {
             Source::Restored { .. } => &mut queue.ahead,
-            Source::Ready { .. } | Source::Crop { .. } => &mut queue.behind,
+            Source::Ready { .. } | Source::Crop { .. } | Source::Diff { .. } => &mut queue.behind,
         };
         lane.push_back((index, job));
         drop(queue);
@@ -208,6 +215,10 @@ fn run(codec: &mut Codec, layout: &Layout, job: Job) -> (Outcome, Vec<u8>) {
             Outcome::Compressed(codec.compress(&region, region_stride, bpp, body))
         }
         Source::Crop { data, rect } => cut(codec, layout, &mut region, &data, rect, body),
+        Source::Diff { previous, data } => {
+            let rect = layout.bounding_rect(&previous, &data);
+            cut(codec, layout, &mut region, &data, rect, body)
+        }
         Source::Restored {
             canvas,
             data,
@@ -379,6 +390,21 @@ impl Pipeline {
             region,
             body,
             source: Source::Crop { data, rect },
+        })
+    }
+
+    /// `previous` と `data` の差分の外接矩形を切り出す圧縮を投入し、結果を指すための
+    /// 番号を返す
+    ///
+    /// 走査も切り出しも圧縮を回す側で行う。切り出し先は [`Pipeline::buffer`] から借り、
+    /// 結果と一緒に配り直す。
+    pub(crate) fn submit_diff(&mut self, previous: Arc<Vec<u8>>, data: Arc<Vec<u8>>) -> usize {
+        let region = self.buffer();
+        let body = self.buffer();
+        self.submit(Job {
+            region,
+            body,
+            source: Source::Diff { previous, data },
         })
     }
 
@@ -558,6 +584,65 @@ mod tests {
         }
     }
 
+    /// 差分のジョブは、走査した外接矩形と、同じ矩形を切り出したジョブと同じ候補を返す
+    ///
+    /// 差分の無い列では1画素の矩形になる。どちらのフレームも結末を返す前に手放す。
+    #[test]
+    fn a_diff_job_compresses_what_the_bounding_rect_cuts_out() {
+        const RECT: Rect = Rect {
+            x: 2,
+            y: 5,
+            width: 7,
+            height: 4,
+        };
+        /// 差分が無いときの矩形
+        const UNCHANGED: Rect = Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        };
+
+        let previous = Arc::new(region(13));
+        let mut changed = previous.as_ref().clone();
+        for y in RECT.y as usize..(RECT.y + RECT.height) as usize {
+            for x in RECT.x as usize..(RECT.x + RECT.width) as usize {
+                for byte in &mut changed[(y * WIDTH + x) * BPP..(y * WIDTH + x + 1) * BPP] {
+                    *byte ^= 0xFF;
+                }
+            }
+        }
+        let changed = Arc::new(changed);
+
+        for workers in [1, 2] {
+            for (data, expected_rect) in [(&changed, RECT), (&previous, UNCHANGED)] {
+                let mut pipeline = pipeline(workers);
+                let index = pipeline.submit_crop(Arc::clone(data), expected_rect);
+                let expected = pipeline.take_cut(index).1.into_body();
+
+                let index = pipeline.submit_diff(Arc::clone(&previous), Arc::clone(data));
+                let (rect, candidate) = pipeline.take_cut(index);
+                assert_eq!(rect, expected_rect, "ワーカー{workers}個: 走査した矩形");
+                assert_eq!(
+                    candidate.into_body(),
+                    expected,
+                    "ワーカー{workers}個: 圧縮した本体"
+                );
+            }
+
+            assert_eq!(
+                Arc::strong_count(&previous),
+                1,
+                "ワーカー{workers}個: 差分を採る相手を指している数"
+            );
+            assert_eq!(
+                Arc::strong_count(&changed),
+                1,
+                "ワーカー{workers}個: フレームを指している数"
+            );
+        }
+    }
+
     /// 復元のジョブは、走査した矩形が比べる相手の面積に満たないときだけ候補になる
     ///
     /// 面積が並ぶ相手には候補を立てず、領域と本体のバッファをそのまま返す。1つ広い
@@ -634,9 +719,17 @@ mod tests {
                 kept_area: u64::MAX,
             },
         };
+        let diff = Job {
+            region: Vec::new(),
+            body: Vec::new(),
+            source: Source::Diff {
+                previous: Arc::new(region(33)),
+                data: Arc::new(region(34)),
+            },
+        };
 
         jobs.push(0, ready(1));
-        jobs.push(1, ready(2));
+        jobs.push(1, diff);
         jobs.push(2, restored);
         jobs.push(3, ready(3));
         jobs.close();
