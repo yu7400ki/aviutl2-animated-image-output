@@ -537,7 +537,7 @@ impl<W: Write + Seek> Encoder<W> {
     /// バイト数が寸法と色種別から決まる長さと違うとき
     /// [`Error::FrameSizeMismatch`]。宣言したフレーム数を超えたとき
     /// [`Error::FrameCountMismatch`]。
-    pub fn add_frame(&mut self, data: Vec<u8>, delay: FrameDelay) -> Result<(), Error> {
+    pub fn add_frame(&mut self, mut data: Vec<u8>, delay: FrameDelay) -> Result<(), Error> {
         if self.poisoned {
             return Err(Error::Poisoned);
         }
@@ -554,16 +554,15 @@ impl<W: Write + Seek> Encoder<W> {
             });
         }
 
-        let mut pixels = data;
         match self.layout.color_type {
             ColorType::Rgb8 => {}
             ColorType::Rgba8 => {
-                self.binarized += normalize::binarize(&mut pixels);
+                self.binarized += normalize::binarize(&mut data);
             }
         }
 
         // 途中で失敗するとブロックの列が中断した状態で残るため、以降の投入を拒否する
-        self.accept(pixels, delay)
+        self.accept(data, delay)
             .inspect_err(|_| self.poisoned = true)?;
 
         self.frames_accepted += 1;
