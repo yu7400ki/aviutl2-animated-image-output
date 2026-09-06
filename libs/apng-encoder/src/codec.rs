@@ -7,25 +7,31 @@ use crate::zlib::Compressor;
 ///
 /// 圧縮した本体と切り出した領域はフレームごとに同じ大きさへ落ち着くため、
 /// 一度確保した容量をそのまま次のフレームへ回す。
-struct BufferPool {
+pub(crate) struct BufferPool {
     free: Vec<Vec<u8>>,
 }
 
 impl BufferPool {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         BufferPool { free: Vec::new() }
     }
 
     /// 空のバッファを1つ借りる
-    fn take(&mut self) -> Vec<u8> {
+    pub(crate) fn take(&mut self) -> Vec<u8> {
         let mut buffer = self.free.pop().unwrap_or_default();
         buffer.clear();
         buffer
     }
 
     /// 借りたバッファを返す
-    fn give(&mut self, buffer: Vec<u8>) {
+    pub(crate) fn give(&mut self, buffer: Vec<u8>) {
         self.free.push(buffer);
+    }
+
+    /// 配り直せるバッファの数
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.free.len()
     }
 }
 
@@ -72,12 +78,6 @@ impl Codec {
             filtered: Vec::new(),
             pool: BufferPool::new(),
         }
-    }
-
-    /// プールが抱えているバッファの数
-    #[cfg(test)]
-    pub(crate) fn pooled(&self) -> usize {
-        self.pool.free.len()
     }
 
     /// 連続した領域をフィルタし、`body` へ圧縮する
@@ -193,13 +193,13 @@ mod tests {
     fn the_losing_strategy_leaves_its_buffer_in_the_pool() {
         let region = noise(WIDTH * HEIGHT * BPP, 1);
         let mut codec = Codec::new(6);
-        assert_eq!(codec.pooled(), 0);
+        assert_eq!(codec.pool.len(), 0);
 
         let mut body = codec.compress(&region, STRIDE, BPP, Vec::new()).into_body();
-        assert_eq!(codec.pooled(), 1);
+        assert_eq!(codec.pool.len(), 1);
 
         body = codec.compress(&region, STRIDE, BPP, body).into_body();
-        assert_eq!(codec.pooled(), 1);
+        assert_eq!(codec.pool.len(), 1);
         assert!(!body.is_empty());
     }
 }

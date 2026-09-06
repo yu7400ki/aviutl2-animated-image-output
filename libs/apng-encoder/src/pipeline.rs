@@ -1,6 +1,6 @@
 //! ワーカープールと、番号を指して受け取る圧縮の結果
 
-use crate::codec::{Candidate, Codec};
+use crate::codec::{BufferPool, Candidate, Codec};
 use crate::error::Error;
 use std::any::Any;
 use std::collections::HashMap;
@@ -158,7 +158,7 @@ pub(crate) struct Pipeline {
     /// 番号を指されるのを待っている結末
     ready: HashMap<usize, Outcome>,
     /// 配り直すバッファ
-    buffers: Vec<Vec<u8>>,
+    buffers: BufferPool,
     /// 圧縮を回すワーカー数
     workers: NonZeroUsize,
 }
@@ -179,7 +179,7 @@ impl Pipeline {
             pool,
             submitted: 0,
             ready: HashMap::new(),
-            buffers: Vec::new(),
+            buffers: BufferPool::new(),
             workers,
         })
     }
@@ -191,14 +191,12 @@ impl Pipeline {
 
     /// 空のバッファを1つ借りる
     pub(crate) fn buffer(&mut self) -> Vec<u8> {
-        let mut buffer = self.buffers.pop().unwrap_or_default();
-        buffer.clear();
-        buffer
+        self.buffers.take()
     }
 
     /// 借りたバッファを返す
     pub(crate) fn recycle(&mut self, buffer: Vec<u8>) {
-        self.buffers.push(buffer);
+        self.buffers.give(buffer);
     }
 
     /// 配り直せるバッファの数
@@ -244,7 +242,7 @@ impl Pipeline {
                     body,
                 } = job;
                 let candidate = self.codec.compress(&region, region_stride, bpp, body);
-                self.buffers.push(region);
+                self.buffers.give(region);
                 self.ready.insert(index, Outcome::Compressed(candidate));
             }
         }
@@ -268,7 +266,7 @@ impl Pipeline {
                 .results
                 .recv()
                 .expect("ワーカーは結末を返してから抜ける");
-            self.buffers.push(done.region);
+            self.buffers.give(done.region);
             self.ready.insert(done.index, done.outcome);
         }
     }
