@@ -1,21 +1,20 @@
 use crate::config::{ColorFormat, Config};
-use aviutl2::ConfigDialog;
-use aviutl2::dialog::{RangedInput, repeat_input};
+use aviutl2::dialog::{ConfigInputs, RangedInput, repeat_input};
 use win32_ui::{
-    Dialog, MessageBox,
-    layout::{FlexLayout, JustifyContent, SizeValue, labeled},
-    widget::{Button, ComboBox},
+    layout::{FlexLayout, SizeValue, labeled},
+    widget::ComboBox,
 };
-use windows::Win32::Foundation::HWND;
 
 /// ダイアログの入力欄
 #[derive(Clone)]
-struct Inputs {
+pub(crate) struct Inputs {
     repeat: RangedInput,
     color: ComboBox,
 }
 
-impl Inputs {
+impl ConfigInputs for Inputs {
+    type Config = Config;
+
     fn new(default_config: &Config) -> Self {
         Inputs {
             repeat: repeat_input(Some(u32::from(u16::MAX)), u32::from(default_config.repeat)),
@@ -30,7 +29,6 @@ impl Inputs {
         }
     }
 
-    /// 設定項目を縦へ並べる
     fn layout(&self) -> FlexLayout {
         FlexLayout::column()
             .with_width(SizeValue::Points(300.0))
@@ -40,11 +38,7 @@ impl Inputs {
             .with_layout(labeled("カラーフォーマット", self.color.clone()))
     }
 
-    /// 入力欄の値を設定へ組む
-    ///
-    /// # Errors
-    /// 読めない欄か値域の外の欄があるとき、画面へ出す文言。
-    fn collect(&self) -> std::result::Result<Config, String> {
+    fn collect(&self) -> Result<Config, String> {
         let repeat = self.repeat.read()?;
 
         Ok(Config {
@@ -55,49 +49,6 @@ impl Inputs {
                 _ => Default::default(),
             },
         })
-    }
-}
-
-pub fn show_config_dialog(parent_hwnd: HWND, default_config: Config) -> ConfigDialog<Config> {
-    let inputs = Inputs::new(&default_config);
-
-    let dialog = Dialog::new("GIF出力設定");
-    let handle = dialog.handle();
-
-    // 入力値を検証してからダイアログを閉じる。無効ならダイアログは開いたまま
-    let ok_button = Button::primary("OK").on_click({
-        let handle = handle.clone();
-        let inputs = inputs.clone();
-        move || match inputs.collect() {
-            Ok(_) => handle.accept(),
-            Err(message) => MessageBox::error(handle.hwnd(), &message, "エラー"),
-        }
-    });
-
-    let cancel_button = Button::secondary("キャンセル").on_click({
-        let handle = handle.clone();
-        move || handle.cancel()
-    });
-
-    let layout = inputs.layout().with_layout(
-        FlexLayout::row()
-            .with_gap(10.0)
-            .with_padding_rect(0.0, 0.0, 5.0, 0.0)
-            .with_justify_content(JustifyContent::End)
-            .with_widget(ok_button)
-            .with_widget(cancel_button),
-    );
-
-    let Ok(accepted) = dialog.with_layout(layout).open(parent_hwnd) else {
-        return ConfigDialog::Failed;
-    };
-    if !accepted {
-        return ConfigDialog::Cancelled;
-    }
-
-    match inputs.collect() {
-        Ok(config) => ConfigDialog::Accepted(config),
-        Err(_) => ConfigDialog::Failed,
     }
 }
 
