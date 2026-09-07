@@ -419,6 +419,8 @@ version = "2.0.0"
 dependencies = [
  "apng_encoder",
  "aviutl2",
+ "aviutl2_host",
+ "png",
  "win32-ui",
  "windows",
 ]

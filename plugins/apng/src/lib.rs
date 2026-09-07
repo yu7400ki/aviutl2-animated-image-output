@@ -1,5 +1,7 @@
 mod config;
 mod dialog;
+#[cfg(test)]
+mod encode_tests;
 
 use apng_encoder::{ColorType, Config as EncoderConfig, Encoder};
 use aviutl2::{
@@ -111,20 +113,9 @@ register_logger!();
 mod tests {
     use super::*;
     use apng_encoder::{Error as EncoderError, FrameDelay};
+    use aviutl2_host::temp_path;
     use std::fs::File;
     use std::num::NonZeroUsize;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    /// まだ存在しない一時ファイルの場所
-    fn temp_path() -> PathBuf {
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        std::env::temp_dir().join(format!(
-            "png-output-{}-{}.png",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ))
-    }
 
     /// 指定したバイト数までしか書き出せないファイル
     ///
@@ -167,7 +158,7 @@ mod tests {
         // シグネチャ(8) + IHDR(25) + acTL(20) + fcTL(38)
         const BUDGET: usize = 8 + 25 + 20 + 38;
 
-        let path = temp_path();
+        let path = temp_path("png");
         let delay = FrameDelay::new(1, 30).unwrap();
         let frame = vec![0u8; 8 * 8 * 4];
 

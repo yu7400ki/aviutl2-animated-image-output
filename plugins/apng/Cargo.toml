@@ -15,3 +15,7 @@ windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[dev-dependencies]
+aviutl2_host = { path = "../../libs/aviutl2-host" }
+png = "0.18"

@@ -6,6 +6,7 @@
 use aviutl2::{OutputInfo, OutputPlugin, sys};
 use std::ffi::c_void;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::thread::ThreadId;
 use widestring::U16CString;
@@ -183,6 +184,19 @@ impl Host {
     pub fn threads(&self) -> Vec<ThreadId> {
         state().threads.clone()
     }
+}
+
+/// まだ存在しない、拡張子が `extension` の一時ファイルの場所
+///
+/// 同じプロセスの中で呼ぶたびに違う場所を返す。
+pub fn temp_path(extension: &str) -> PathBuf {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    std::env::temp_dir().join(format!(
+        "aviutl2-{}-{}.{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed),
+        extension
+    ))
 }
 
 /// 直前に返したフレームの中身
