@@ -2,9 +2,8 @@
 
 use crate::delta::{Delta, Pending, Region};
 use crate::error::{EncodingError, Error};
-use crate::layout::Layout;
 use crate::{Config, EFFORT_RANGE, QUALITY_RANGE};
-use anim_core::{ColorType, InputError, gcd};
+use anim_core::{ColorType, InputError, Layout, gcd};
 use jxl_sys::{
     JXL_ENC_ERR_OOM, JXL_ENC_ERROR, JXL_ENC_FRAME_SETTING_EFFORT, JXL_ENC_NEED_MORE_OUTPUT,
     JXL_ENC_SUCCESS, JXL_FALSE, JXL_NATIVE_ENDIAN, JXL_TRUE, JXL_TYPE_UINT8, JxlBasicInfo,

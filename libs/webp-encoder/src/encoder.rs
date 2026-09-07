@@ -4,11 +4,10 @@ use crate::codec::{Codec, EncodedFrame, Job};
 use crate::delay::{Durations, MAX_DURATION, milliseconds};
 use crate::error::Error;
 use crate::frame::Canvas;
-use crate::layout::Layout;
 use crate::pipeline::Pipeline;
 use crate::riff::{Frame, Riff};
 use crate::{Config, Report};
-use anim_core::{Accumulator, ColorType, FrameDelay, InputError, Rect};
+use anim_core::{Accumulator, ColorType, FrameDelay, InputError, Layout, Rect};
 use std::collections::VecDeque;
 use std::io::{Seek, Write};
 use std::num::NonZeroUsize;
@@ -16,6 +15,21 @@ use std::thread::available_parallelism;
 
 /// キャンバスを書き換えないフレームが載せる画素 (RGBA)
 const FILLER_PIXEL: [u8; 4] = [0, 0, 0, 0];
+
+/// キャンバスが取りうる幅・高さの上限
+const MAX_DIMENSION: u32 = webp_sys::WEBP_MAX_DIMENSION as u32;
+
+/// `width` x `height` の `color_type` を並べる配置を作る
+///
+/// # Errors
+/// 寸法が0か16383を超えるとき [`InputError::InvalidDimensions`]。
+fn canvas(width: u32, height: u32, color_type: ColorType) -> Result<Layout, InputError> {
+    if width > MAX_DIMENSION || height > MAX_DIMENSION {
+        return Err(InputError::InvalidDimensions { width, height });
+    }
+
+    Layout::new(width, height, color_type)
+}
 
 /// 書き出しを待っているフレーム
 struct Pending {
@@ -161,7 +175,7 @@ fn filler<'a>(
     codec: &Codec,
 ) -> Result<&'a EncodedFrame, Error> {
     if slot.is_none() {
-        let layout = Layout::new(1, 1, ColorType::Rgba8)?;
+        let layout = canvas(1, 1, ColorType::Rgba8)?;
         let job = Job::crop(&FILLER_PIXEL, &layout, layout.whole(), None, Vec::new());
         *slot = Some(codec.encode(&job)?);
     }
@@ -249,7 +263,7 @@ impl<W: Write + Seek> Encoder<W> {
         if num_frames == 0 {
             return Err(InputError::InvalidFrameCount.into());
         }
-        let layout = Layout::new(width, height, config.color_type)?;
+        let layout = canvas(width, height, config.color_type)?;
         let codec = Codec::new(&config)?;
 
         let sink = if num_frames == 1 {
@@ -450,6 +464,27 @@ mod tests {
     use super::*;
     use anim_core::has_transparency;
     use std::io::Cursor;
+
+    #[test]
+    fn zero_and_oversized_dimensions_are_rejected() {
+        for (width, height) in [(0, 1), (1, 0), (16384, 1), (1, 16384), (70000, 70000)] {
+            assert!(
+                matches!(
+                    canvas(width, height, ColorType::Rgb8),
+                    Err(InputError::InvalidDimensions { .. })
+                ),
+                "{width}x{height}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_largest_canvas_is_accepted() {
+        let layout = canvas(16383, 16383, ColorType::Rgba8).unwrap();
+        assert_eq!((layout.width, layout.height), (16383, 16383));
+        assert_eq!(layout.stride, 16383 * 4);
+        assert_eq!(layout.frame_len, 16383 * 16383 * 4);
+    }
 
     /// 動く四角の一辺の長さ
     const SQUARE: u32 = 8;

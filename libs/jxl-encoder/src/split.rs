@@ -1,7 +1,6 @@
 //! 書き直す画素を覆う矩形を、書かずに済む画素が固定費を上回るときに割る
 
-use crate::layout::Layout;
-use anim_core::{ColorType, Profile, Rect, Span, unchanged_run};
+use anim_core::{ColorType, Layout, Profile, Rect, Span, unchanged_run};
 
 /// 矩形を割るのに要る、書かずに済む画素数の下限
 ///

@@ -2,9 +2,8 @@
 
 use crate::Config;
 use crate::error::{EncodingError, Error};
-use crate::layout::Layout;
 use crate::picture::Picture;
-use anim_core::{ColorType, Rect, crop, has_transparency};
+use anim_core::{ColorType, Layout, Rect, crop, has_transparency};
 use std::ffi::c_int;
 use std::mem::MaybeUninit;
 use std::ops::Range;

@@ -7,7 +7,6 @@ extern crate self as jxl_encoder;
 mod delta;
 mod encoder;
 mod error;
-mod layout;
 mod split;
 #[cfg(test)]
 mod tests;

@@ -1,33 +1,34 @@
 //! キャンバスの大きさと、入力フレームのバイト並び
 
-use crate::error::Error;
-use anim_core::{ColorType, InputError, Rect};
+use crate::color::ColorType;
+use crate::diff::Rect;
+use crate::error::InputError;
 
 /// キャンバスの大きさと、入力フレームのバイト並び
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Layout {
-    pub(crate) width: u32,
-    pub(crate) height: u32,
+pub struct Layout {
+    pub width: u32,
+    pub height: u32,
     /// 入力の色種別
-    pub(crate) color_type: ColorType,
+    pub color_type: ColorType,
     /// 入力の1画素あたりのバイト数
-    pub(crate) bytes_per_pixel: usize,
+    pub bytes_per_pixel: usize,
     /// 入力の1行のバイト数
-    pub(crate) stride: usize,
+    pub stride: usize,
     /// 入力の1フレームのバイト数
-    pub(crate) frame_len: usize,
+    pub frame_len: usize,
 }
 
 impl Layout {
     /// `width` x `height` の `color_type` を隙間なく並べる配置を作る
     ///
-    /// 寸法の上限はlibjxlの検査に委ねる。
+    /// 寸法の上限は画像フォーマットごとに違うため、呼び出し側が締める。
     ///
     /// # Errors
-    /// 寸法が0のとき [`Error::Input`]。
-    pub(crate) fn new(width: u32, height: u32, color_type: ColorType) -> Result<Self, Error> {
+    /// 寸法が0のとき [`InputError::InvalidDimensions`]。
+    pub fn new(width: u32, height: u32, color_type: ColorType) -> Result<Self, InputError> {
         if width == 0 || height == 0 {
-            return Err(InputError::InvalidDimensions { width, height }.into());
+            return Err(InputError::InvalidDimensions { width, height });
         }
 
         let bytes_per_pixel = color_type.bytes_per_pixel();
@@ -43,7 +44,7 @@ impl Layout {
     }
 
     /// キャンバス全体を覆う矩形
-    pub(crate) fn canvas(&self) -> Rect {
+    pub fn whole(&self) -> Rect {
         Rect {
             x: 0,
             y: 0,
@@ -55,16 +56,15 @@ impl Layout {
     /// `data` が1フレームぶんの長さか検める
     ///
     /// # Errors
-    /// 長さが違うとき [`Error::Input`]。
-    pub(crate) fn check_frame(&self, data: &[u8]) -> Result<(), Error> {
+    /// 長さが違うとき [`InputError::FrameSizeMismatch`]。
+    pub fn check_frame(&self, data: &[u8]) -> Result<(), InputError> {
         if data.len() == self.frame_len {
             Ok(())
         } else {
             Err(InputError::FrameSizeMismatch {
                 expected: self.frame_len,
                 actual: data.len(),
-            }
-            .into())
+            })
         }
     }
 }
@@ -79,7 +79,7 @@ mod tests {
             assert!(
                 matches!(
                     Layout::new(width, height, ColorType::Rgb8),
-                    Err(Error::Input(InputError::InvalidDimensions { .. }))
+                    Err(InputError::InvalidDimensions { .. })
                 ),
                 "{width}x{height}"
             );
@@ -94,6 +94,20 @@ mod tests {
         assert_eq!(layout.frame_len, 40_000_000_000);
     }
 
+    #[test]
+    fn the_whole_rect_covers_the_canvas() {
+        let layout = Layout::new(7, 5, ColorType::Rgb8).unwrap();
+        assert_eq!(
+            layout.whole(),
+            Rect {
+                x: 0,
+                y: 0,
+                width: 7,
+                height: 5
+            }
+        );
+    }
+
     /// 長さは過不足のどちらでも弾く
     ///
     /// 長すぎる入力を通すと、はみ出したぶんが黙って捨てられる。
@@ -103,17 +117,17 @@ mod tests {
         assert!(layout.check_frame(&[0; 4 * 3 * 4]).is_ok());
         assert!(matches!(
             layout.check_frame(&[0; 4 * 3 * 3]),
-            Err(Error::Input(InputError::FrameSizeMismatch {
+            Err(InputError::FrameSizeMismatch {
                 expected: 48,
                 actual: 36
-            }))
+            })
         ));
         assert!(matches!(
             layout.check_frame(&[0; 4 * 3 * 4 + 1]),
-            Err(Error::Input(InputError::FrameSizeMismatch {
+            Err(InputError::FrameSizeMismatch {
                 expected: 48,
                 actual: 49
-            }))
+            })
         ));
     }
 }

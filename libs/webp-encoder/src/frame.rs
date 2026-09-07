@@ -1,9 +1,8 @@
 //! キャンバスの追跡と、フレームの載せ方の決定
 
 use crate::Config;
-use crate::layout::Layout;
 use crate::normalize::normalize;
-use anim_core::{ColorType, Rect, Rewrite, dirty_rect};
+use anim_core::{ColorType, Layout, Rect, Rewrite, dirty_rect};
 
 /// キャンバスの1画素のバイト数
 const PIXEL: usize = 4;

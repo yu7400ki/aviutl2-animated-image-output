@@ -1,9 +1,8 @@
 //! 書き出しを待っているフレームと、比べる相手から決まる差分矩形
 
 use crate::Config;
-use crate::layout::Layout;
 use crate::split::{THRESHOLD, cut, exact_profile};
-use anim_core::{Rect, Rewrite, crop, dirty_rect};
+use anim_core::{Layout, Rect, Rewrite, crop, dirty_rect};
 
 /// 差分が空のまま書き出すときの矩形
 const UNCHANGED: Rect = Rect {
@@ -64,7 +63,7 @@ impl Region {
     /// 書き直す矩形
     pub(crate) fn rect(self, layout: &Layout) -> Rect {
         match self {
-            Region::Whole => layout.canvas(),
+            Region::Whole => layout.whole(),
             Region::Part { rect, .. } => rect,
         }
     }
@@ -98,7 +97,7 @@ impl Shape {
         rect: Rect,
         profile: impl FnOnce() -> anim_core::Profile,
     ) -> Self {
-        if rect == layout.canvas() {
+        if rect == layout.whole() {
             Shape::Whole
         } else if let Some((head, tail)) = cut(rect, THRESHOLD, profile) {
             Shape::Two(base, head, tail)
@@ -110,7 +109,7 @@ impl Shape {
     /// 書き直す矩形を書き出す順に返す
     fn rects(self, layout: &Layout) -> impl Iterator<Item = Rect> {
         let (head, tail) = match self {
-            Shape::Whole => (None, layout.canvas()),
+            Shape::Whole => (None, layout.whole()),
             Shape::One(_, rect) => (None, rect),
             Shape::Two(_, head, tail) => (Some(head), tail),
         };
