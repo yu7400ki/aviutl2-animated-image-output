@@ -1,5 +1,7 @@
 mod config;
 mod dialog;
+#[cfg(test)]
+mod encode_tests;
 
 use aviutl2::{
     ConfigDialog, FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo,
@@ -153,9 +155,8 @@ register_logger!();
 mod tests {
     use super::*;
     use aviutl2::MAX_REPEAT;
+    use aviutl2_host::temp_path;
     use std::num::NonZeroUsize;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use webp_encoder::FrameDelay;
 
     /// テストで使うフレーム数
@@ -164,16 +165,6 @@ mod tests {
     /// 書き出しを通すフレームの大きさ
     const FRAME_WIDTH: u32 = 32;
     const FRAME_HEIGHT: u32 = 16;
-
-    /// まだ存在しない一時ファイルの場所
-    fn temp_path() -> PathBuf {
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        std::env::temp_dir().join(format!(
-            "webp-output-{}-{}.webp",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ))
-    }
 
     /// 画素ごとに値の違う不透明なRGBA
     fn frame_of(seed: u32) -> Vec<u8> {
@@ -217,7 +208,7 @@ mod tests {
     /// ファイルでも効くことをここで確かめる。
     #[test]
     fn a_written_file_carries_the_riff_size() {
-        let path = temp_path();
+        let path = temp_path("webp");
 
         write_animation(&path, 4, 4).unwrap();
 
@@ -233,7 +224,7 @@ mod tests {
     /// 失敗した書き出しは、書きかけのファイルを残さない
     #[test]
     fn a_failed_write_leaves_no_file() {
-        let path = temp_path();
+        let path = temp_path("webp");
 
         write_animation(&path, 4, 3).expect_err("宣言より少ないので閉じられない");
 
@@ -310,7 +301,7 @@ mod tests {
 
         for threads in [2, 3, 7] {
             let threads = NonZeroUsize::new(threads).unwrap();
-            let path = temp_path();
+            let path = temp_path("webp");
             let config = Config {
                 color_format: ColorFormat::Rgba32,
                 threads,
