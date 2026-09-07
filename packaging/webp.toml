@@ -1,6 +1,6 @@
 [release]
 package_id = "aviutl2-animated-image-output-webp"
-package_name = "AviUtl2 アニメーション画像出力 (WebP)"
+package_name = "AviUtl2 アニメーション画像出力（WebP）"
 package_information = "AviUtl2 アニメーション画像出力 WebP v{version}"
 zip_name = "{id}-webp-v{version}"
 include = ["webp_output", "third_party_licences"]

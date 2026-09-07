@@ -72,11 +72,17 @@ const pluginSettings: Record<
       },
       {
         name: "品質",
-        description: "品質設定（0-100）",
+        description:
+          "画質（0-100、既定 75）。ロスレス圧縮が ON のときも有効で、画素は変わらないまま値を上げるほど時間がかかる",
       },
       {
         name: "メソッド",
-        description: "品質と速度のトレードオフ（0-6、値が小さいほど高速）",
+        description:
+          "圧縮率と速度のトレードオフ（0-6、既定 4、値が小さいほど高速）。ロスレス圧縮が ON のときも有効で、最大値では数十倍の時間がかかる",
+      },
+      {
+        name: "スレッド数",
+        description: "並列にエンコードする数（1 から論理 CPU 数まで、既定は論理 CPU 数の半分）",
       },
     ],
   },
@@ -104,10 +110,14 @@ const pluginSettings: Record<
         name: "YUVフォーマット",
         description: "色空間設定（YUV420 / YUV422 / YUV444）",
       },
+      {
+        name: "スレッド数",
+        description: "並列にエンコードする数（1 から論理 CPU 数まで、既定は論理 CPU 数の半分）",
+      },
     ],
   },
   jxl: {
-    title: "JPEG XL 出力設定",
+    title: "JXL 出力設定",
     color: "rose",
     items: [
       {

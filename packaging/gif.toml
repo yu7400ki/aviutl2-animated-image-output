@@ -1,6 +1,6 @@
 [release]
 package_id = "aviutl2-animated-image-output-gif"
-package_name = "AviUtl2 アニメーション画像出力 (GIF)"
+package_name = "AviUtl2 アニメーション画像出力（GIF）"
 package_information = "AviUtl2 アニメーション画像出力 GIF v{version}"
 zip_name = "{id}-gif-v{version}"
 include = ["gif_output", "third_party_licences"]

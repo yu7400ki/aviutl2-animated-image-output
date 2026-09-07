@@ -1,6 +1,6 @@
 [release]
 package_id = "aviutl2-animated-image-output-avif"
-package_name = "AviUtl2 アニメーション画像出力 (AVIF)"
+package_name = "AviUtl2 アニメーション画像出力（AVIF）"
 package_information = "AviUtl2 アニメーション画像出力 AVIF v{version}"
 zip_name = "{id}-avif-v{version}"
 include = ["avif_output", "third_party_licences"]

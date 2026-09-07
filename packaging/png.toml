@@ -1,6 +1,6 @@
 [release]
 package_id = "aviutl2-animated-image-output-png"
-package_name = "AviUtl2 アニメーション画像出力 (APNG)"
+package_name = "AviUtl2 アニメーション画像出力（APNG）"
 package_information = "AviUtl2 アニメーション画像出力 APNG v{version}"
 zip_name = "{id}-png-v{version}"
 include = ["png_output", "third_party_licences"]

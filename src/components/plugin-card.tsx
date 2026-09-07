@@ -18,7 +18,7 @@ const pluginInfo: Record<
   }
 > = {
   png: {
-    title: "PNG (APNG)",
+    title: "PNG（APNG）",
     description: "高品質、可逆圧縮",
     features: ["高品質なアニメーション画像", "可逆圧縮", "透明度対応"],
     color: "bg-green-100 border-green-300",
@@ -51,7 +51,7 @@ const pluginInfo: Record<
     textColor: "text-orange-800",
   },
   jxl: {
-    title: "JPEG XL",
+    title: "JXL",
     description: "高圧縮率、可逆・非可逆両対応、半透明が残る",
     features: [
       "高圧縮率",

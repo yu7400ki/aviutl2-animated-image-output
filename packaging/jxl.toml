@@ -1,7 +1,7 @@
 [release]
 package_id = "aviutl2-animated-image-output-jxl"
-package_name = "AviUtl2 アニメーション画像出力 (JPEG XL)"
-package_information = "AviUtl2 アニメーション画像出力 JPEG XL v{version}"
+package_name = "AviUtl2 アニメーション画像出力（JXL）"
+package_information = "AviUtl2 アニメーション画像出力 JXL v{version}"
 zip_name = "{id}-jxl-v{version}"
 include = ["jxl_output", "third_party_licences"]
 

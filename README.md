@@ -4,15 +4,15 @@ AviUtl ExEdit2 で動画をアニメーション画像として出力できる�
 
 ## 対応フォーマット
 
-- **PNG** (APNG)
+- **PNG**（APNG）
 - **GIF**
 - **WebP**
 - **AVIF**
-- **JPEG XL**
+- **JXL**
 
 ## 動作環境
 
-- AviUtl ExEdit2 beta43a (2026/4/26) 以降
+- AviUtl ExEdit2 beta43a（2026/4/26）以降
 
 ## インストール
 
@@ -26,12 +26,12 @@ AviUtl ExEdit2 で動画をアニメーション画像として出力できる�
 
 | ファイル名 | 中身 |
 | --- | --- |
-| `aviutl2-animated-image-output-v{version}.au2pkg.zip` | 全部入り（PNG / GIF / WebP / AVIF / JPEG XL の 5 プラグイン） |
+| `aviutl2-animated-image-output-v{version}.au2pkg.zip` | 全部入り（PNG / GIF / WebP / AVIF / JXL の 5 プラグイン） |
 | `aviutl2-animated-image-output-png-v{version}.au2pkg.zip` | PNG（APNG）出力プラグイン |
 | `aviutl2-animated-image-output-gif-v{version}.au2pkg.zip` | GIF 出力プラグイン |
 | `aviutl2-animated-image-output-webp-v{version}.au2pkg.zip` | WebP 出力プラグイン |
 | `aviutl2-animated-image-output-avif-v{version}.au2pkg.zip` | AVIF 出力プラグイン |
-| `aviutl2-animated-image-output-jxl-v{version}.au2pkg.zip` | JPEG XL 出力プラグイン |
+| `aviutl2-animated-image-output-jxl-v{version}.au2pkg.zip` | JXL 出力プラグイン |
 
 ## 使い方
 
@@ -43,7 +43,7 @@ AviUtl ExEdit2 で動画をアニメーション画像として出力できる�
 
 ## 各フォーマットの特徴
 
-### PNG (APNG)
+### PNG（APNG）
 
 - **特徴**: 高品質、可逆圧縮、半透明が残る、大きなファイルサイズ
 - **用途**: 高品質なアニメーション画像
@@ -63,7 +63,7 @@ AviUtl ExEdit2 で動画をアニメーション画像として出力できる�
 - **特徴**: 最高の圧縮率、最新フォーマット、半透明が残る
 - **用途**: 最小ファイルサイズ、最新環境
 
-### JPEG XL
+### JXL
 
 - **特徴**: 高圧縮率、可逆・非可逆両対応、半透明が残る（品質 100 なら入力と同じ画素で出力）
 - **用途**: 画質を保ったまま配布したい場合
@@ -107,7 +107,7 @@ AviUtl ExEdit2 で動画をアニメーション画像として出力できる�
 - **YUV フォーマット**: 色空間設定（YUV420 / YUV422 / YUV444）
 - **スレッド数**: 並列にエンコードする数（1 から論理 CPU 数まで、既定は論理 CPU 数の半分）
 
-### JPEG XL 出力設定
+### JXL 出力設定
 
 - **ループ回数**: アニメーションの繰り返し回数（0 = 無限ループ）
 - **カラーフォーマット**: 透過無し / 透過付き
