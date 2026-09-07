@@ -97,8 +97,8 @@ struct Raw {
 
 impl Raw {
     /// `max_threads` の作業スレッドを持つ符号化器を作る
-    fn new(max_threads: u32) -> Result<Self, Error> {
-        let runner = unsafe { JxlThreadParallelRunnerCreate(ptr::null(), max_threads as usize) };
+    fn new(max_threads: usize) -> Result<Self, Error> {
+        let runner = unsafe { JxlThreadParallelRunnerCreate(ptr::null(), max_threads) };
         if runner.is_null() {
             return Err(allocation_failed());
         }

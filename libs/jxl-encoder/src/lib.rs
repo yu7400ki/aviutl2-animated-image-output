@@ -49,5 +49,5 @@ pub struct Config {
     /// 1秒あたりのtick数の分母
     pub tps_denominator: u32,
     /// 符号化に使うスレッド数
-    pub max_threads: u32,
+    pub max_threads: usize,
 }

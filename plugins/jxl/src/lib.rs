@@ -50,7 +50,7 @@ fn encoder_config(config: &Config, sequence: Sequence) -> EncoderConfig {
         num_plays: config.repeat,
         tps_numerator: sequence.tps_numerator,
         tps_denominator: sequence.tps_denominator,
-        max_threads: u32::try_from(config.threads).unwrap_or(u32::MAX),
+        max_threads: config.threads,
     }
 }
 
@@ -285,20 +285,6 @@ mod tests {
         assert_eq!(top_quality.effort, 9);
         assert_eq!(top_quality.num_plays, 0);
         assert_eq!(top_quality.max_threads, 1);
-    }
-
-    /// スレッド数は符号化器の欄幅まで飽和して渡る
-    #[test]
-    fn threads_are_passed_through_up_to_the_field_width() {
-        let sequence = Sequence::new(24, 1, 30);
-        let config = encoder_config(
-            &Config {
-                threads: usize::MAX,
-                ..Config::default()
-            },
-            sequence,
-        );
-        assert_eq!(config.max_threads, u32::MAX);
     }
 
     /// 段を1つ進める。入力を使い切らずに止まったら書き出しが不完全
