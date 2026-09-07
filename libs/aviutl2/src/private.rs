@@ -19,9 +19,10 @@ pub const TRUE: BOOL = BOOL(1);
 
 /// `T::info()` を初回だけ評価して持ち続ける
 ///
-/// テーブルの構築とシムの両方が引く。マクロ契約(1つのcdylibに1プラグイン)により
-/// `T` はどの呼び出しでも同じ。
+/// テーブルの構築とシムの両方が引く。
 fn info<T: OutputPlugin>() -> &'static PluginInfo {
+    // ジェネリック関数内のstaticは全単相化で共有され、ここは最初に呼ばれた `T` の
+    // 情報を抱え続ける。マクロ契約(1つのcdylibに1プラグイン)により実質1つ。
     static INFO: OnceLock<PluginInfo> = OnceLock::new();
     INFO.get_or_init(T::info)
 }
