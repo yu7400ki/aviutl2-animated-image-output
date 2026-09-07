@@ -1,14 +1,14 @@
 //! 全体の駆動
 
 use crate::codec::{Codec, EncodedFrame, Job};
-use crate::delay::{Durations, MAX_DURATION, Milliseconds};
+use crate::delay::{Durations, MAX_DURATION, milliseconds};
 use crate::error::Error;
 use crate::frame::Canvas;
 use crate::layout::Layout;
 use crate::pipeline::Pipeline;
 use crate::riff::{Frame, Riff};
 use crate::{Config, Report};
-use anim_core::{ColorType, FrameDelay, Rect};
+use anim_core::{Accumulator, ColorType, FrameDelay, Rect};
 use std::collections::VecDeque;
 use std::io::{Seek, Write};
 use std::num::NonZeroUsize;
@@ -39,7 +39,7 @@ struct Pending {
 struct Animation<W: Write + Seek> {
     riff: Riff<W>,
     /// ミリ秒への累積の丸め
-    milliseconds: Milliseconds,
+    milliseconds: Accumulator,
     /// 書き出しを待っているフレーム。投入した順に並ぶ
     pending: VecDeque<Pending>,
     /// 表示時間を下限で切り上げたか
@@ -258,7 +258,7 @@ impl<W: Write + Seek> Encoder<W> {
         } else {
             Sink::Animation(Box::new(Animation {
                 riff: Riff::new(writer, layout.width, layout.height, config.num_plays)?,
-                milliseconds: Milliseconds::new(),
+                milliseconds: milliseconds(),
                 pending: VecDeque::new(),
                 delay_clamped: false,
                 frames_have_alpha: false,

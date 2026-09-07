@@ -11,8 +11,7 @@ const MAX: u64 = u16::MAX as u64;
 /// 分子が0でない限り近似後の分子も0にはならない。
 pub fn delay_parts(delay: FrameDelay) -> (u16, u16) {
     let (numerator, denominator) = (delay.numerator() as u64, delay.denominator() as u64);
-    // 分子・分母がともに0なら最大公約数も0になるので、除数を1で下支えする
-    let g = gcd(numerator, denominator).max(1) as u64;
+    let g = gcd(numerator, denominator) as u64;
     let (num, den) = (numerator / g, denominator / g);
 
     if num <= MAX && den <= MAX {

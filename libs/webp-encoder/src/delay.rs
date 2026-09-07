@@ -1,6 +1,6 @@
 //! 遅延時間のミリ秒への変換
 
-use anim_core::{Accumulator, FrameDelay};
+use anim_core::Accumulator;
 
 /// 表示時間の下限 (ms)
 const MIN_DURATION: u32 = 1;
@@ -8,18 +8,9 @@ const MIN_DURATION: u32 = 1;
 /// ANMFの表示時間の欄に収まる上限 (ms)
 pub(crate) const MAX_DURATION: u32 = 0x00FF_FFFF;
 
-/// フレーム遅延をミリ秒へ累積で丸める
-pub(crate) struct Milliseconds(Accumulator);
-
-impl Milliseconds {
-    pub(crate) fn new() -> Self {
-        Milliseconds(Accumulator::new(1000))
-    }
-
-    /// 次のフレームの遅延をミリ秒へ変換する
-    pub(crate) fn next(&mut self, delay: FrameDelay) -> u64 {
-        self.0.next(delay)
-    }
+/// フレーム遅延をミリ秒へ累積で丸める変換器
+pub(crate) fn milliseconds() -> Accumulator {
+    Accumulator::new(1000)
 }
 
 /// 表示時間をANMFの欄に収まる列へ分ける
@@ -60,10 +51,11 @@ impl Iterator for Durations {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anim_core::FrameDelay;
 
     /// 1フレームだけを変換する
     fn once(numerator: u32, denominator: u32) -> u64 {
-        Milliseconds::new().next(FrameDelay::new(numerator, denominator).unwrap())
+        milliseconds().next(FrameDelay::new(numerator, denominator).unwrap())
     }
 
     #[test]
@@ -136,7 +128,7 @@ mod tests {
     /// 下限までの切り上げは累積の外で起き、残差へ戻らない
     #[test]
     fn the_raise_to_the_lower_bound_is_not_fed_back() {
-        let mut milliseconds = Milliseconds::new();
+        let mut milliseconds = milliseconds();
         let increments = [(1, 10000), (1, 10), (1, 10)].map(|(numerator, denominator)| {
             milliseconds.next(FrameDelay::new(numerator, denominator).unwrap())
         });
