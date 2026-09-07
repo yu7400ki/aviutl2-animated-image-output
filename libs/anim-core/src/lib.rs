@@ -16,7 +16,7 @@ pub use alpha::has_transparency;
 pub use color::ColorType;
 pub use delay::FrameDelay;
 pub use diff::{Rect, dirty_rect, unchanged_run};
-pub use error::Error;
+pub use error::{Error, InputError};
 pub use pacing::Pacing;
 pub use palette::{Colors, MAX_COLORS};
 pub use region::crop;
