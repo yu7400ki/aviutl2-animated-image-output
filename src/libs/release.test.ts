@@ -1,6 +1,6 @@
-/// <reference types="bun" />
-import { describe, expect, test } from "bun:test";
-import { type ReleaseData, selectRelease } from "./release";
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
+import { type ReleaseData, selectRelease } from "./release.ts";
 
 const BASE_ID = "aviutl2-animated-image-output";
 
@@ -43,7 +43,7 @@ describe("selectRelease", () => {
       release("v2.0.0", "2026-09-01T00:00:00Z", packageNames("2.0.0")),
     ]);
 
-    expect(selected).toEqual({
+    assert.deepEqual(selected, {
       version: "2.0.0",
       date: "2026-09-01T00:00:00.000Z",
       bundle: `https://example.test/${BASE_ID}-v2.0.0.au2pkg.zip`,
@@ -62,9 +62,10 @@ describe("selectRelease", () => {
       (name) => !name.includes("-jxl-"),
     );
 
-    expect(
+    assert.equal(
       selectRelease([release("v2.0.0", "2026-09-01T00:00:00Z", names)]),
-    ).toBeUndefined();
+      undefined,
+    );
   });
 
   test("形式ごとのタグの方が新しくても版タグを採る", () => {
@@ -73,11 +74,11 @@ describe("selectRelease", () => {
       release("gif-v9.9.9", "2026-09-05T00:00:00Z", ["gif_output.auo2"]),
     ]);
 
-    expect(selected?.version).toBe("2.0.0");
+    assert.equal(selected?.version, "2.0.0");
   });
 
   test("draft と prerelease は除く", () => {
-    expect(
+    assert.equal(
       selectRelease([
         release("v2.0.0", "2026-09-01T00:00:00Z", packageNames("2.0.0"), {
           draft: true,
@@ -86,7 +87,8 @@ describe("selectRelease", () => {
           prerelease: true,
         }),
       ]),
-    ).toBeUndefined();
+      undefined,
+    );
   });
 
   test("公開が新しい方を採る", () => {
@@ -95,7 +97,7 @@ describe("selectRelease", () => {
       release("v2.1.0", "2026-09-05T00:00:00Z", packageNames("2.1.0")),
     ]);
 
-    expect(selected?.version).toBe("2.1.0");
+    assert.equal(selected?.version, "2.1.0");
   });
 
   test("新しい方が 6 本揃わなければ旧い版へ遡らない", () => {
@@ -106,6 +108,6 @@ describe("selectRelease", () => {
       ]),
     ]);
 
-    expect(selected).toBeUndefined();
+    assert.equal(selected, undefined);
   });
 });

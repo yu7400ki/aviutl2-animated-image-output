@@ -17,7 +17,7 @@
     }
   },
   "files": {
-    "includes": ["**", "!**/public", "!**/target"]
+    "includes": ["**", "!**/public", "!**/target", "!**/vendor"]
   },
   "linter": {
     "enabled": true,
@@ -92,6 +92,16 @@
           },
           "suspicious": {
             "noConsole": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/**/*.test.ts"],
+      "linter": {
+        "rules": {
+          "correctness": {
+            "noNodejsModules": "off"
           }
         }
       }
