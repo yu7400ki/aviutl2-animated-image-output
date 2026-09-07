@@ -15,6 +15,11 @@ const CHUNK_HEADER: usize = 8;
 /// ファイル先頭のRIFFヘッダ (FourCC、サイズ、`WEBP`) のバイト数
 const FILE_HEADER: usize = 12;
 
+/// キャンバスの1画素あたりのバイト数
+///
+/// 合成でキャンバスの値へ戻る画素を書けるのは、αの欄を持つRGBAのときだけ。
+const PIXEL: usize = 4;
+
 /// 1フレームの符号化結果
 ///
 /// 単葉の .webp と、その中でフレームを表すチャンクの位置を持つ。
@@ -106,7 +111,7 @@ impl Job {
                 ColorType::Rgba8,
                 "置き換えた画素を書けるのはαの欄があるときだけ"
             );
-            substitute(&mut pixels, base, rect, layout.stride);
+            substitute(&mut pixels, base, rect, layout.width as usize * PIXEL);
         }
 
         Job {
@@ -187,8 +192,6 @@ impl Codec {
 /// `stride` バイトの行が隙間なく並んだRGBA。置き換えた画素はblend有りの合成で
 /// `base` の値へ戻る。
 fn substitute(cropped: &mut [u8], base: &[u8], rect: Rect, stride: usize) {
-    const PIXEL: usize = 4;
-
     let row_len = rect.width as usize * PIXEL;
     let head = rect.y as usize * stride + rect.x as usize * PIXEL;
     for (y, row) in cropped.chunks_exact_mut(row_len).enumerate() {
