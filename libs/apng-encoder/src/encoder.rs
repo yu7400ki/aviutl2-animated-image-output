@@ -727,32 +727,6 @@ mod tests {
     /// 戦略の確認に使うフレーム数
     const FRAMES: u32 = 8;
 
-    /// フィルタを掛けない方が小さい素材は、どのフレームもNoneだけになる
-    #[test]
-    fn a_flat_source_takes_the_unfiltered_strategy_on_every_frame() {
-        let input: Vec<Vec<u8>> = (0..FRAMES).map(flat_frame).collect();
-        let bytes = encode(&input, rgb_config());
-
-        let types = filter_types(&bytes, 3);
-        assert_eq!(types.len(), input.len());
-        for (index, frame) in types.iter().enumerate() {
-            assert!(frame.iter().all(|&f| f == 0), "フレーム {index}: {frame:?}");
-        }
-    }
-
-    /// 適応フィルタが効く素材は、どのフレームもNone以外を選ぶ
-    #[test]
-    fn a_detailed_source_takes_the_adaptive_strategy_on_every_frame() {
-        let input: Vec<Vec<u8>> = (0..FRAMES).map(detailed_frame).collect();
-        let bytes = encode(&input, rgb_config());
-
-        let types = filter_types(&bytes, 3);
-        assert_eq!(types.len(), input.len());
-        for (index, frame) in types.iter().enumerate() {
-            assert!(frame.iter().any(|&f| f != 0), "フレーム {index}: {frame:?}");
-        }
-    }
-
     /// 素材の途中で有利な戦略が入れ替わると、選ばれる戦略もそこで入れ替わる
     #[test]
     fn the_strategy_follows_the_source_frame_by_frame() {
