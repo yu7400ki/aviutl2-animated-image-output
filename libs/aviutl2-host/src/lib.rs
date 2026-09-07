@@ -12,8 +12,7 @@ use widestring::U16CString;
 
 /// 偽ホストが返す素材と、そこへ書く台本
 ///
-/// 幅と高さ、フレームレートの分子と分母は既定でも互いに違う値なので、
-/// 取り違えたまま渡すと値に出る。
+/// 幅と高さ、フレームレートの分子と分母は、既定でも互いに違う値になる。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Script {
     width: u32,
@@ -239,7 +238,7 @@ fn state() -> MutexGuard<'static, State> {
 
 /// フレーム `frame` の画素 `(x, y)` の色
 ///
-/// 3成分が別々の軸に沿うので、軸を取り違えると値に出る。
+/// 3成分はそれぞれ x・y・フレーム番号だけで決まる。
 fn pixel(x: u32, y: u32, frame: i32) -> [u8; 3] {
     [(x * 7) as u8, (y * 11) as u8, frame as u8]
 }
