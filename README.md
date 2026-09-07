@@ -12,14 +12,26 @@ AviUtl ExEdit2 で動画をアニメーション画像として出力できる�
 
 ## 動作環境
 
-- AviUtl ExEdit2 beta3 以降
+- AviUtl ExEdit2 beta43a (2026/4/26) 以降
 
 ## インストール
 
-1. [Release](https://github.com/yu7400ki/aviutl2-animated-image-output/releases) から最新版のプラグインファイルをダウンロード
-2. ダウンロードした auo2 ファイルを `%ProgramData%\aviutl2\Plugin` フォルダにコピー
-   - 例: `C:\ProgramData\aviutl2\Plugin\apng_output.auo2`
+1. [Release](https://github.com/yu7400ki/aviutl2-animated-image-output/releases) から、全部入りか使いたい形式の zip をダウンロード
+2. ダウンロードした zip を AviUtl2 のプレビュー画面にドラッグ&ドロップ
 3. AviUtl2 を再起動
+
+インストールしたパッケージは、AviUtl2 のパッケージ情報からアンインストールできます。
+
+### 配布物
+
+| ファイル名 | 中身 |
+| --- | --- |
+| `aviutl2-animated-image-output-v{version}.au2pkg.zip` | 全部入り（PNG / GIF / WebP / AVIF / JPEG XL の 5 プラグイン） |
+| `aviutl2-animated-image-output-png-v{version}.au2pkg.zip` | PNG（APNG）出力プラグイン |
+| `aviutl2-animated-image-output-gif-v{version}.au2pkg.zip` | GIF 出力プラグイン |
+| `aviutl2-animated-image-output-webp-v{version}.au2pkg.zip` | WebP 出力プラグイン |
+| `aviutl2-animated-image-output-avif-v{version}.au2pkg.zip` | AVIF 出力プラグイン |
+| `aviutl2-animated-image-output-jxl-v{version}.au2pkg.zip` | JPEG XL 出力プラグイン |
 
 ## 使い方
 
@@ -112,3 +124,8 @@ AviUtl ExEdit2 で動画をアニメーション画像として出力できる�
 
 - **処理時間について**: 圧縮設定や動画サイズによっては処理時間が極端に長くなる場合があります
 - **ファイルサイズについて**: 動画に比べてファイルサイズが大きくなる傾向があります
+- **パッケージの混在について**: 全部入りと形式ごとのパッケージは同じプラグインファイルを置きます。両方を入れた状態で片方をアンインストールすると、もう片方が使うファイルも消えます。どちらか一方だけを入れてください
+
+## 第三者ライセンス
+
+各 zip のルートには、使用している第三者ライブラリのライセンスをまとめた `THIRD-PARTY-LICENCES.txt` が同梱されています。
