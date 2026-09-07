@@ -153,7 +153,7 @@ mod tests {
         let delay = FrameDelay::new(1, 30).unwrap();
         let frame = vec![0u8; 8 * 8 * 4];
 
-        let result = write_or_discard(&path, |file| {
+        let result: Result<(), String> = write_or_discard(&path, |file| {
             let probe = file.try_clone().map_err(|e| e.to_string())?;
 
             let mut encoder = Encoder::with_workers(

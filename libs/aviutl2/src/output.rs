@@ -400,9 +400,9 @@ pub trait OutputPlugin {
 ///
 /// `write` はファイルを持ったまま呼ばれ、戻るときに閉じる。開いたまま消すと
 /// 削除は最後のハンドルが閉じるまで効かないため、閉じてから消す。
-pub fn write_or_discard<F>(path: &Path, write: F) -> std::result::Result<(), String>
+pub fn write_or_discard<T, F>(path: &Path, write: F) -> std::result::Result<T, String>
 where
-    F: FnOnce(File) -> std::result::Result<(), String>,
+    F: FnOnce(File) -> std::result::Result<T, String>,
 {
     let file = File::create(path).map_err(|e| format!("ファイル作成エラー: {}", e))?;
 

@@ -32,7 +32,7 @@ fn a_completed_write_keeps_its_file() {
 #[test]
 fn a_failed_write_leaves_no_file() {
     let path = temp_path();
-    let result = write_or_discard(&path, |mut file| {
+    let result: Result<(), String> = write_or_discard(&path, |mut file| {
         file.write_all(b"partial").map_err(|e| e.to_string())?;
         Err("エンコード失敗".into())
     });
@@ -47,7 +47,7 @@ fn a_failed_write_leaves_no_file() {
 #[test]
 fn a_file_that_cannot_be_removed_is_reported_alongside_the_error() {
     let path = temp_path();
-    let result = write_or_discard(&path, |file| {
+    let result: Result<(), String> = write_or_discard(&path, |file| {
         drop(file);
         std::fs::remove_file(&path).map_err(|e| e.to_string())?;
         std::fs::create_dir(&path).map_err(|e| e.to_string())?;
