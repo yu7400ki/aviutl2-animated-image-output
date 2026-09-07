@@ -62,6 +62,9 @@ enum Source {
         /// 比べる相手の矩形の面積
         kept_area: u64,
     },
+    /// 圧縮の代わりに `message` を payload として巻き戻す
+    #[cfg(test)]
+    Panicking { message: &'static str },
 }
 
 /// ジョブ1つの結末
@@ -129,6 +132,8 @@ impl Jobs {
         let lane = match job.source {
             Source::Restored { .. } => &mut queue.ahead,
             Source::Ready { .. } | Source::Crop { .. } | Source::Diff { .. } => &mut queue.behind,
+            #[cfg(test)]
+            Source::Panicking { .. } => &mut queue.behind,
         };
         lane.push_back((index, job));
         drop(queue);
@@ -207,7 +212,8 @@ fn cut(
 /// ジョブ1つを片付け、結末と領域のバッファを返す
 ///
 /// フレームから埋めるジョブは走査と切り出しを済ませてから圧縮する。そこまでの
-/// 巻き戻しは結末として持ち帰るので、領域のバッファは巻き戻しても返る。
+/// 巻き戻しは結末として持ち帰るので、領域のバッファは巻き戻しても返る。持ち帰りが
+/// 効くのはテストのプロファイルだけで、リリースは `panic = "abort"` で落ちる。
 ///
 /// 返る時点でフレームを手放している。
 fn run(codec: &mut Codec, layout: &Layout, job: Job) -> (Outcome, Vec<u8>) {
@@ -244,6 +250,8 @@ fn run(codec: &mut Codec, layout: &Layout, job: Job) -> (Outcome, Vec<u8>) {
             let (rect, candidate) = cut(codec, layout, &mut region, &data, rect, body);
             Outcome::Restored(Restoration::Cut { rect, candidate })
         }
+        #[cfg(test)]
+        Source::Panicking { message } => panic::panic_any(message),
     };
     let outcome = match panic::catch_unwind(AssertUnwindSafe(compress)) {
         Ok(outcome) => outcome,
@@ -889,6 +897,89 @@ mod tests {
         );
         drop(pool);
         assert!(abandoned.load(Ordering::Relaxed), "畳んでも立っていない");
+    }
+
+    /// ワーカーは巻き戻したジョブの結末を持ち帰り、次のジョブへ進む
+    ///
+    /// 捨てる旗は倒したままなので、巻き戻しの経路が畳むときの経路と混ざらない。
+    #[test]
+    fn a_panicking_job_is_carried_back_and_the_worker_takes_the_next_one() {
+        const MESSAGE: &str = "圧縮の中で巻き戻す";
+
+        let (results, done) = channel();
+        let jobs = Jobs::default();
+        jobs.push(
+            0,
+            Job {
+                region: Vec::new(),
+                body: Vec::new(),
+                source: Source::Panicking { message: MESSAGE },
+            },
+        );
+        jobs.push(
+            1,
+            Job {
+                region: region(0),
+                body: Vec::new(),
+                source: Source::Ready {
+                    region_stride: STRIDE,
+                },
+            },
+        );
+        jobs.close();
+
+        work(
+            &mut Codec::new(LEVEL),
+            &layout(),
+            &jobs,
+            &results,
+            &AtomicBool::new(false),
+        );
+        drop(results);
+
+        let carried = done.recv().expect("巻き戻したジョブの結末");
+        assert_eq!(carried.index, 0, "巻き戻したジョブの番号");
+        let Outcome::Panicked(payload) = carried.outcome else {
+            panic!("巻き戻しを持ち帰っていない")
+        };
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&MESSAGE), "payload");
+
+        let next = done.recv().expect("次のジョブの結末");
+        assert_eq!(next.index, 1, "次のジョブの番号");
+        assert!(
+            matches!(next.outcome, Outcome::Compressed(_)),
+            "次のジョブを圧縮していない"
+        );
+    }
+
+    /// 持ち帰った巻き戻しは、受け取る側で同じ payload のまま投げ直される
+    ///
+    /// 投げ直した後もワーカーは回っていて、続くジョブは逐次と同じ本体を返す。
+    #[test]
+    fn a_panicked_job_is_thrown_again_at_the_taker() {
+        const MESSAGE: &str = "ワーカーの中で巻き戻す";
+
+        let mut parallel = pipeline(2);
+        let ticket: Ticket<Region> = parallel.submit(Job {
+            region: Vec::new(),
+            body: Vec::new(),
+            source: Source::Panicking { message: MESSAGE },
+        });
+        let thrown = panic::catch_unwind(AssertUnwindSafe(|| parallel.take(ticket)))
+            .err()
+            .expect("巻き戻しが届いていない");
+        assert_eq!(thrown.downcast_ref::<&str>(), Some(&MESSAGE), "payload");
+
+        let ticket = parallel.submit_region(region(1), STRIDE);
+        let body = parallel.take(ticket).into_body();
+
+        let mut sequential = pipeline(1);
+        let ticket = sequential.submit_region(region(1), STRIDE);
+        assert_eq!(
+            body,
+            sequential.take(ticket).into_body(),
+            "投げ直した後のジョブの本体"
+        );
     }
 
     /// 畳んだ後に取り出したジョブは、圧縮せずに捨てる

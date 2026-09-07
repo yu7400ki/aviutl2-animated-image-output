@@ -117,15 +117,21 @@ impl Drop for Pool {
     }
 }
 
-/// ジョブを1つずつ取り、符号化して結末を返す
+/// ジョブを1つずつ取り、`encode` に通して結末を返す
 ///
 /// 巻き戻しで抜けたワーカーは抱えていたジョブの結末を返さず、駆動はその番号を
 /// 待ち続ける。符号化の巻き戻しは結末として持ち帰り、列の毒も取り出しだけは
-/// 通して、この関数から巻き戻しの出口を無くす。
+/// 通して、この関数から巻き戻しの出口を無くす。持ち帰りが効くのはテストの
+/// プロファイルだけで、リリースは `panic = "abort"` で落ちる。
 ///
 /// `abandoned` が立った後に取り出したジョブは捨てて抜ける。立てるのは群れを
 /// 畳むときだけで、そこから先は結末を指す相手がいない。
-fn work(codec: &Codec, jobs: &Jobs, results: &Sender<Done>, abandoned: &AtomicBool) {
+fn work(
+    encode: impl Fn(&Job) -> Result<EncodedFrame, Error>,
+    jobs: &Jobs,
+    results: &Sender<Done>,
+    abandoned: &AtomicBool,
+) {
     loop {
         let Some((index, job)) = jobs.pop() else {
             return;
@@ -134,7 +140,7 @@ fn work(codec: &Codec, jobs: &Jobs, results: &Sender<Done>, abandoned: &AtomicBo
             return;
         }
 
-        let outcome = match panic::catch_unwind(AssertUnwindSafe(|| codec.encode(&job))) {
+        let outcome = match panic::catch_unwind(AssertUnwindSafe(|| encode(&job))) {
             Ok(Ok(encoded)) => Outcome::Encoded(encoded),
             Ok(Err(error)) => Outcome::Failed(error),
             Err(payload) => Outcome::Panicked(payload),
@@ -169,7 +175,7 @@ fn spawn(codec: Codec, workers: NonZeroUsize) -> Result<Pool, Error> {
         let abandoned = Arc::clone(&pool.abandoned);
         let worker = thread::Builder::new()
             .name(WORKER_NAME.to_owned())
-            .spawn(move || work(&codec, &jobs, &results, &abandoned))?;
+            .spawn(move || work(|job| codec.encode(job), &jobs, &results, &abandoned))?;
         pool.workers.push(worker);
     }
     Ok(pool)
@@ -322,6 +328,7 @@ impl Pipeline {
 mod tests {
     use super::*;
     use crate::Config;
+    use std::cell::Cell;
 
     fn config(color_type: ColorType) -> Config {
         Config {
@@ -413,6 +420,72 @@ mod tests {
         assert!(abandoned.load(Ordering::Relaxed), "畳んでも立っていない");
     }
 
+    /// ワーカーは巻き戻したジョブの結末を持ち帰り、次のジョブへ進む
+    ///
+    /// 捨てる旗は倒したままなので、巻き戻しの経路が畳むときの経路と混ざらない。
+    #[test]
+    fn a_panicking_job_is_carried_back_and_the_worker_takes_the_next_one() {
+        const MESSAGE: &str = "符号化の中で巻き戻す";
+
+        let codec = Codec::new(&config(ColorType::Rgba8)).unwrap();
+        let layout = Layout::new(16, 12, ColorType::Rgba8).unwrap();
+        let data = ramp(16, 12, 0);
+
+        let (results, done) = channel();
+        let jobs = Jobs::default();
+        for index in 0..2 {
+            jobs.push(
+                index,
+                Job::crop(&data, &layout, layout.whole(), None, Vec::new()),
+            );
+        }
+        jobs.close();
+
+        let first = Cell::new(true);
+        work(
+            |job| {
+                if first.replace(false) {
+                    panic::panic_any(MESSAGE);
+                }
+                codec.encode(job)
+            },
+            &jobs,
+            &results,
+            &AtomicBool::new(false),
+        );
+        drop(results);
+
+        let carried = done.recv().expect("巻き戻したジョブの結末");
+        assert_eq!(carried.index, 0, "巻き戻したジョブの番号");
+        let Outcome::Panicked(payload) = carried.outcome else {
+            panic!("巻き戻しを持ち帰っていない")
+        };
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&MESSAGE), "payload");
+
+        let next = done.recv().expect("次のジョブの結末");
+        assert_eq!(next.index, 1, "次のジョブの番号");
+        assert!(
+            matches!(next.outcome, Outcome::Encoded(_)),
+            "次のジョブを符号化していない"
+        );
+    }
+
+    /// 溜まった巻き戻しは、受け取る側で同じ payload のまま投げ直される
+    #[test]
+    fn a_panicked_outcome_is_thrown_again_at_the_taker() {
+        const MESSAGE: &str = "ワーカーの中で巻き戻す";
+
+        let mut pipeline = pipeline(ColorType::Rgba8, 1);
+        pipeline
+            .ready
+            .insert(0, Outcome::Panicked(Box::new(MESSAGE)));
+
+        let thrown = panic::catch_unwind(AssertUnwindSafe(|| pipeline.take(0)))
+            .err()
+            .expect("巻き戻しが届いていない");
+        assert_eq!(thrown.downcast_ref::<&str>(), Some(&MESSAGE), "payload");
+    }
+
     /// 畳んだ後に取り出したジョブは、符号化せずに捨てる
     ///
     /// 結末を返さないので、捨てたぶんの番号は誰にも指されない。
@@ -431,7 +504,12 @@ mod tests {
             );
             jobs.close();
 
-            work(&codec, &jobs, &results, &AtomicBool::new(abandoned));
+            work(
+                |job| codec.encode(job),
+                &jobs,
+                &results,
+                &AtomicBool::new(abandoned),
+            );
             drop(results);
 
             assert_eq!(done.try_recv().is_ok(), !abandoned, "捨てる={abandoned}");
