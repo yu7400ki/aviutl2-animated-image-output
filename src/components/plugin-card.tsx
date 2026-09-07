@@ -91,7 +91,10 @@ export function PluginCard({ plugin, url }: PluginCardProps) {
 
   return (
     <article
-      className={clsx("grid grid-rows-subgrid row-span-6 rounded-lg border-2 p-6", info.color)}
+      className={clsx(
+        "grid grid-rows-subgrid gap-y-0 row-span-6 rounded-lg border-2 p-6",
+        info.color,
+      )}
     >
       <h3 className={clsx("text-xl font-bold mb-2", info.textColor)}>{info.title}</h3>
       <p className={clsx("mb-4", info.textColor)}>{info.description}</p>
