@@ -22,13 +22,8 @@ pub fn max_threads() -> usize {
 /// 既定で使うスレッド数
 ///
 /// 上限の半分。上限が1の機械では1になる。
-pub fn default_threads() -> usize {
-    (max_threads() / 2).max(1)
-}
-
-/// スレッド数を1以上のワーカー数にする
-pub fn workers(threads: usize) -> NonZeroUsize {
-    NonZeroUsize::new(threads).unwrap_or(NonZeroUsize::MIN)
+pub fn default_threads() -> NonZeroUsize {
+    NonZeroUsize::new(max_threads() / 2).unwrap_or(NonZeroUsize::MIN)
 }
 
 /// セクションからキーを読み、`FromStr` で解釈する
@@ -65,6 +60,15 @@ where
         return default;
     };
     T::try_from(value.max(min).min(max)).unwrap_or(default)
+}
+
+/// セクションから `threads` を読み、1以上・`max_threads()` 以下に収める
+///
+/// セクションが無い・キーが無い・整数として解釈できない場合は `default` を返す。
+/// 値域の外の値は近い端へ収める。
+pub fn read_threads(section: Option<&Properties>, default: NonZeroUsize) -> NonZeroUsize {
+    let threads = read_clamped(section, "threads", 0..=max_threads(), default.get());
+    NonZeroUsize::new(threads).unwrap_or(NonZeroUsize::MIN)
 }
 
 /// セクションからキーを読み、`0` を偽・`1` を真として解釈する
@@ -146,18 +150,6 @@ mod tests {
             properties.insert(*key, *value);
         }
         properties
-    }
-
-    #[test]
-    fn a_zero_worker_count_becomes_one() {
-        assert_eq!(workers(0).get(), 1);
-    }
-
-    #[test]
-    fn threads_at_or_above_one_pass_through_unchanged() {
-        for threads in [1, 2, 7] {
-            assert_eq!(workers(threads).get(), threads);
-        }
     }
 
     #[test]
@@ -256,10 +248,9 @@ mod tests {
     /// 上限が1の機械では1つしか採れないので、そこだけ上限と一致する。
     #[test]
     fn default_threads_stay_inside_the_ceiling() {
-        let default = default_threads();
+        let default = default_threads().get();
         let ceiling = max_threads();
 
-        assert!(default >= 1, "{default}");
         assert!(default <= ceiling, "{default} / {ceiling}");
         if ceiling >= 2 {
             assert!(

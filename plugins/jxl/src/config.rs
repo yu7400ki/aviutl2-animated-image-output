@@ -1,7 +1,8 @@
 pub use aviutl2::ColorFormat;
 use aviutl2::ini::{Ini, Properties};
-use aviutl2::{IniConfig, MAX_REPEAT, default_threads, max_threads, read, read_clamped};
+use aviutl2::{IniConfig, MAX_REPEAT, default_threads, read, read_clamped, read_threads};
 use jxl_encoder::{EFFORT_RANGE, QUALITY_RANGE};
+use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
 
 /// iniが採る品質の値域
@@ -15,7 +16,7 @@ pub struct Config {
     pub color_format: ColorFormat,
     pub quality: u8,
     pub effort: u8,
-    pub threads: usize,
+    pub threads: NonZeroUsize,
 }
 
 impl Default for Config {
@@ -40,7 +41,7 @@ impl IniConfig for Config {
         let color_format = read(section, "color_format", default.color_format);
         let quality = read_clamped(section, "quality", quality_range(), default.quality);
         let effort = read_clamped(section, "effort", EFFORT_RANGE, default.effort);
-        let threads = read_clamped(section, "threads", 1..=max_threads(), default.threads);
+        let threads = read_threads(section, default.threads);
 
         Self {
             repeat,
@@ -64,6 +65,7 @@ impl IniConfig for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aviutl2::max_threads;
 
     fn load(entries: &[(&str, &str)]) -> Config {
         let mut ini = Ini::new();
@@ -105,7 +107,7 @@ mod tests {
             quality: 100,
             effort: 9,
             // 既定は論理CPU数の半分なので、値域の上端を採る
-            threads: max_threads(),
+            threads: NonZeroUsize::new(max_threads()).unwrap(),
         };
 
         let mut ini = Ini::new();
@@ -177,8 +179,8 @@ effort=3
     fn out_of_range_threads_are_clamped() {
         let over = (max_threads() + 1).to_string();
 
-        assert_eq!(load(&[("threads", "0")]).threads, 1);
-        assert_eq!(load(&[("threads", &over)]).threads, max_threads());
+        assert_eq!(load(&[("threads", "0")]).threads.get(), 1);
+        assert_eq!(load(&[("threads", &over)]).threads.get(), max_threads());
     }
 
     /// 読めない値の項目だけが既定値へ落ちる

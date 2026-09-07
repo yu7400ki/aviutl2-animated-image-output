@@ -2,6 +2,7 @@ use crate::config::{ColorFormat, Config, YuvFormat};
 use avif_encoder::{QUALITY_RANGE, SPEED_RANGE};
 use aviutl2::dialog::{ConfigInputs, RangedInput, repeat_input};
 use aviutl2::max_threads;
+use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
 use win32_ui::{
     layout::{FlexLayout, SizeValue, labeled},
@@ -62,7 +63,7 @@ impl Inputs {
                 "スレッド数",
                 // 上限は走らせる機械の並列度で決まる
                 1..=max_threads() as i32,
-                default_config.threads as i32,
+                default_config.threads.get() as i32,
             ),
         }
     }
@@ -105,7 +106,7 @@ impl ConfigInputs for Inputs {
                 2 => YuvFormat::Yuv444,
                 _ => Default::default(),
             },
-            threads: threads as usize,
+            threads: NonZeroUsize::new(threads as usize).unwrap_or(NonZeroUsize::MIN),
         })
     }
 }
@@ -206,20 +207,20 @@ mod tests {
         assert_eq!(config.speed, 2);
         assert!(config.color_format == ColorFormat::Rgba32);
         assert!(config.yuv_format == YuvFormat::Yuv444);
-        assert_eq!(config.threads, threads);
+        assert_eq!(config.threads.get(), threads);
     }
 
     /// 読み込んだスレッド数は、ダイアログを通しても既定へ落ちない
     #[test]
     fn the_loaded_thread_count_survives_the_dialog() {
         let loaded = Config {
-            threads: 1,
+            threads: NonZeroUsize::MIN,
             ..Config::default()
         };
 
         let collected = Inputs::new(&loaded).collect().expect("値域の内側");
 
-        assert_eq!(collected.threads, 1);
+        assert_eq!(collected.threads.get(), 1);
     }
 
     /// i32へ折り返す回数を持つiniを読み直しても、ダイアログはその値のまま開ける

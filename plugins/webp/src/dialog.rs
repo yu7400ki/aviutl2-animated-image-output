@@ -1,6 +1,7 @@
 use crate::config::{ColorFormat, Config};
 use aviutl2::dialog::{ConfigInputs, RangedInput, repeat_input};
 use aviutl2::max_threads;
+use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
 use webp_encoder::{MAX_NUM_PLAYS, METHOD_RANGE, QUALITY_RANGE};
 use win32_ui::{
@@ -49,7 +50,7 @@ impl Inputs {
                 "スレッド数",
                 // 上限は走らせる機械の並列度で決まる
                 1..=max_threads() as i32,
-                default_config.threads as i32,
+                default_config.threads.get() as i32,
             ),
         }
     }
@@ -87,7 +88,7 @@ impl ConfigInputs for Inputs {
             lossless: self.lossless.is_checked(),
             quality: quality as u8,
             method: method as u8,
-            threads: threads as usize,
+            threads: NonZeroUsize::new(threads as usize).unwrap_or(NonZeroUsize::MIN),
         })
     }
 }

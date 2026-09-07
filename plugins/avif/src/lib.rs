@@ -24,7 +24,7 @@ fn encoder_config(config: &Config, timescale: u32) -> EncoderConfig {
         yuv_format: config.yuv_format.into(),
         num_plays: config.repeat,
         timescale,
-        max_threads: u32::try_from(config.threads).unwrap_or(u32::MAX),
+        max_threads: u32::try_from(config.threads.get()).unwrap_or(u32::MAX),
     }
 }
 
@@ -171,6 +171,7 @@ register_logger!();
 mod tests {
     use super::*;
     use avif_encoder::YuvFormat;
+    use std::num::NonZeroUsize;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -255,7 +256,7 @@ mod tests {
         assert_eq!(
             encoder_config(
                 &Config {
-                    threads: 4,
+                    threads: NonZeroUsize::new(4).unwrap(),
                     ..Config::default()
                 },
                 30
@@ -266,7 +267,7 @@ mod tests {
         assert_eq!(
             encoder_config(
                 &Config {
-                    threads: usize::MAX,
+                    threads: NonZeroUsize::MAX,
                     ..Config::default()
                 },
                 30

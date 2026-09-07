@@ -1,7 +1,8 @@
 use avif_encoder::{QUALITY_RANGE, SPEED_RANGE};
 pub use aviutl2::ColorFormat;
 use aviutl2::ini::{Ini, Properties};
-use aviutl2::{IniConfig, MAX_REPEAT, default_threads, max_threads, read, read_clamped};
+use aviutl2::{IniConfig, MAX_REPEAT, default_threads, read, read_clamped, read_threads};
+use std::num::NonZeroUsize;
 use std::str::FromStr;
 
 #[derive(Copy, Clone, PartialEq, Default)]
@@ -61,7 +62,7 @@ pub struct Config {
     pub speed: u8,
     pub color_format: ColorFormat,
     pub yuv_format: YuvFormat,
-    pub threads: usize,
+    pub threads: NonZeroUsize,
 }
 
 impl Default for Config {
@@ -88,7 +89,7 @@ impl IniConfig for Config {
         let speed = read_clamped(section, "speed", SPEED_RANGE, default.speed);
         let color_format = read(section, "color_format", default.color_format);
         let yuv_format = read(section, "yuv_format", default.yuv_format);
-        let threads = read_clamped(section, "threads", 1..=max_threads(), default.threads);
+        let threads = read_threads(section, default.threads);
 
         Self {
             repeat,
@@ -114,6 +115,7 @@ impl IniConfig for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aviutl2::max_threads;
 
     fn load(entries: &[(&str, &str)]) -> Config {
         let mut ini = Ini::new();
@@ -164,7 +166,7 @@ mod tests {
             color_format: ColorFormat::Rgba32,
             yuv_format: YuvFormat::Yuv444,
             // 既定は論理CPU数の半分なので、値域の上端を採る
-            threads: max_threads(),
+            threads: NonZeroUsize::new(max_threads()).unwrap(),
         };
 
         let mut ini = Ini::new();
@@ -202,9 +204,11 @@ mod tests {
     /// 下限を割ると並列化が効かず、上限を超えるとダイアログが開いたときに弾かれる。
     #[test]
     fn out_of_range_threads_are_clamped() {
-        assert_eq!(load(&[("threads", "0")]).threads, 1);
+        assert_eq!(load(&[("threads", "0")]).threads.get(), 1);
         assert_eq!(
-            load(&[("threads", &(max_threads() + 1).to_string())]).threads,
+            load(&[("threads", &(max_threads() + 1).to_string())])
+                .threads
+                .get(),
             max_threads()
         );
     }

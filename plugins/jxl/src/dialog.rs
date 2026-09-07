@@ -2,6 +2,7 @@ use crate::config::{ColorFormat, Config};
 use aviutl2::dialog::{ConfigInputs, RangedInput, repeat_input};
 use aviutl2::max_threads;
 use jxl_encoder::{EFFORT_RANGE, QUALITY_RANGE};
+use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
 use win32_ui::{
     layout::{FlexLayout, SizeValue, labeled},
@@ -47,7 +48,7 @@ impl Inputs {
                 "スレッド数",
                 // 上限は走らせる機械の並列度で決まる
                 1..=max_threads() as i32,
-                default_config.threads as i32,
+                default_config.threads.get() as i32,
             ),
         }
     }
@@ -83,7 +84,7 @@ impl ConfigInputs for Inputs {
             },
             quality: quality as u8,
             effort: effort as u8,
-            threads: threads as usize,
+            threads: NonZeroUsize::new(threads as usize).unwrap_or(NonZeroUsize::MIN),
         })
     }
 }
@@ -172,7 +173,7 @@ mod tests {
         assert!(config.color_format == ColorFormat::Rgba32);
         assert_eq!(config.quality, 40);
         assert_eq!(config.effort, 2);
-        assert_eq!(config.threads, threads);
+        assert_eq!(config.threads.get(), threads);
     }
 
     /// i32へ折り返す回数を持つiniを読み直しても、ダイアログはその値のまま開ける

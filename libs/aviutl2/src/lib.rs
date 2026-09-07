@@ -26,7 +26,8 @@ mod macros;
 
 pub use anim_core::FrameDelay;
 pub use config::{
-    IniConfig, MAX_REPEAT, default_threads, max_threads, read, read_clamped, read_flag, workers,
+    IniConfig, MAX_REPEAT, default_threads, max_threads, read, read_clamped, read_flag,
+    read_threads,
 };
 pub use output::{
     Audio, ConfigDialog, FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, Video,

@@ -1,6 +1,7 @@
 pub use aviutl2::ColorFormat;
 use aviutl2::ini::{Ini, Properties};
-use aviutl2::{IniConfig, default_threads, max_threads, read, read_clamped, read_flag};
+use aviutl2::{IniConfig, default_threads, read, read_clamped, read_flag, read_threads};
+use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
 use webp_encoder::{MAX_NUM_PLAYS, METHOD_RANGE, QUALITY_RANGE};
 
@@ -16,7 +17,7 @@ pub struct Config {
     pub lossless: bool,
     pub quality: u8,
     pub method: u8,
-    pub threads: usize,
+    pub threads: NonZeroUsize,
 }
 
 impl Default for Config {
@@ -43,7 +44,7 @@ impl IniConfig for Config {
         let lossless = read_flag(section, "lossless", default.lossless);
         let quality = read_clamped(section, "quality", quality_range(), default.quality);
         let method = read_clamped(section, "method", METHOD_RANGE, default.method);
-        let threads = read_clamped(section, "threads", 1..=max_threads(), default.threads);
+        let threads = read_threads(section, default.threads);
 
         Self {
             repeat,
@@ -69,6 +70,7 @@ impl IniConfig for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aviutl2::max_threads;
 
     fn load(entries: &[(&str, &str)]) -> Config {
         let mut ini = Ini::new();
@@ -100,7 +102,7 @@ mod tests {
             lossless: true,
             quality: 100,
             method: 6,
-            threads: max_threads(),
+            threads: NonZeroUsize::new(max_threads()).unwrap(),
         };
 
         let mut ini = Ini::new();
@@ -207,8 +209,8 @@ method=3
     fn out_of_range_threads_are_clamped() {
         let over = (max_threads() + 1).to_string();
 
-        assert_eq!(load(&[("threads", "0")]).threads, 1);
-        assert_eq!(load(&[("threads", &over)]).threads, max_threads());
+        assert_eq!(load(&[("threads", "0")]).threads.get(), 1);
+        assert_eq!(load(&[("threads", &over)]).threads.get(), max_threads());
     }
 
     /// 読めない値の項目だけが既定値へ落ちる

@@ -4,7 +4,7 @@ mod dialog;
 use apng_encoder::{ColorType, Config as EncoderConfig, Encoder};
 use aviutl2::{
     ConfigDialog, FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, register_logger,
-    register_output_plugin, workers, write_or_discard,
+    register_output_plugin, write_or_discard,
 };
 use config::{ColorFormat, Config};
 use std::io::BufWriter;
@@ -58,7 +58,7 @@ impl OutputPlugin for ApngOutputPlugin {
                 height,
                 num_frames,
                 encoder_config(config),
-                workers(config.threads),
+                config.threads,
             )
             .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
 

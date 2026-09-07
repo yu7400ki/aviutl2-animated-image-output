@@ -50,7 +50,7 @@ fn encoder_config(config: &Config, sequence: Sequence) -> EncoderConfig {
         num_plays: config.repeat,
         tps_numerator: sequence.tps_numerator,
         tps_denominator: sequence.tps_denominator,
-        max_threads: config.threads,
+        max_threads: config.threads.get(),
     }
 }
 
@@ -146,6 +146,7 @@ register_logger!();
 mod tests {
     use super::*;
     use jxl::api::{self, states::Initialized};
+    use std::num::NonZeroUsize;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -261,7 +262,7 @@ mod tests {
                 quality: 80,
                 effort: 3,
                 repeat: 5,
-                threads: 4,
+                threads: NonZeroUsize::new(4).unwrap(),
                 ..Config::default()
             },
             sequence,
@@ -276,7 +277,7 @@ mod tests {
                 quality: 100,
                 effort: 9,
                 repeat: 0,
-                threads: 1,
+                threads: NonZeroUsize::MIN,
                 ..Config::default()
             },
             sequence,

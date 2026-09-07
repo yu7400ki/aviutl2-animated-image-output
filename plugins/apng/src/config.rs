@@ -1,14 +1,15 @@
 use apng_encoder::COMPRESSION_LEVELS;
 pub use aviutl2::ColorFormat;
 use aviutl2::ini::{Ini, Properties};
-use aviutl2::{IniConfig, MAX_REPEAT, default_threads, max_threads, read, read_clamped};
+use aviutl2::{IniConfig, MAX_REPEAT, default_threads, read, read_clamped, read_threads};
+use std::num::NonZeroUsize;
 
 #[derive(Clone)]
 pub struct Config {
     pub repeat: u32,
     pub color_format: ColorFormat,
     pub compression_level: u32,
-    pub threads: usize,
+    pub threads: NonZeroUsize,
 }
 
 impl Default for Config {
@@ -36,7 +37,7 @@ impl IniConfig for Config {
             COMPRESSION_LEVELS,
             default.compression_level,
         );
-        let threads = read_clamped(section, "threads", 1..=max_threads(), default.threads);
+        let threads = read_threads(section, default.threads);
 
         Self {
             repeat,
@@ -58,6 +59,7 @@ impl IniConfig for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aviutl2::max_threads;
 
     fn load(entries: &[(&str, &str)]) -> Config {
         let mut ini = Ini::new();
@@ -88,7 +90,7 @@ mod tests {
             repeat: 3,
             color_format: ColorFormat::Rgba32,
             compression_level: 9,
-            threads: max_threads(),
+            threads: NonZeroUsize::new(max_threads()).unwrap(),
         };
 
         let mut ini = Ini::new();
@@ -145,7 +147,7 @@ mod tests {
     fn out_of_range_threads_are_clamped() {
         let over = (max_threads() + 1).to_string();
 
-        assert_eq!(load(&[("threads", "0")]).threads, 1);
-        assert_eq!(load(&[("threads", &over)]).threads, max_threads());
+        assert_eq!(load(&[("threads", "0")]).threads.get(), 1);
+        assert_eq!(load(&[("threads", &over)]).threads.get(), max_threads());
     }
 }
