@@ -1,7 +1,13 @@
 //! 設定ダイアログの入力欄
 
+use crate::ConfigDialog;
 use std::ops::RangeInclusive;
-use win32_ui::widget::Number;
+use win32_ui::{
+    Dialog, MessageBox,
+    layout::{FlexLayout, JustifyContent},
+    widget::{Button, Number},
+};
+use windows::Win32::Foundation::HWND;
 
 /// 値域を検める入力欄。
 ///
@@ -76,6 +82,74 @@ pub fn repeat_input(max: Option<u32>, value: u32) -> RangedInput {
         ),
     };
     RangedInput::build(label, error, &(0..=ceiling), value)
+}
+
+/// 設定ダイアログへ並べる入力欄の集まり
+pub trait ConfigInputs: Clone {
+    /// 入力欄が組み上げる設定
+    type Config;
+
+    /// 既定の設定を初期値として入力欄を組む
+    fn new(default_config: &Self::Config) -> Self;
+
+    /// 設定項目を並べる
+    fn layout(&self) -> FlexLayout;
+
+    /// 入力欄の値を設定へ組む
+    ///
+    /// # Errors
+    /// 読めない欄か値域の外の欄があるとき、画面へ出す文言。
+    fn collect(&self) -> Result<Self::Config, String>;
+}
+
+/// 入力欄とOK・キャンセルを並べた設定ダイアログを出す
+///
+/// OKは入力欄がすべて読めるときだけ受け取り、読めない欄があるときは
+/// 文言を出してダイアログを開いたまま残す。
+pub fn show_config_dialog<I: ConfigInputs + 'static>(
+    parent_hwnd: HWND,
+    title: &str,
+    default_config: I::Config,
+) -> ConfigDialog<I::Config> {
+    let inputs = I::new(&default_config);
+
+    let dialog = Dialog::new(title);
+    let handle = dialog.handle();
+
+    let ok_button = Button::primary("OK").on_click({
+        let handle = handle.clone();
+        let inputs = inputs.clone();
+        move || match inputs.collect() {
+            Ok(_) => handle.accept(),
+            Err(message) => MessageBox::error(handle.hwnd(), &message, "エラー"),
+        }
+    });
+
+    let cancel_button = Button::secondary("キャンセル").on_click({
+        let handle = handle.clone();
+        move || handle.cancel()
+    });
+
+    let layout = inputs.layout().with_layout(
+        FlexLayout::row()
+            .with_gap(10.0)
+            .with_padding_rect(0.0, 0.0, 5.0, 0.0)
+            .with_justify_content(JustifyContent::End)
+            .with_widget(ok_button)
+            .with_widget(cancel_button),
+    );
+
+    let Ok(accepted) = dialog.with_layout(layout).open(parent_hwnd) else {
+        return ConfigDialog::Failed;
+    };
+    if !accepted {
+        return ConfigDialog::Cancelled;
+    }
+
+    match inputs.collect() {
+        Ok(config) => ConfigDialog::Accepted(config),
+        Err(_) => ConfigDialog::Failed,
+    }
 }
 
 #[cfg(test)]
