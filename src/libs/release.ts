@@ -62,7 +62,7 @@ export function selectRelease(releases: ReleaseData[]): Release | undefined {
   const [latest] = releases
     .filter(isPublished)
     .filter((release) => release.tag_name.startsWith(TAG_PREFIX))
-    .sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at));
+    .toSorted((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at));
   if (!latest) return undefined;
 
   const version = latest.tag_name.slice(TAG_PREFIX.length);

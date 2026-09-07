@@ -159,7 +159,7 @@ export function PluginSettings() {
               )}
             >
               {setting.items.map((item, index) => (
-                // biome-ignore lint/suspicious/noArrayIndexKey: Using index as key for static content
+                // oxlint-disable-next-line react/no-array-index-key -- 静的な一覧なので添字を key にする
                 <li key={index} className="space-y-1">
                   <div className="font-medium text-gray-900">{item.name}</div>
                   <div className="text-sm text-gray-600">

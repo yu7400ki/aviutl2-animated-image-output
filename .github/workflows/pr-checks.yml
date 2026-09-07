@@ -35,7 +35,9 @@ jobs:
               - 'package.json'
               - 'pnpm-lock.yaml'
               - 'pnpm-workspace.yaml'
-              - 'biome.jsonc'
+              - 'oxlint.config.ts'
+              - '.oxfmtrc.json'
+              - '.editorconfig'
 
   rust-checks:
     name: Rust Checks
@@ -105,6 +107,9 @@ jobs:
 
       - name: Run lint
         run: pnpm lint
+
+      - name: Check format
+        run: pnpm format:check
 
       - name: Run tests
         run: pnpm test

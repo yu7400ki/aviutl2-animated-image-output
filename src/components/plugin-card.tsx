@@ -82,7 +82,7 @@ export function PluginCard({ plugin, url }: PluginCardProps) {
           )}
         >
           {info.features.map((feature, index) => (
-            // biome-ignore lint/suspicious/noArrayIndexKey: Using index as key for static content
+            // oxlint-disable-next-line react/no-array-index-key -- 静的な一覧なので添字を key にする
             <li key={index}>{feature}</li>
           ))}
         </ul>

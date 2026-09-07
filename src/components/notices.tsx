@@ -27,7 +27,7 @@ export function Notices() {
       <div className="space-y-4">
         {notices.map((notice, index) => (
           <Alert
-            // biome-ignore lint/suspicious/noArrayIndexKey: Using index as key for static content
+            // oxlint-disable-next-line react/no-array-index-key -- 静的な一覧なので添字を key にする
             key={index}
             type={notice.type}
             title={notice.title}
