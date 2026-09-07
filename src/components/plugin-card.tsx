@@ -92,7 +92,7 @@ export function PluginCard({ plugin, url }: PluginCardProps) {
   return (
     <article
       className={clsx(
-        "grid grid-rows-subgrid gap-y-0 row-span-6 rounded-lg border-2 p-6",
+        "grid grid-rows-subgrid gap-y-0 row-span-5 rounded-lg border-2 p-6",
         info.color,
       )}
     >
@@ -101,7 +101,6 @@ export function PluginCard({ plugin, url }: PluginCardProps) {
 
       <Bullets heading="特徴" items={info.features} textColor={info.textColor} />
       <Bullets heading="注意点" items={info.cautions} textColor={info.textColor} />
-      <div className="border-t border-current opacity-20 my-4" />
       {url ? (
         <a
           href={url}
