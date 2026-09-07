@@ -325,7 +325,7 @@ impl Palettes {
 /// 画面の色がそのまま入っている。
 fn escape_colors(
     layout: &Layout,
-    previous: &[u8],
+    previous: Option<&[u8]>,
     pixels: &[u8],
     rendered: &[u8],
     disposed: Option<Rect>,
@@ -333,7 +333,7 @@ fn escape_colors(
 ) {
     let bpp = layout.bytes_per_pixel;
     let carried =
-        |at: usize| !previous.is_empty() && previous[at..at + bpp] == pixels[at..at + bpp];
+        |at: usize| previous.is_some_and(|previous| previous[at..at + bpp] == pixels[at..at + bpp]);
     let mut take = |color: u32| color == TRANSPARENT || observe(color);
 
     for (index, pixel) in pixels.chunks_exact(bpp).enumerate() {
@@ -369,7 +369,7 @@ fn escape_colors(
 /// 同じ色をヒストグラムへ積んで量子化する。
 fn escape_table(
     layout: &Layout,
-    previous: &[u8],
+    previous: Option<&[u8]>,
     pixels: &[u8],
     rendered: &[u8],
     disposed: Option<Rect>,
@@ -398,15 +398,13 @@ fn escape_table(
 
 /// 書き出し位置のフレーム1つを処理する状態
 ///
-/// 面が分かれる。[`Self::previous`] は「この画素は変わったか」を決め、
-/// [`Self::canvas`] はデコーダが見ている色を持つ。差分矩形と透過ランは後者で
-/// 求める。量子化を通すと別々の入力色が同じ色へ落ちることがあり、それは
-/// 出力上は未変更だからで、比べる面を分けないとこの一致を見落とす。
+/// [`Canvas`] は面を分けて持つ。直前に渡されたフレームの入力が「この画素は
+/// 変わったか」を決め、描画後の色がデコーダの見ている画面になる。差分矩形と
+/// 透過ランは後者で求める。量子化を通すと別々の入力色が同じ色へ落ちることが
+/// あり、それは出力上は未変更だからで、比べる面を分けないとこの一致を見落とす。
 struct Writing {
     /// 書き出しに使うカラーテーブル
     palettes: Palettes,
-    /// 直前に書き出しへ渡されたフレームの正規化した入力
-    previous: Vec<u8>,
     /// 描画後の色の面
     canvas: Canvas,
     /// 投入されたフレームを写した描画後の色
@@ -423,7 +421,6 @@ impl Writing {
     fn new(layout: Layout) -> Self {
         Writing {
             palettes: Palettes::new(Palette::new()),
-            previous: Vec::new(),
             canvas: Canvas::new(layout),
             rendered: Vec::new(),
             indices: Vec::new(),
@@ -690,7 +687,6 @@ impl<W: Write + Seek> Parts<'_, W> {
     ) -> Result<(), Error> {
         let Writing {
             palettes,
-            previous,
             canvas,
             rendered,
             indices,
@@ -703,31 +699,20 @@ impl<W: Write + Seek> Parts<'_, W> {
         if palettes.global.is_open()
             && !palettes
                 .global
-                .admit(self.layout.color_type, previous, pixels)
+                .admit(self.layout.color_type, canvas.previous(), pixels)
         {
             self.settle(&mut palettes.global, ring, pixels)?;
         }
 
         // 逃げた色表は床を再び超えるまで引き継ぐ。まずその色表で写して誤差を測る
         palettes.hold();
-        let mut mapped = canvas.render(
-            previous,
-            pixels,
-            palettes.current_mut(),
-            ESCAPE_STRAY_FLOOR,
-            rendered,
-        );
+        let mut mapped =
+            canvas.render(pixels, palettes.current_mut(), ESCAPE_STRAY_FLOOR, rendered);
         // 色で埋まったテーブルは透過添字を持たない。標識を書く先が無いフレームは
         // 表現できないため、閉じて透過添字を取り直す
         if palettes.global.is_open() && self.lacks_transparent(&palettes.global, rendered, ring) {
             self.settle(&mut palettes.global, ring, pixels)?;
-            mapped = canvas.render(
-                previous,
-                pixels,
-                &mut palettes.global,
-                ESCAPE_STRAY_FLOOR,
-                rendered,
-            );
+            mapped = canvas.render(pixels, &mut palettes.global, ESCAPE_STRAY_FLOOR, rendered);
         }
 
         // 変わった画素の誤差が床を超えたフレーム、外れた画素が割合を超えたフレーム、
@@ -749,18 +734,12 @@ impl<W: Write + Seek> Parts<'_, W> {
             };
             palettes.escape(escape_table(
                 self.layout,
-                previous,
+                canvas.previous(),
                 pixels,
                 rendered,
                 disposed,
             ));
-            mapped = canvas.render(
-                previous,
-                pixels,
-                palettes.current_mut(),
-                ESCAPE_STRAY_FLOOR,
-                rendered,
-            );
+            mapped = canvas.render(pixels, palettes.current_mut(), ESCAPE_STRAY_FLOOR, rendered);
         }
         palettes
             .current_mut()
@@ -778,7 +757,7 @@ impl<W: Write + Seek> Parts<'_, W> {
                     indices,
                     delay,
                 );
-                canvas.start(rendered);
+                canvas.start(rendered, pixels);
                 *pending = Some(laid);
             }
             Some(mut waiting) => {
@@ -793,14 +772,11 @@ impl<W: Write + Seek> Parts<'_, W> {
                 );
                 let disposed = waiting.rect;
                 self.write_pending(palettes, waiting, disposal)?;
-                canvas.advance(disposal, disposed, rendered, laid.rect);
+                canvas.advance(disposal, disposed, rendered, laid.rect, pixels);
                 *pending = Some(laid);
             }
         }
         palettes.retire();
-
-        previous.clear();
-        previous.extend_from_slice(pixels);
         Ok(())
     }
 
@@ -1044,7 +1020,7 @@ mod tests {
     /// 1色だけの閉じたテーブル
     fn table_of(pixel: &[u8; 3]) -> Palette {
         let mut palette = Palette::new();
-        palette.admit(ColorType::Rgb8, &[], pixel);
+        palette.admit(ColorType::Rgb8, None, pixel);
         palette.settle(&[]);
         palette
     }
@@ -1132,7 +1108,7 @@ mod tests {
         let previous = [1u8, 2, 3, 9, 9, 9];
         let pixels = [1u8, 2, 3, 4, 5, 6];
 
-        let mut table = escape_table(&layout, &previous, &pixels, &pixels, None);
+        let mut table = escape_table(&layout, Some(&previous), &pixels, &pixels, None);
         assert_eq!(table.colors(), 1, "変わっていない画素まで載せている");
         assert!(matches!(table.map(&[4, 5, 6], 3).fit, Fit::Exact));
         assert!(table.transparent().is_some(), "透過スロットが無い");
@@ -1147,7 +1123,7 @@ mod tests {
             .flat_map(|i| [(i % 20) as u8 * 12, (i / 20) as u8 * 12, 0x40])
             .collect();
 
-        let table = escape_table(&layout, &[], &pixels, &pixels, None);
+        let table = escape_table(&layout, None, &pixels, &pixels, None);
         assert_eq!(table.colors() as usize, QUANTIZED_COLORS);
         assert_eq!(table.transparent(), Some(QUANTIZED_COLORS as u8));
     }

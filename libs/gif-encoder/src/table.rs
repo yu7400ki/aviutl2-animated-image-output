@@ -165,7 +165,7 @@ impl Palette {
 
     /// このフレームで新しく要る色をまとめて足す。上限に収まらなければ何も足さない
     ///
-    /// 走査するのは直前のフレームから変わった画素だけで、`previous` が空なら
+    /// 走査するのは直前のフレームから変わった画素だけで、先頭フレームでは
     /// 全画素。変わっていない画素の色は、その画素が最後に変わったフレームで
     /// 既に足されている。
     ///
@@ -173,20 +173,25 @@ impl Palette {
     ///
     /// # Panics
     /// 閉じたテーブルのとき。
-    pub(crate) fn admit(&mut self, color_type: ColorType, previous: &[u8], frame: &[u8]) -> bool {
+    pub(crate) fn admit(
+        &mut self,
+        color_type: ColorType,
+        previous: Option<&[u8]>,
+        frame: &[u8],
+    ) -> bool {
         match color_type {
             ColorType::Rgb8 => self.admit_bpp::<3>(previous, frame),
             ColorType::Rgba8 => self.admit_bpp::<4>(previous, frame),
         }
     }
 
-    fn admit_bpp<const BPP: usize>(&mut self, previous: &[u8], frame: &[u8]) -> bool {
+    fn admit_bpp<const BPP: usize>(&mut self, previous: Option<&[u8]>, frame: &[u8]) -> bool {
         assert!(self.is_open(), "閉じたテーブルへ色を足そうとしている");
 
         let mut fresh = Colors::new();
         let mut at = 0;
         while at + BPP <= frame.len() {
-            if !previous.is_empty() {
+            if let Some(previous) = previous {
                 let run = unchanged_run::<BPP>(previous, frame, at);
                 if run > at {
                     at = run;
@@ -396,7 +401,7 @@ mod tests {
     fn opened(pixels: &[u8], color_type: ColorType) -> Palette {
         let mut palette = Palette::new();
         assert!(
-            palette.admit(color_type, &[], pixels),
+            palette.admit(color_type, None, pixels),
             "1フレーム目が入らない"
         );
         palette
@@ -470,7 +475,7 @@ mod tests {
         let second = [1u8, 2, 3, 7, 8, 9];
 
         let mut palette = opened(&first, ColorType::Rgb8);
-        assert!(palette.admit(ColorType::Rgb8, &first, &second));
+        assert!(palette.admit(ColorType::Rgb8, Some(&first), &second));
         assert_eq!(palette.colors(), 3);
         assert_eq!(palette.color_at(2), 0xFF09_0807);
     }
@@ -491,7 +496,7 @@ mod tests {
         let mut palette = opened(&first, ColorType::Rgb8);
         assert_eq!(palette.transparent(), Some(1));
 
-        assert!(palette.admit(ColorType::Rgb8, &first, &[4, 5, 6]));
+        assert!(palette.admit(ColorType::Rgb8, Some(&first), &[4, 5, 6]));
         assert_eq!(palette.transparent(), Some(2));
     }
 
@@ -507,7 +512,7 @@ mod tests {
         assert_eq!(palette.colors(), MAX_COLORS as u16);
         assert_eq!(palette.transparent(), None, "色で埋まっても透過添字がある");
 
-        assert!(!palette.admit(ColorType::Rgb8, &full, &[0xFF, 0xFF, 0xFF]));
+        assert!(!palette.admit(ColorType::Rgb8, Some(&full), &[0xFF, 0xFF, 0xFF]));
         assert_eq!(palette.colors(), MAX_COLORS as u16, "色を足している");
     }
 
@@ -523,7 +528,7 @@ mod tests {
         assert_eq!(palette.colors(), (MAX_COLORS - 1) as u16);
         assert_eq!(palette.transparent(), Some((MAX_COLORS - 1) as u8));
 
-        assert!(!palette.admit(ColorType::Rgba8, &[], &[0xFF, 0xFF, 0xFF, 0xFF]));
+        assert!(!palette.admit(ColorType::Rgba8, None, &[0xFF, 0xFF, 0xFF, 0xFF]));
     }
 
     /// 閉じたテーブルは、割り当て済みの色をそのままの添字で残す

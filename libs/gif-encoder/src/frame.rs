@@ -242,8 +242,12 @@ pub(crate) struct Canvas {
     ///
     /// 抜く矩形はフレームごとに変わるため、[`AlphaCanvas::dispose`] が組み立て直す。
     cleared: Vec<u8>,
-    /// 先頭フレームを描いたか
-    drawn: bool,
+    /// 直前に投入されたフレームの正規化した入力。先頭フレームを描く前は `None`
+    ///
+    /// 描いた後の画面と対になっていて、この2つが揃って初めて未変更画素の色を
+    /// 持ち越せる。画面を進める [`Canvas::start`] と [`Canvas::advance`] が
+    /// 同時に更新する。
+    previous: Option<Vec<u8>>,
 }
 
 impl Canvas {
@@ -261,13 +265,18 @@ impl Canvas {
             before,
             cleared: Vec::new(),
             layout,
-            drawn: false,
+            previous: None,
         }
     }
 
     /// 保留中のフレームをそのまま残した画面
     pub(crate) fn kept(&self) -> Screen<'_> {
         self.screen(&self.after)
+    }
+
+    /// 直前に投入されたフレームの正規化した入力
+    pub(crate) fn previous(&self) -> Option<&[u8]> {
+        self.previous.as_deref()
     }
 
     /// 透過を読み書きできる面として借りる
@@ -285,7 +294,7 @@ impl Canvas {
     fn screen<'a>(&'a self, pixels: &'a [u8]) -> Screen<'a> {
         Screen {
             layout: &self.layout,
-            pixels: self.drawn.then_some(pixels),
+            pixels: self.previous.is_some().then_some(pixels),
         }
     }
 
@@ -295,26 +304,23 @@ impl Canvas {
     /// 画素は前の描画後の色を持ち越す。持ち越した画素は画面上の色をそのまま
     /// 保つため、パレットが変わっても静止した領域は揺れない。
     ///
-    /// `previous` は直前に投入されたフレームの正規化した入力。先頭フレームでは空。
     /// `stray_floor` は外れた画素と呼ぶ二乗距離で、写し先がこれより遠い画素を
     /// 別に数える。
     pub(crate) fn render(
         &self,
-        previous: &[u8],
         frame: &[u8],
         palette: &mut Palette,
         stray_floor: u64,
         out: &mut Vec<u8>,
     ) -> Rendered {
         match self.layout.color_type {
-            ColorType::Rgb8 => self.render_bpp::<3>(previous, frame, palette, stray_floor, out),
-            ColorType::Rgba8 => self.render_bpp::<4>(previous, frame, palette, stray_floor, out),
+            ColorType::Rgb8 => self.render_bpp::<3>(frame, palette, stray_floor, out),
+            ColorType::Rgba8 => self.render_bpp::<4>(frame, palette, stray_floor, out),
         }
     }
 
     fn render_bpp<const BPP: usize>(
         &self,
-        previous: &[u8],
         frame: &[u8],
         palette: &mut Palette,
         stray_floor: u64,
@@ -337,7 +343,10 @@ impl Canvas {
             strayed: 0,
         };
         // 先頭フレームには前が無く、持ち越せる色も無い
-        let carried = self.drawn.then_some((previous, self.after.as_slice()));
+        let carried = self
+            .previous
+            .as_ref()
+            .map(|previous| (previous.as_slice(), self.after.as_slice()));
         let mut at = 0;
         while at + BPP <= len {
             if let Some((previous, drawn)) = carried {
@@ -384,16 +393,29 @@ impl Canvas {
     /// 先頭フレームを描く
     ///
     /// 矩形が論理画面全体なので、描いた後の画面は写したフレームそのものになる。
-    pub(crate) fn start(&mut self, frame: &[u8]) {
-        self.after.copy_from_slice(frame);
-        self.drawn = true;
+    ///
+    /// `rendered` は投入されたフレームを写した描画後の色、`frame` はその
+    /// 正規化した入力。
+    pub(crate) fn start(&mut self, rendered: &[u8], frame: &[u8]) {
+        self.after.copy_from_slice(rendered);
+        self.keep(frame);
     }
 
     /// 保留中のフレームを `disposal` で廃棄し、投入されたフレームで進める
     ///
     /// `disposed` は保留中のフレームの矩形、`rect` は投入されたフレームの矩形。
     /// 2面が変わるのはこの2つの矩形の中だけなので、書き換えるのも中だけで足りる。
-    pub(crate) fn advance(&mut self, disposal: u8, disposed: Rect, frame: &[u8], rect: Rect) {
+    ///
+    /// `rendered` は投入されたフレームを写した描画後の色、`frame` はその
+    /// 正規化した入力。
+    pub(crate) fn advance(
+        &mut self,
+        disposal: u8,
+        disposed: Rect,
+        rendered: &[u8],
+        rect: Rect,
+        frame: &[u8],
+    ) {
         // 描いた後の面を潰す前に、戻す先を廃棄後の画面へ進める
         if !self.before.is_empty() {
             match disposal {
@@ -408,9 +430,17 @@ impl Canvas {
             }
         }
         if disposal != DISPOSAL_DO_NOT_DISPOSE {
-            copy_rect(&mut self.after, frame, disposed, &self.layout);
+            copy_rect(&mut self.after, rendered, disposed, &self.layout);
         }
-        copy_rect(&mut self.after, frame, rect, &self.layout);
+        copy_rect(&mut self.after, rendered, rect, &self.layout);
+        self.keep(frame);
+    }
+
+    /// 投入されたフレームの正規化した入力を、次のフレームの前として覚える
+    fn keep(&mut self, frame: &[u8]) {
+        let previous = self.previous.get_or_insert_with(Vec::new);
+        previous.clear();
+        previous.extend_from_slice(frame);
     }
 }
 
@@ -436,13 +466,13 @@ impl AlphaCanvas<'_> {
             layout,
             before,
             after,
-            drawn,
+            previous,
             ..
         } = &mut *self.canvas;
         (
             Screen {
                 layout,
-                pixels: drawn.then_some(before.as_slice()),
+                pixels: previous.is_some().then_some(before.as_slice()),
             },
             after,
         )
@@ -556,13 +586,13 @@ mod tests {
     /// フレーム列の色を見つけた順に受け入れて閉じたテーブル
     fn palette_of(frames: &[&[u8]], color_type: ColorType) -> Palette {
         let mut palette = Palette::new();
-        let mut previous: &[u8] = &[];
+        let mut previous: Option<&[u8]> = None;
         for frame in frames {
             assert!(
                 palette.admit(color_type, previous, frame),
                 "色が上限に収まらない"
             );
-            previous = frame;
+            previous = Some(frame);
         }
         palette.settle(&[]);
         palette
@@ -571,7 +601,7 @@ mod tests {
     /// 先頭フレームを描き、その矩形を返す
     fn start(canvas: &mut Canvas, frame: &[u8]) -> Rect {
         let rect = canvas.kept().rect_of(frame);
-        canvas.start(frame);
+        canvas.start(frame, frame);
         rect
     }
 
@@ -583,7 +613,7 @@ mod tests {
     /// 保留中のフレームをそのまま残して `frame` を描き、その矩形を返す
     fn draw(canvas: &mut Canvas, pending: Rect, frame: &[u8]) -> Rect {
         let rect = canvas.kept().rect_of(frame);
-        canvas.advance(DISPOSAL_DO_NOT_DISPOSE, pending, frame, rect);
+        canvas.advance(DISPOSAL_DO_NOT_DISPOSE, pending, frame, rect, frame);
         rect
     }
 
@@ -686,7 +716,13 @@ mod tests {
             .dispose(rect)
             .background()
             .rect_of(&third);
-        canvas.advance(DISPOSAL_RESTORE_TO_BACKGROUND, rect, &third, cleared);
+        canvas.advance(
+            DISPOSAL_RESTORE_TO_BACKGROUND,
+            rect,
+            &third,
+            cleared,
+            &third,
+        );
 
         let mut expected = first.clone();
         expected[4..8].fill(0);
@@ -708,7 +744,7 @@ mod tests {
 
         let restored = alpha(&mut canvas).dispose(rect).previous().rect_of(&first);
         assert_eq!(restored, UNCHANGED, "戻した画面が投入されたフレームと違う");
-        canvas.advance(DISPOSAL_RESTORE_TO_PREVIOUS, rect, &first, restored);
+        canvas.advance(DISPOSAL_RESTORE_TO_PREVIOUS, rect, &first, restored, &first);
 
         assert_eq!(canvas.before, first, "戻す先が書き換わっている");
         assert_eq!(canvas.after, first);
@@ -857,11 +893,11 @@ mod tests {
         let mut palette = palette_of(&[&first, &second], ColorType::Rgba8);
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
-        canvas.render(&[], &first, &mut palette, STRAY_FLOOR, &mut rendered);
+        canvas.render(&first, &mut palette, STRAY_FLOOR, &mut rendered);
         assert_eq!(rendered, first, "先頭フレームが写っていない");
-        start(&mut canvas, &rendered);
+        canvas.start(&rendered, &first);
 
-        canvas.render(&first, &second, &mut palette, STRAY_FLOOR, &mut rendered);
+        canvas.render(&second, &mut palette, STRAY_FLOOR, &mut rendered);
         assert_eq!(rendered, second);
     }
 
@@ -878,10 +914,10 @@ mod tests {
         let mut palette = palette_of(&[&first], ColorType::Rgba8);
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
-        canvas.render(&[], &first, &mut palette, STRAY_FLOOR, &mut rendered);
-        start(&mut canvas, &rendered);
+        canvas.render(&first, &mut palette, STRAY_FLOOR, &mut rendered);
+        canvas.start(&rendered, &first);
 
-        canvas.render(&first, &second, &mut palette, STRAY_FLOOR, &mut rendered);
+        canvas.render(&second, &mut palette, STRAY_FLOOR, &mut rendered);
         assert_eq!(rendered[..4], [0, 0, 0, 0]);
         assert!(!canvas.kept().expressible(&rendered));
     }
@@ -902,17 +938,16 @@ mod tests {
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
         canvas.render(
-            &[],
             &first,
             &mut palette_of(&[&first], ColorType::Rgba8),
             STRAY_FLOOR,
             &mut rendered,
         );
-        start(&mut canvas, &rendered);
+        canvas.start(&rendered, &first);
 
         // 入力が変わらない画素は、色表が入れ替わっても持ち越される
         let mut palette = palette_of(&[&SETTLED[..]], ColorType::Rgba8);
-        canvas.render(&first, &first, &mut palette, STRAY_FLOOR, &mut rendered);
+        canvas.render(&first, &mut palette, STRAY_FLOOR, &mut rendered);
         assert_eq!(rendered, first, "持ち越しがテーブルを通っている");
 
         // 矩形を透過へ抜いた画面では、持ち越した画素も書き直す
@@ -927,7 +962,13 @@ mod tests {
         assert_ne!(written, CARRIED, "持ち越した色がテーブルに残っている");
         assert_eq!(rendered[..4], written, "書いた色がキャンバスへ渡っていない");
 
-        canvas.advance(DISPOSAL_RESTORE_TO_BACKGROUND, rect, &rendered, rect);
+        canvas.advance(
+            DISPOSAL_RESTORE_TO_BACKGROUND,
+            rect,
+            &rendered,
+            rect,
+            &first,
+        );
         assert_eq!(canvas.after[..4], written, "キャンバスが書いた色を持たない");
     }
 
@@ -944,16 +985,15 @@ mod tests {
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
         canvas.render(
-            &[],
             &first,
             &mut palette_of(&[&first], ColorType::Rgba8),
             STRAY_FLOOR,
             &mut rendered,
         );
-        start(&mut canvas, &rendered);
+        canvas.start(&rendered, &first);
 
         let mut palette = palette_of(&[&SETTLED[..]], ColorType::Rgba8);
-        canvas.render(&first, &first, &mut palette, STRAY_FLOOR, &mut rendered);
+        canvas.render(&first, &mut palette, STRAY_FLOOR, &mut rendered);
 
         let rect = layout(ColorType::Rgba8).whole();
         let mut indices = Vec::new();
@@ -1001,7 +1041,7 @@ mod tests {
         let canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
 
-        let counted = canvas.render(&[], &frame, &mut palette, STRAY_FLOOR, &mut rendered);
+        let counted = canvas.render(&frame, &mut palette, STRAY_FLOOR, &mut rendered);
         assert_eq!(counted.approximated, pixels, "最近傍へ写していない");
         assert_eq!(counted.mapped, pixels);
         assert_eq!(counted.error, OFF_BY_ERROR * pixels);
@@ -1029,10 +1069,10 @@ mod tests {
 
         let mut palette = palette_of(&[&SETTLED[..]], ColorType::Rgba8);
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
-        canvas.start(&previous);
+        canvas.start(&previous, &previous);
         let mut rendered = Vec::new();
 
-        let counted = canvas.render(&previous, &frame, &mut palette, STRAY_FLOOR, &mut rendered);
+        let counted = canvas.render(&frame, &mut palette, STRAY_FLOOR, &mut rendered);
         assert_eq!(counted.mapped, 1, "写していない画素を分母に入れている");
         assert_eq!(counted.error, OFF_BY_ERROR);
         assert!(counted.mean_error_exceeds(OFF_BY_ERROR - 1));
@@ -1054,7 +1094,7 @@ mod tests {
         let canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
 
-        let counted = canvas.render(&[], &frame, &mut palette, STRAY_FLOOR, &mut rendered);
+        let counted = canvas.render(&frame, &mut palette, STRAY_FLOOR, &mut rendered);
         assert_eq!(counted.substituted, pixels as u64, "埋め草へ置いていない");
         assert_eq!(counted.approximated, 0, "近似に数えている");
         assert_eq!(counted.error, SUBSTITUTED_ERROR * pixels as u64);
@@ -1071,16 +1111,10 @@ mod tests {
         let previous: Vec<u8> = SETTLED.repeat(pixels);
         let mut palette = palette_of(&[&SETTLED[..]], ColorType::Rgba8);
         let mut canvas = Canvas::new(layout(ColorType::Rgba8));
-        canvas.start(&previous);
+        canvas.start(&previous, &previous);
         let mut rendered = Vec::new();
 
-        let counted = canvas.render(
-            &previous,
-            &previous,
-            &mut palette,
-            STRAY_FLOOR,
-            &mut rendered,
-        );
+        let counted = canvas.render(&previous, &mut palette, STRAY_FLOOR, &mut rendered);
         assert_eq!(counted.mapped, 0);
         assert!(!counted.mean_error_exceeds(0));
         assert!(!counted.strayed_ratio_exceeds(0));
@@ -1098,15 +1132,15 @@ mod tests {
         let canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
 
-        let counted = canvas.render(&[], &frame, &mut palette, OFF_BY_ERROR, &mut rendered);
+        let counted = canvas.render(&frame, &mut palette, OFF_BY_ERROR, &mut rendered);
         assert_eq!(counted.mapped, pixels);
         assert_eq!(counted.strayed, 0, "閾値ちょうどを外れに数えている");
 
-        let counted = canvas.render(&[], &frame, &mut palette, OFF_BY_ERROR - 1, &mut rendered);
+        let counted = canvas.render(&frame, &mut palette, OFF_BY_ERROR - 1, &mut rendered);
         assert_eq!(counted.strayed, pixels, "閾値を超えた画素を数えていない");
 
         let exact: Vec<u8> = SETTLED.repeat(pixels as usize);
-        let counted = canvas.render(&[], &exact, &mut palette, 0, &mut rendered);
+        let counted = canvas.render(&exact, &mut palette, 0, &mut rendered);
         assert_eq!(counted.mapped, pixels);
         assert_eq!(counted.strayed, 0, "完全一致した画素を外れに数えている");
     }
@@ -1122,7 +1156,7 @@ mod tests {
         let canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
 
-        let counted = canvas.render(&[], &frame, &mut palette, STRAY_FLOOR, &mut rendered);
+        let counted = canvas.render(&frame, &mut palette, STRAY_FLOOR, &mut rendered);
         assert_eq!(counted.mapped, pixels as u64);
         assert_eq!(counted.strayed, 1, "閾値を1超えた画素を数えていない");
 
@@ -1147,7 +1181,7 @@ mod tests {
         let canvas = Canvas::new(layout(ColorType::Rgba8));
         let mut rendered = Vec::new();
 
-        let counted = canvas.render(&[], &frame, &mut palette, STRAY_FLOOR, &mut rendered);
+        let counted = canvas.render(&frame, &mut palette, STRAY_FLOOR, &mut rendered);
         assert_eq!(counted.strayed, pixels as u64, "全画素が外れていない");
         assert!(!counted.strayed_ratio_exceeds(1000));
     }
