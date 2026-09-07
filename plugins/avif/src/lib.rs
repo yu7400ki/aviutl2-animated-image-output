@@ -1,5 +1,7 @@
 mod config;
 mod dialog;
+#[cfg(test)]
+mod encode_tests;
 
 use avif_encoder::{ColorType, Config as EncoderConfig, Encoder, Usage};
 use aviutl2::{
@@ -171,9 +173,8 @@ register_logger!();
 mod tests {
     use super::*;
     use avif_encoder::YuvFormat;
+    use aviutl2_host::temp_path;
     use std::num::NonZeroUsize;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
     fn color_format_maps_to_the_matching_color_type() {
@@ -311,16 +312,6 @@ mod tests {
         assert!(!pair.contains("all-intra"), "{pair}");
     }
 
-    /// まだ存在しない一時ファイルの場所
-    fn temp_path() -> PathBuf {
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        std::env::temp_dir().join(format!(
-            "avif-output-{}-{}.avif",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ))
-    }
-
     /// 画素ごとに値の違う不透明なRGBA
     fn frame_of(seed: u8, width: u32, height: u32) -> Vec<u8> {
         (0..height)
@@ -353,7 +344,7 @@ mod tests {
     /// 書き出しはISOBMFFの `ftyp` から始まる
     #[test]
     fn a_written_file_starts_with_the_ftyp_box() {
-        let path = temp_path();
+        let path = temp_path("avif");
 
         write_animation(&path, 4, 4).unwrap();
 
@@ -366,7 +357,7 @@ mod tests {
     /// 失敗した書き出しは、書きかけのファイルを残さない
     #[test]
     fn a_failed_write_leaves_no_file() {
-        let path = temp_path();
+        let path = temp_path("avif");
 
         write_animation(&path, 4, 3).expect_err("宣言より少ないので閉じられない");
 
