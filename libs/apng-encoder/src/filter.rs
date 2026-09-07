@@ -861,21 +861,6 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_unfiltered_image_produces_no_output() {
-        let mut filtered = vec![0xAA];
-        filter_image(
-            &[],
-            0,
-            4,
-            Strategy::Unfiltered,
-            &mut Scratch::new(),
-            &mut filtered,
-        );
-
-        assert_eq!(filtered, [0xAA]);
-    }
-
-    #[test]
     fn an_empty_image_produces_no_output() {
         let mut filtered = vec![0xAA];
         filter_image(
