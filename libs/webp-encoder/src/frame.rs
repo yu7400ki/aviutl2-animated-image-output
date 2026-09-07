@@ -5,7 +5,7 @@ use crate::normalize::normalize;
 use anim_core::{ColorType, Layout, Rect, Rewrite, dirty_rect};
 
 /// キャンバスの1画素のバイト数
-const PIXEL: usize = 4;
+pub(crate) const PIXEL: usize = 4;
 
 /// 完全不透明を表すα
 const OPAQUE: u8 = u8::MAX;

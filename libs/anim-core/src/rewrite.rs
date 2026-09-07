@@ -24,16 +24,11 @@ impl Span {
         }
     }
 
-    /// `span` と `other` をどちらも含む範囲
-    ///
-    /// `span` が無ければ `other` そのもの。
-    pub fn union(span: Option<Span>, other: Span) -> Self {
-        match span {
-            Some(span) => Span {
-                min: span.min.min(other.min),
-                max: span.max.max(other.max),
-            },
-            None => other,
+    /// 自身と `other` をどちらも含む範囲
+    pub fn union(self, other: Span) -> Self {
+        Span {
+            min: self.min.min(other.min),
+            max: self.max.max(other.max),
         }
     }
 
@@ -114,8 +109,8 @@ impl Plane {
 
     /// `rect` の中で立っているビットが、各行と各列で占める範囲
     fn profile(&self, rect: Rect) -> Profile {
-        let mut rows = vec![None; rect.height as usize];
-        let mut cols = vec![None; rect.width as usize];
+        let mut rows: Vec<Option<Span>> = vec![None; rect.height as usize];
+        let mut cols: Vec<Option<Span>> = vec![None; rect.width as usize];
         let left = rect.x as usize;
         let right = left + rect.width as usize;
         let words = left / WORD_BITS..right.div_ceil(WORD_BITS);
@@ -133,8 +128,11 @@ impl Plane {
                 }
                 while word != 0 {
                     let x = (index * WORD_BITS + word.trailing_zeros() as usize - left) as u32;
-                    *span = Some(Span::union(*span, Span::at(x)));
-                    cols[x as usize] = Some(Span::union(cols[x as usize], Span::at(row as u32)));
+                    *span = Some((*span).map_or(Span::at(x), |span| span.union(Span::at(x))));
+                    cols[x as usize] =
+                        Some(cols[x as usize].map_or(Span::at(row as u32), |span| {
+                            span.union(Span::at(row as u32))
+                        }));
                     word &= word - 1;
                 }
             }
@@ -329,7 +327,7 @@ mod tests {
     }
 
     fn span(min: u32, max: u32) -> Option<Span> {
-        Some(Span::union(Some(Span::at(min)), Span::at(max)))
+        Some(Span::at(min).union(Span::at(max)))
     }
 
     /// 再現できる疑似乱数

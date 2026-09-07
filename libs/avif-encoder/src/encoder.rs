@@ -328,21 +328,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_sequence_falls_to_realtime_from_speed_seven() {
-        let usage = |speed| Config { speed, ..config() }.operating_point(false).usage;
-        for speed in 0..=6 {
-            assert_eq!(usage(speed), Usage::GoodQuality, "speed {speed}");
-        }
-        for speed in 7..=10 {
-            assert_eq!(usage(speed), Usage::Realtime, "speed {speed}");
-        }
-    }
-
     /// speedごとの動作点を実値で固定する
-    ///
-    /// libavifがaomへ渡す用途とcpu-usedの対応を写したものなので、同梱の
-    /// libavifを更新して対応が変われば、記録した動作点は静かにずれる。
     #[test]
     fn every_speed_of_a_sequence_resolves_to_its_operating_point() {
         const TABLE: [(u8, Usage, u8); 11] = [
@@ -365,14 +351,6 @@ mod tests {
                 "speed {speed}"
             );
         }
-    }
-
-    #[test]
-    fn the_cpu_used_stops_at_nine() {
-        let cpu_used = |speed| Config { speed, ..config() }.operating_point(false).cpu_used;
-        assert_eq!(cpu_used(0), 0);
-        assert_eq!(cpu_used(9), 9);
-        assert_eq!(cpu_used(10), 9);
     }
 
     fn encoder(num_frames: u32, config: Config) -> Result<Encoder<Cursor<Vec<u8>>>, Error> {

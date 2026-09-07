@@ -2,6 +2,7 @@
 
 use crate::Config;
 use crate::error::{EncodingError, Error};
+use crate::frame::PIXEL;
 use crate::picture::Picture;
 use anim_core::{ColorType, Layout, Rect, crop, has_transparency};
 use std::ffi::c_int;
@@ -14,11 +15,6 @@ const CHUNK_HEADER: usize = 8;
 
 /// ファイル先頭のRIFFヘッダ (FourCC、サイズ、`WEBP`) のバイト数
 const FILE_HEADER: usize = 12;
-
-/// キャンバスの1画素あたりのバイト数
-///
-/// 合成でキャンバスの値へ戻る画素を書けるのは、αの欄を持つRGBAのときだけ。
-const PIXEL: usize = 4;
 
 /// 1フレームの符号化結果
 ///
@@ -188,9 +184,9 @@ impl Codec {
 
 /// 切り出した画素のうち `base` と一致するものを完全透過へ置き換える
 ///
-/// `cropped` は `base` と同じ並びの画素列から `rect` を切り出したもの、`base` は
-/// `stride` バイトの行が隙間なく並んだRGBA。置き換えた画素はblend有りの合成で
-/// `base` の値へ戻る。
+/// `cropped` は `rect` を切り出したRGBAの画素列、`base` は `stride` バイトの行が
+/// 隙間なく並んだRGBAのキャンバス。置き換えた画素はblend有りの合成で `base` の値へ
+/// 戻る。
 fn substitute(cropped: &mut [u8], base: &[u8], rect: Rect, stride: usize) {
     let row_len = rect.width as usize * PIXEL;
     let head = rect.y as usize * stride + rect.x as usize * PIXEL;

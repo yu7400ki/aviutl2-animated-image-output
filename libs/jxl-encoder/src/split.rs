@@ -52,8 +52,10 @@ fn scan<const BPP: usize>(previous: &[u8], frame: &[u8], layout: &Layout, rect: 
                 break;
             }
             let column = differs / BPP;
-            *span = Some(Span::union(*span, Span::at(column as u32)));
-            cols[column] = Some(Span::union(cols[column], y));
+            *span = Some(span.map_or(Span::at(column as u32), |span| {
+                span.union(Span::at(column as u32))
+            }));
+            cols[column] = Some(cols[column].map_or(y, |span| span.union(y)));
             cursor = differs + BPP;
         }
     }
@@ -80,8 +82,8 @@ impl Slab {
         };
         Some(match acc {
             Some(acc) => Slab {
-                lane: Span::union(Some(acc.lane), Span::at(lane)),
-                cross: Span::union(Some(acc.cross), cross),
+                lane: acc.lane.union(Span::at(lane)),
+                cross: acc.cross.union(cross),
             },
             None => Slab {
                 lane: Span::at(lane),
