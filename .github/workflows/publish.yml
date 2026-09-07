@@ -19,7 +19,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Fetch vendored sources
         uses: ./.github/actions/vendor
@@ -57,9 +57,8 @@ jobs:
         run: bash scripts/check-packages.sh "$VERSION"
 
       - name: Create draft release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.ref_name }}
           draft: true
           files: release/*.au2pkg.zip
         env:
