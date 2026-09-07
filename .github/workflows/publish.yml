@@ -3,11 +3,7 @@ name: Build and Draft Release for Plugin
 on:
   push:
     tags:
-      - "apng-v*.*.*"
-      - "gif-v*.*.*"
-      - "webp-v*.*.*"
-      - "avif-v*.*.*"
-      - "jxl-v*.*.*"
+      - "v*.*.*"
 
 permissions:
   contents: write
@@ -20,7 +16,6 @@ jobs:
         shell: bash
     env:
       CARGO_TERM_COLOR: always
-      CARGO_TARGET_DIR: D:\t
 
     steps:
       - name: Checkout repository
@@ -32,52 +27,40 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Determine plugin format
-        id: format
+      - name: Check version consistency
         run: |
-          TAG="${GITHUB_REF##*/}"
-          if [[ "$TAG" == apng-v* ]]; then
-            echo "format=png" >> $GITHUB_OUTPUT
-          elif [[ "$TAG" == gif-v* ]]; then
-            echo "format=gif" >> $GITHUB_OUTPUT
-          elif [[ "$TAG" == webp-v* ]]; then
-            echo "format=webp" >> $GITHUB_OUTPUT
-          elif [[ "$TAG" == avif-v* ]]; then
-            echo "format=avif" >> $GITHUB_OUTPUT
-          elif [[ "$TAG" == jxl-v* ]]; then
-            echo "format=jxl" >> $GITHUB_OUTPUT
-          else
-            echo "Unknown format"
-            exit 1
-          fi
+          VERSION="$(bash scripts/check-version.sh "$GITHUB_REF_NAME")"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
-      - name: Install NASM (for AVIF)
-        if: steps.format.outputs.format == 'avif'
+      - name: Install NASM
         run: |
           choco install nasm -y
-          echo "C:\Program Files\NASM" >> $GITHUB_PATH
+          echo "C:\Program Files\NASM" >> "$GITHUB_PATH"
 
-      - name: Build plugin
+      - name: Install packaging tools
         run: |
-          cargo build --release -p ${{ steps.format.outputs.format }}_output
+          cargo install aviutl2-cli --version 0.11.0 --locked
+          cargo install cargo-about --version 0.8.4 --locked
 
-      - name: Rename artifact
+      - name: Collect third-party licences
+        run: bash scripts/third-party-licences.sh
+
+      # 6 本は .aviutl2-cli/release-stage/ を共有するので逐次で回す。
+      # 全部入りが release ビルドを済ませ、形式ごとの 5 本は空振りする。
+      - name: Build packages
         run: |
-          FORMAT=${{ steps.format.outputs.format }}
-          DLL_PATH="${CARGO_TARGET_DIR}/release/${FORMAT}_output.dll"
-          AUO2_PATH="${FORMAT}_output.auo2"
-          if [ ! -f "$DLL_PATH" ]; then
-            echo "Build artifact not found: $DLL_PATH"
-            exit 1
-          fi
-          cp "$DLL_PATH" "$AUO2_PATH"
+          for config in bundle png gif webp avif jxl; do
+            au2 release -c "packaging/$config.toml" --set-version "$VERSION"
+          done
+
+      - name: Check packages
+        run: bash scripts/check-packages.sh "$VERSION"
 
       - name: Create draft release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           draft: true
-          files: |
-            *.auo2
+          files: release/*.au2pkg.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
