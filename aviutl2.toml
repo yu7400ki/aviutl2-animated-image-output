@@ -5,7 +5,7 @@ version = "2.0.0"
 
 [build_group]
 debug_all = ["cargo build"]
-release_all = ["cargo build --release"]
+release_all = ["cargo build --release --locked"]
 
 [development]
 aviutl2_version = "latest"
