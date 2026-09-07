@@ -9,7 +9,7 @@ use crate::error::Error;
 use crate::layout::Layout;
 use crate::over;
 use crate::pipeline::{Cut, Pipeline, Region, Restored, Ticket};
-use anim_core::{ColorType, FrameDelay, InputError, Pacing, Rect};
+use anim_core::{ColorType, FrameDelay, InputError, Rect};
 use std::collections::VecDeque;
 use std::io::Write;
 use std::num::NonZeroUsize;
@@ -43,19 +43,6 @@ impl Default for Config {
         }
     }
 }
-
-/// blend_op=OVERの候補を採るのをやめるまでの連敗数
-///
-/// 候補が立つかどうかは矩形の中身で決まるため、素材によっては何十フレームも
-/// 立ち続けて負け続ける。数フレームで見切ると勝ち負けの揺れを拾ってしまうので、
-/// 傾きがはっきりするまでの回数を取る。
-const BLEND_LOSS_STREAK: u32 = 6;
-
-/// 連敗した後、blend_op=OVERの候補を採らないフレーム数
-///
-/// 素材の性質は途中で変わるため、休みを置いてまた試す。長く休むほど変わり目を
-/// 見つけるのが遅れる。
-const BLEND_REST_FRAMES: u32 = 8;
 
 /// dispose_opを決めた結果
 ///
@@ -100,13 +87,13 @@ struct Staged {
 
 /// 決定点が組み立てた、blend_op=OVERの候補
 ///
-/// 書き出し点はこの3つから、間合いを進めるかどうかと、比べる相手があるかどうかを読む。
+/// 書き出し点はこの3つから、比べる相手があるかどうかを読む。
 enum Over {
     /// アルファを持たない出力と先頭フレーム。そのままblend_op=SOURCEで書く
     Skipped,
-    /// 詰め直せなかったフレーム。間合いを1つ進めてblend_op=SOURCEで書く
+    /// 詰め直せなかったフレーム。blend_op=SOURCEで書く
     Unpacked,
-    /// 詰め直して投入したフレーム。間合いを1つ進め、休みが明けていれば比べる
+    /// 詰め直して投入したフレーム。圧縮した候補と比べる
     Packed(Ticket<Region>),
 }
 
@@ -137,8 +124,6 @@ struct Writing {
     pending: VecDeque<Pending>,
     /// dispose_opがまだ決まっていない、直前に決定したフレーム
     open: Option<Decided>,
-    /// blend_op=OVERの候補を採るかどうかの間合い
-    blend_pacing: Pacing,
 }
 
 impl Writing {
@@ -147,7 +132,6 @@ impl Writing {
         Writing {
             pending: VecDeque::new(),
             open: None,
-            blend_pacing: Pacing::new(BLEND_LOSS_STREAK, BLEND_REST_FRAMES),
         }
     }
 
@@ -539,8 +523,6 @@ impl<W: Write> Encoder<W> {
     ///
     /// 潰した画素は完全な透明として書くため、アルファを持つ出力でだけ候補が立つ。
     /// 重ねる先を持つのは、キャンバスの埋まった2フレーム目以降になる。
-    ///
-    /// 条件を満たすフレームは、間合いに依らず投入する。
     fn submit_over(&mut self, data: &[u8], index: u32, dispose: u8, rect: Rect) -> Over {
         if !matches!(self.layout.input, ColorType::Rgba8) || index == 0 {
             return Over::Skipped;
@@ -563,29 +545,15 @@ impl<W: Write> Encoder<W> {
 
     /// 書き出すフレームをキャンバスへ重ねる方法を決める
     ///
-    /// 候補が立ったフレームは、詰め直せたかどうかに依らず間合いを1つ進める。休みが
-    /// 明けていれば圧縮した候補と `source` を比べて小さい方を採り、その結果を間合いへ
-    /// 記録して、退けた側のバッファを配り直す先へ返す。同じ大きさならSOURCEを採る。
-    ///
-    /// 休みの最中も投入した候補を受け取り、そのバッファを配り直す先へ返す。
+    /// 詰め直して投入したフレームは、圧縮した候補と `source` を比べて小さい方を採り、
+    /// 退けた側のバッファを配り直す先へ返す。同じ大きさならSOURCEを採る。
     fn resolve_blend(&mut self, over: Over, source: Candidate) -> (u8, Candidate) {
-        if matches!(over, Over::Skipped) {
-            return (BLEND_OP_SOURCE, source);
-        }
-
-        let trying = self.writing.blend_pacing.should_try();
         let Over::Packed(job) = over else {
             return (BLEND_OP_SOURCE, source);
         };
-        let candidate = self.pipeline.take(job);
-        if !trying {
-            self.pipeline.recycle(candidate.into_body());
-            return (BLEND_OP_SOURCE, source);
-        }
 
-        let taken = candidate.len() < source.len();
-        self.writing.blend_pacing.record(taken);
-        if taken {
+        let candidate = self.pipeline.take(job);
+        if candidate.len() < source.len() {
             self.pipeline.recycle(source.into_body());
             (BLEND_OP_OVER, candidate)
         } else {
@@ -865,25 +833,13 @@ mod tests {
         [(rgb_config(), rgb), (rgba_config(), rgba)]
     }
 
-    /// 潰した候補が負け続ける前半のフレーム数
-    ///
-    /// 一様な面から始め、まだらな半透明の面と一様な面を [`BLEND_LOSS_STREAK`] 回
-    /// 繰り返す。最後のフレームで連敗が閾値に届く。
-    const LOSING_FRAMES: usize = 1 + 2 * BLEND_LOSS_STREAK as usize;
-
-    /// 休みの最中に潰した候補が負け続けるフレーム数
-    ///
-    /// [`BLEND_LOSS_STREAK`] のぶんだけ並べ、残りの休みを勝つフレームへ譲る。負けを
-    /// 休みの最中にも数えると、この列の終わりで連敗が閾値に届いて休みが張り直される。
-    const RESTING_LOSSES: usize = BLEND_LOSS_STREAK as usize;
+    /// [`resting_frames`] が一様な面とまだらな半透明の面を往復する回数
+    const LOSING_ROUNDS: usize = 6;
 
     /// [`resting_frames`] が画素ごとに違う面へ切り替わるフレームの位置
-    const DENSE_STARTS_AT: usize = LOSING_FRAMES + RESTING_LOSSES;
+    const DENSE_STARTS_AT: usize = 1 + 2 * LOSING_ROUNDS;
 
-    /// [`resting_frames`] で潰した候補が初めて採られるフレームの位置
-    const REST_ENDS_AT: usize = LOSING_FRAMES + BLEND_REST_FRAMES as usize;
-
-    /// 休みが明けてから潰した候補が採られるフレーム数
+    /// [`resting_frames`] で潰した候補が採られるフレーム数
     const WINNING_FRAMES: usize = 5;
 
     /// RGBA8の1画素を、色を反転した不透明な値へ書き換える
@@ -899,8 +855,7 @@ mod tests {
     ///
     /// 前半は一様な面とまだらな半透明の面を交互に置く。まだらへ変わるフレームは
     /// 変化した画素が不透明でないため詰め直せず、一様へ戻るフレームは1画素の矩形を
-    /// 詰め直して必ず負ける。連敗が閾値に届いた後は同じ面を並べ、休みが明ける手前まで
-    /// 1画素の矩形を詰め直しては負け続ける。
+    /// 詰め直して必ず負ける。
     ///
     /// 後半は画素ごとに違う不透明な色を敷き、そこへ離れた2画素ずつ印を書き足す。
     /// 矩形は2つの印を囲んで広がり、その中のほとんどが変化しないため、潰した候補が
@@ -917,17 +872,14 @@ mod tests {
         }
 
         let mut frames = vec![uniform.clone()];
-        for _ in 0..BLEND_LOSS_STREAK {
+        for _ in 0..LOSING_ROUNDS {
             frames.push(speckled.clone());
-            frames.push(uniform.clone());
-        }
-        for _ in 0..RESTING_LOSSES {
             frames.push(uniform.clone());
         }
 
         let mut dense = with_alpha(&noise(PIXELS * 3, 5));
         frames.push(dense.clone());
-        while frames.len() < REST_ENDS_AT + WINNING_FRAMES {
+        while frames.len() < DENSE_STARTS_AT + 1 + WINNING_FRAMES {
             let step = frames.len() - DENSE_STARTS_AT - 1;
             invert_rgba(&mut dense, 1 + step, 1);
             invert_rgba(&mut dense, WIDTH as usize - 2 - step, HEIGHT as usize - 2);
@@ -1076,31 +1028,17 @@ mod tests {
         }
     }
 
-    /// 潰した候補は、休みが明けたフレームから採られ始める
+    /// 潰した候補は、短ければどのフレームでも採られる
     ///
-    /// 連敗を積む前半を外した後半だけの列では、先頭を除くすべてのフレームで潰した
-    /// 候補が採られる。前半を戻すと同じフレームがblend_op=SOURCEで書かれるので、
-    /// 休みの最中に投入した候補を捨てていることと、休みが明ける位置の両方が出る。
+    /// 前半のフレームは詰め直せないか、詰め直しても負ける。後半は潰した候補が必ず
+    /// 勝つので、blend_op=OVERで書かれるのは後半の全フレームになる。
     #[test]
-    fn the_over_candidate_is_taken_once_the_rest_ends() {
-        const {
-            assert!(
-                DENSE_STARTS_AT + 1 < REST_ENDS_AT,
-                "休みの最中に潰した候補が勝つフレームがある"
-            );
-        }
-
+    fn the_shorter_over_candidate_is_always_taken() {
         let (config, input) = resting_material();
-        let winning = input[DENSE_STARTS_AT..].to_vec();
-        assert_eq!(
-            over_frames(&encode_with_workers(&winning, config, 1)),
-            (1..winning.len()).collect::<Vec<_>>(),
-            "後半だけの列で潰した候補が採られるフレーム"
-        );
         assert_eq!(
             over_frames(&encode_with_workers(&input, config, 1)),
-            (REST_ENDS_AT..input.len()).collect::<Vec<_>>(),
-            "素材全体で潰した候補が採られるフレーム"
+            (DENSE_STARTS_AT + 1..input.len()).collect::<Vec<_>>(),
+            "潰した候補が採られるフレーム"
         );
     }
 
@@ -1131,9 +1069,8 @@ mod tests {
     ///
     /// 決定は詰め直した候補と、次に決めるフレームの捨てる候補のぶんだけバッファを
     /// 持ち出し、受け取った捨てる候補のぶん — 退けた本体か、候補にしなかった本体 — を
-    /// 返す。書き出しは持ち出したぶんと、書き出した本体を返す。休みの最中の候補も
-    /// 受け取ってから返すので、出入りの数はどのフレームでも候補の有無だけで決まり、
-    /// 書き出し切ると配った数がそのまま戻る。
+    /// 返す。書き出しは持ち出したぶんと、書き出した本体を返す。出入りの数はどの
+    /// フレームでも候補の有無だけで決まり、書き出し切ると配った数がそのまま戻る。
     ///
     /// 仕掛かりの上限を超えるバッファを先に満たしておく。確保が入れば最後の数がそのぶん
     /// 増える。
@@ -1298,74 +1235,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// 連敗が閾値に届くまでは候補を立てるのをやめない
-    ///
-    /// 少ない負けで見切ると勝ち負けの揺れを拾い、まだ採られる素材でも候補が
-    /// 立たなくなる。休みに入るのは閾値に届いたときだけで、1回の負けでは入らない。
-    #[test]
-    fn the_pacing_keeps_trying_below_the_streak() {
-        let mut pacing = Pacing::new(BLEND_LOSS_STREAK, BLEND_REST_FRAMES);
-        pacing.record(false);
-        assert_eq!(pacing.resting(), 0, "1回の負けで休みに入っている");
-
-        for loss in 2..BLEND_LOSS_STREAK {
-            assert!(pacing.should_try(), "連敗 {loss} 回目");
-            pacing.record(false);
-            assert_eq!(pacing.resting(), 0, "連敗 {loss} 回で休みに入っている");
-        }
-        assert!(pacing.should_try(), "閾値に届く前に休みに入っている");
-    }
-
-    /// 投入済みのフレームを決定して書き出し、そのときの間合いを返す
-    ///
-    /// 決定も書き出しも投入の順に進むため、列に溜めたまま進めた場合と並びは変わらない。
-    /// 最後に決定したフレームはdispose_opが次の決定で確定するため、書き出しは
-    /// その1つ手前まで届く。
-    fn pacing_after_writing<W: Write>(encoder: &mut Encoder<W>) -> &Pacing {
-        while !encoder.staged.is_empty() {
-            encoder.decide().unwrap();
-        }
-        while let Some(pending) = encoder.writing.overflowing(1) {
-            encoder.write(pending).unwrap();
-        }
-        &encoder.writing.blend_pacing
-    }
-
-    /// 書き出しの経路は、詰め直せなかったフレームでも間合いを1つ進める
-    ///
-    /// まだらな半透明の画素は不透明でないため詰め直せず、それを塗り潰すフレームだけが
-    /// 一様な矩形を詰め直して必ず負ける。連敗が尽きた後は、詰め直せないフレームでも
-    /// 休みが1つ減る。
-    #[test]
-    fn the_write_path_consults_the_pacing() {
-        // 交互の列は一様な面から始まり、まだらな半透明の面がその次に来る
-        let frames = resting_frames();
-        let (uniform, speckled) = (frames[0].clone(), frames[1].clone());
-
-        let mut input = frames[..LOSING_FRAMES].to_vec();
-        // 連敗が閾値に届くフレームを書き出しへ届かせる
-        input.push(speckled);
-        let delay = FrameDelay::new(1, 30).unwrap();
-
-        let mut encoder = Encoder::new(
-            Cursor::new(Vec::new()),
-            WIDTH,
-            HEIGHT,
-            input.len() as u32 + 1,
-            rgba_config(),
-        )
-        .unwrap();
-        for frame in &input {
-            encoder.add_frame(frame.clone(), delay).unwrap();
-        }
-        let blend_pacing = pacing_after_writing(&mut encoder);
-        assert_eq!(blend_pacing.resting(), BLEND_REST_FRAMES);
-
-        // 新しく書き出しへ届くのは、詰め直せないまだらなフレーム
-        encoder.add_frame(uniform, delay).unwrap();
-        let blend_pacing = pacing_after_writing(&mut encoder);
-        assert_eq!(blend_pacing.resting(), BLEND_REST_FRAMES - 1);
     }
 }
