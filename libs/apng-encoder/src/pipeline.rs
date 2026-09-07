@@ -1,4 +1,4 @@
-//! ワーカープールと、番号を指して受け取る圧縮の結果
+//! ワーカープールと、引換券で受け取る圧縮の結果
 
 use crate::codec::{BufferPool, Candidate, Codec};
 use crate::error::Error;
@@ -6,6 +6,7 @@ use crate::layout::Layout;
 use anim_core::{Rect, crop};
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
+use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -64,6 +65,8 @@ enum Source {
 }
 
 /// ジョブ1つの結末
+///
+/// 巻き戻し以外の変種は、[`Source`] の埋め方と1対1で対応する。
 enum Outcome {
     Compressed(Candidate),
     /// 切り出した矩形と、そこを圧縮した候補
@@ -71,12 +74,17 @@ enum Outcome {
         rect: Rect,
         candidate: Candidate,
     },
-    /// 走査した矩形が広く、候補にしなかった。本体のバッファは使っていない
-    Rejected {
-        body: Vec<u8>,
-    },
+    Restored(Restoration),
     /// ワーカーが巻き戻した。駆動側で投げ直す
     Panicked(Box<dyn Any + Send>),
+}
+
+/// [`Source::Restored`] のジョブ1つの結末
+enum Restoration {
+    /// 走査した矩形と、そこを圧縮した候補
+    Cut { rect: Rect, candidate: Candidate },
+    /// 走査した矩形が広く、候補にしなかった。本体のバッファは使っていない
+    Rejected { body: Vec<u8> },
 }
 
 /// ワーカーが返す、ジョブ1つの結末と領域のバッファ
@@ -186,14 +194,14 @@ fn cut(
     data: &[u8],
     rect: Rect,
     body: Vec<u8>,
-) -> Outcome {
+) -> (Rect, Candidate) {
     let bpp = layout.bytes_per_pixel;
     crop(data, rect, layout.stride, bpp, bpp, region);
 
-    Outcome::Cut {
+    (
         rect,
-        candidate: codec.compress(region, rect.width as usize * bpp, bpp, body),
-    }
+        codec.compress(region, rect.width as usize * bpp, bpp, body),
+    )
 }
 
 /// ジョブ1つを片付け、結末と領域のバッファを返す
@@ -214,10 +222,14 @@ fn run(codec: &mut Codec, layout: &Layout, job: Job) -> (Outcome, Vec<u8>) {
         Source::Ready { region_stride } => {
             Outcome::Compressed(codec.compress(&region, region_stride, bpp, body))
         }
-        Source::Crop { data, rect } => cut(codec, layout, &mut region, &data, rect, body),
+        Source::Crop { data, rect } => {
+            let (rect, candidate) = cut(codec, layout, &mut region, &data, rect, body);
+            Outcome::Cut { rect, candidate }
+        }
         Source::Diff { previous, data } => {
             let rect = layout.bounding_rect(&previous, &data);
-            cut(codec, layout, &mut region, &data, rect, body)
+            let (rect, candidate) = cut(codec, layout, &mut region, &data, rect, body);
+            Outcome::Cut { rect, candidate }
         }
         Source::Restored {
             canvas,
@@ -226,10 +238,11 @@ fn run(codec: &mut Codec, layout: &Layout, job: Job) -> (Outcome, Vec<u8>) {
         } => {
             let rect = layout.bounding_rect(&canvas, &data);
             if rect.area() >= kept_area {
-                return Outcome::Rejected { body };
+                return Outcome::Restored(Restoration::Rejected { body });
             }
 
-            cut(codec, layout, &mut region, &data, rect, body)
+            let (rect, candidate) = cut(codec, layout, &mut region, &data, rect, body);
+            Outcome::Restored(Restoration::Cut { rect, candidate })
         }
     };
     let outcome = match panic::catch_unwind(AssertUnwindSafe(compress)) {
@@ -301,10 +314,43 @@ fn spawn(level: u32, workers: NonZeroUsize, layout: Layout) -> Result<Pool, Erro
     Ok(pool)
 }
 
-/// 圧縮を回し、番号を指して結果を受け取るパイプライン
+/// 切り出し済みの領域を圧縮するジョブ
+pub(crate) enum Region {}
+
+/// フレームから切り出して圧縮するジョブ
+pub(crate) enum Cut {}
+
+/// キャンバスとの差分を走査して切り出すジョブ
+pub(crate) enum Restored {}
+
+/// 投入したジョブの結果を受け取る引換券
+///
+/// 投入が1枚配り、受け取りが1枚使う。`K` が受け取り口を決める。
+pub(crate) struct Ticket<K> {
+    index: usize,
+    kind: PhantomData<fn() -> K>,
+}
+
+/// 引換券を使われるのを待っている結末
+#[derive(Default)]
+struct Ready {
+    region: HashMap<usize, Candidate>,
+    cut: HashMap<usize, (Rect, Candidate)>,
+    restored: HashMap<usize, Restoration>,
+}
+
+impl Ready {
+    /// 溜まっている結末の数
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.region.len() + self.cut.len() + self.restored.len()
+    }
+}
+
+/// 圧縮を回し、引換券で結果を受け取るパイプライン
 ///
 /// ワーカーが2つ以上あるときだけ群れを起こす。1つなら投入した場で圧縮する。
-/// 結末は届いた順に溜め、指された番号のものを返すので、受け取りの順は投入の順から
+/// 結末は届いた順に溜め、引換券の指すものを返すので、受け取りの順は投入の順から
 /// 独立している。
 ///
 /// 領域と本体に使うバッファはここが配り、結果と一緒に受け取って配り直す。
@@ -314,8 +360,7 @@ pub(crate) struct Pipeline {
     pool: Option<Pool>,
     /// 次に投入するジョブの番号
     submitted: usize,
-    /// 番号を指されるのを待っている結末
-    ready: HashMap<usize, Outcome>,
+    ready: Ready,
     /// 配り直すバッファ
     buffers: BufferPool,
     /// 圧縮を回すワーカー数
@@ -340,7 +385,7 @@ impl Pipeline {
             codec: Codec::new(level),
             pool,
             submitted: 0,
-            ready: HashMap::new(),
+            ready: Ready::default(),
             buffers: BufferPool::new(),
             workers,
             layout,
@@ -368,10 +413,14 @@ impl Pipeline {
         self.buffers.len()
     }
 
-    /// 切り出し済みの領域の圧縮を投入し、結果を指すための番号を返す
+    /// 切り出し済みの領域の圧縮を投入し、結果の引換券を返す
     ///
     /// `region` はパイプラインが引き取り、[`Pipeline::buffer`] から配り直す。
-    pub(crate) fn submit_region(&mut self, region: Vec<u8>, region_stride: usize) -> usize {
+    pub(crate) fn submit_region(
+        &mut self,
+        region: Vec<u8>,
+        region_stride: usize,
+    ) -> Ticket<Region> {
         let body = self.buffer();
         self.submit(Job {
             region,
@@ -380,10 +429,10 @@ impl Pipeline {
         })
     }
 
-    /// フレームから `rect` を切り出す圧縮を投入し、結果を指すための番号を返す
+    /// フレームから `rect` を切り出す圧縮を投入し、結果の引換券を返す
     ///
     /// 切り出し先は [`Pipeline::buffer`] から借り、結果と一緒に配り直す。
-    pub(crate) fn submit_crop(&mut self, data: Arc<Vec<u8>>, rect: Rect) -> usize {
+    pub(crate) fn submit_crop(&mut self, data: Arc<Vec<u8>>, rect: Rect) -> Ticket<Cut> {
         let region = self.buffer();
         let body = self.buffer();
         self.submit(Job {
@@ -393,12 +442,15 @@ impl Pipeline {
         })
     }
 
-    /// `previous` と `data` の差分の外接矩形を切り出す圧縮を投入し、結果を指すための
-    /// 番号を返す
+    /// `previous` と `data` の差分の外接矩形を切り出す圧縮を投入し、結果の引換券を返す
     ///
     /// 走査も切り出しも圧縮を回す側で行う。切り出し先は [`Pipeline::buffer`] から借り、
     /// 結果と一緒に配り直す。
-    pub(crate) fn submit_diff(&mut self, previous: Arc<Vec<u8>>, data: Arc<Vec<u8>>) -> usize {
+    pub(crate) fn submit_diff(
+        &mut self,
+        previous: Arc<Vec<u8>>,
+        data: Arc<Vec<u8>>,
+    ) -> Ticket<Cut> {
         let region = self.buffer();
         let body = self.buffer();
         self.submit(Job {
@@ -408,7 +460,7 @@ impl Pipeline {
         })
     }
 
-    /// [`Source::Restored`] の圧縮を投入し、結果を指すための番号を返す
+    /// [`Source::Restored`] の圧縮を投入し、結果の引換券を返す
     ///
     /// 領域と本体は [`Pipeline::buffer`] から借り、どちらの結末でも配り直す。
     pub(crate) fn submit_restored(
@@ -416,7 +468,7 @@ impl Pipeline {
         canvas: Arc<Vec<u8>>,
         data: Arc<Vec<u8>>,
         kept_area: u64,
-    ) -> usize {
+    ) -> Ticket<Restored> {
         let region = self.buffer();
         let body = self.buffer();
         self.submit(Job {
@@ -430,10 +482,10 @@ impl Pipeline {
         })
     }
 
-    /// ジョブを投入し、結果を指すための番号を返す
+    /// ジョブを投入し、結果の引換券を返す
     ///
     /// ワーカーが1つなら、投入した場で片付けて結末を溜める。
-    fn submit(&mut self, job: Job) -> usize {
+    fn submit<K>(&mut self, job: Job) -> Ticket<K> {
         let index = self.submitted;
         self.submitted += 1;
 
@@ -442,61 +494,45 @@ impl Pipeline {
             None => {
                 let (outcome, region) = run(&mut self.codec, &self.layout, job);
                 self.buffers.give(region);
-                match outcome {
-                    Outcome::Panicked(payload) => panic::resume_unwind(payload),
-                    outcome => {
-                        self.ready.insert(index, outcome);
-                    }
-                }
+                self.deliver(index, outcome);
             }
         }
-        index
-    }
-
-    /// `index` の領域を圧縮するジョブの結果を受け取る
-    pub(crate) fn take(&mut self, index: usize) -> Candidate {
-        match self.wait(index) {
-            Outcome::Compressed(candidate) => candidate,
-            Outcome::Panicked(payload) => panic::resume_unwind(payload),
-            Outcome::Cut { .. } | Outcome::Rejected { .. } => {
-                panic!("領域を圧縮するジョブの番号を指している")
-            }
+        Ticket {
+            index,
+            kind: PhantomData,
         }
     }
 
-    /// `index` の [`Source::Crop`] か [`Source::Diff`] のジョブの結果を、切り出した
-    /// 矩形とともに受け取る
-    pub(crate) fn take_cut(&mut self, index: usize) -> (Rect, Candidate) {
-        match self.wait(index) {
-            Outcome::Cut { rect, candidate } => (rect, candidate),
-            Outcome::Panicked(payload) => panic::resume_unwind(payload),
-            Outcome::Compressed(_) | Outcome::Rejected { .. } => {
-                panic!("切り出して圧縮するジョブの番号を指している")
-            }
-        }
+    /// 領域を圧縮するジョブの結果を受け取る
+    pub(crate) fn take(&mut self, ticket: Ticket<Region>) -> Candidate {
+        self.wait(ticket.index, |ready| &mut ready.region)
     }
 
-    /// `index` の [`Source::Restored`] のジョブの結果を受け取る
+    /// [`Source::Crop`] か [`Source::Diff`] のジョブの結果を、切り出した矩形とともに
+    /// 受け取る
+    pub(crate) fn take_cut(&mut self, ticket: Ticket<Cut>) -> (Rect, Candidate) {
+        self.wait(ticket.index, |ready| &mut ready.cut)
+    }
+
+    /// [`Source::Restored`] のジョブの結果を受け取る
     ///
     /// 候補にしなかったときは本体のバッファを配り直して `None` を返す。
-    pub(crate) fn take_restored(&mut self, index: usize) -> Option<(Rect, Candidate)> {
-        match self.wait(index) {
-            Outcome::Cut { rect, candidate } => Some((rect, candidate)),
-            Outcome::Rejected { body } => {
+    pub(crate) fn take_restored(&mut self, ticket: Ticket<Restored>) -> Option<(Rect, Candidate)> {
+        match self.wait(ticket.index, |ready| &mut ready.restored) {
+            Restoration::Cut { rect, candidate } => Some((rect, candidate)),
+            Restoration::Rejected { body } => {
                 self.buffers.give(body);
                 None
             }
-            Outcome::Panicked(payload) => panic::resume_unwind(payload),
-            Outcome::Compressed(_) => panic!("差分を走査するジョブの番号を指している"),
         }
     }
 
-    /// `index` のジョブの結末を受け取る
+    /// `index` のジョブの結末を `pick` の溜め先から受け取る
     ///
     /// 届いていなければ届くまで待つ。先に届いた別の番号の結末は溜めておく。
-    fn wait(&mut self, index: usize) -> Outcome {
+    fn wait<T>(&mut self, index: usize, pick: fn(&mut Ready) -> &mut HashMap<usize, T>) -> T {
         loop {
-            if let Some(outcome) = self.ready.remove(&index) {
+            if let Some(outcome) = pick(&mut self.ready).remove(&index) {
                 return outcome;
             }
 
@@ -506,7 +542,25 @@ impl Pipeline {
                 .recv()
                 .expect("ワーカーは結末を返してから抜ける");
             self.buffers.give(done.region);
-            self.ready.insert(done.index, done.outcome);
+            self.deliver(done.index, done.outcome);
+        }
+    }
+
+    /// 結末を、引換券が指されるまで溜める
+    ///
+    /// ワーカーの巻き戻しは溜めずに、その場で駆動側へ投げ直す。
+    fn deliver(&mut self, index: usize, outcome: Outcome) {
+        match outcome {
+            Outcome::Compressed(candidate) => {
+                self.ready.region.insert(index, candidate);
+            }
+            Outcome::Cut { rect, candidate } => {
+                self.ready.cut.insert(index, (rect, candidate));
+            }
+            Outcome::Restored(restoration) => {
+                self.ready.restored.insert(index, restoration);
+            }
+            Outcome::Panicked(payload) => panic::resume_unwind(payload),
         }
     }
 }
@@ -535,7 +589,7 @@ mod tests {
         noise(STRIDE * HEIGHT, seed)
     }
 
-    /// 投入した順と違う順で番号を指しても、指した番号の結果が返る
+    /// 投入した順と違う順で引換券を使っても、その引換券の結果が返る
     #[test]
     fn a_result_is_taken_by_the_number_it_was_submitted_with() {
         let regions: Vec<Vec<u8>> = (0..8).map(region).collect();
@@ -550,12 +604,12 @@ mod tests {
             .collect();
 
         let mut parallel = pipeline(4);
-        let indices: Vec<usize> = regions
+        let tickets: Vec<Ticket<Region>> = regions
             .iter()
             .map(|region| parallel.submit_region(region.clone(), STRIDE))
             .collect();
-        for (index, expected) in indices.into_iter().zip(&expected).rev() {
-            assert_eq!(&parallel.take(index).into_body(), expected);
+        for (ticket, expected) in tickets.into_iter().zip(&expected).rev() {
+            assert_eq!(&parallel.take(ticket).into_body(), expected);
         }
     }
 

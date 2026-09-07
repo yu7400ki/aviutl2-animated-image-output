@@ -8,7 +8,7 @@ use crate::delta::Delta;
 use crate::error::Error;
 use crate::layout::Layout;
 use crate::over;
-use crate::pipeline::Pipeline;
+use crate::pipeline::{Cut, Pipeline, Region, Restored, Ticket};
 use anim_core::{ColorType, FrameDelay, InputError, Pacing, Rect};
 use std::collections::VecDeque;
 use std::io::Write;
@@ -73,14 +73,14 @@ struct Disposal {
 ///
 /// 矩形も候補も投入した先で決まるため、受け取るまで矩形は分からない。
 enum Kept {
-    /// 圧縮を投入した番号
-    Submitted(usize),
+    /// 圧縮を投入した引換券
+    Submitted(Ticket<Cut>),
     /// 受け取った矩形と、それをblend_op=SOURCEで圧縮した候補
     Taken {
         rect: Rect,
         candidate: Candidate,
-        /// 保留中のフレームを捨てるときの候補を走査する投入の番号
-        restored: usize,
+        /// 保留中のフレームを捨てるときの候補を走査する投入の引換券
+        restored: Ticket<Restored>,
     },
 }
 
@@ -107,7 +107,7 @@ enum Over {
     /// 詰め直せなかったフレーム。間合いを1つ進めてblend_op=SOURCEで書く
     Unpacked,
     /// 詰め直して投入したフレーム。間合いを1つ進め、休みが明けていれば比べる
-    Packed(usize),
+    Packed(Ticket<Region>),
 }
 
 /// 決定を終えたフレーム
@@ -202,7 +202,7 @@ pub struct Encoder<W: Write> {
     chunks: ChunkWriter<W>,
     /// キャンバスの大きさと入力フレームのバイト並び
     layout: Layout,
-    /// 圧縮の投入口と、番号を指す結果の受け取り
+    /// 圧縮の投入口と、引換券で指す結果の受け取り
     pipeline: Pipeline,
     /// 投入と決定それぞれが見るフレームの追跡
     delta: Delta,
@@ -510,25 +510,25 @@ impl<W: Write> Encoder<W> {
     /// そのフレームは、捨てないときの候補を決定の場で受け取る。
     fn prepare_next(&mut self) {
         let canvas = self.delta.canvas();
-        let Some(next) = self.staged.front_mut() else {
+        let Some(mut next) = self.staged.pop_front() else {
             return;
         };
-        if next.index < 2 {
-            return;
-        }
-        let Kept::Submitted(job) = next.kept else {
-            panic!("捨てないときの候補を2度受け取っている")
-        };
+        if next.index >= 2 {
+            let Kept::Submitted(job) = next.kept else {
+                panic!("捨てないときの候補を2度受け取っている")
+            };
 
-        let (rect, candidate) = self.pipeline.take_cut(job);
-        let restored = self
-            .pipeline
-            .submit_restored(canvas, Arc::clone(&next.data), rect.area());
-        next.kept = Kept::Taken {
-            rect,
-            candidate,
-            restored,
-        };
+            let (rect, candidate) = self.pipeline.take_cut(job);
+            let restored =
+                self.pipeline
+                    .submit_restored(canvas, Arc::clone(&next.data), rect.area());
+            next.kept = Kept::Taken {
+                rect,
+                candidate,
+                restored,
+            };
+        }
+        self.staged.push_front(next);
     }
 
     /// 投入されたフレームをキャンバスへ重ねる候補を詰め直し、圧縮を投入する
