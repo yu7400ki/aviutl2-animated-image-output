@@ -1,7 +1,6 @@
 //! 出力プラグインの安全なAPI
 
 use crate::config::IniConfig;
-use crate::logger;
 use crate::pixel::ColorFormat;
 use crate::sys;
 use anim_core::FrameDelay;
@@ -9,7 +8,6 @@ use std::ffi::c_void;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use widestring::U16CStr;
-use win32_ui::MessageBox;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
 
 /// u32に収まらない値を、名前を添えたエラーにする
@@ -333,6 +331,31 @@ pub enum ConfigDialog<C> {
     Failed,
 }
 
+/// 設定ダイアログを経た設定の行方
+///
+/// 提示とホストへ返す値への変換はマクロ側が行う。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigOutcome {
+    /// 設定が決まり、保存できた
+    Saved,
+    /// 設定は決まったが、保存できなかった。この文言が警告として報される
+    NotSaved(String),
+    /// 利用者がキャンセルを押した。設定は元のまま残る
+    Cancelled,
+    /// ダイアログが設定を返せなかった。設定は元のまま残り、利用者にはエラーが報される
+    Failed,
+}
+
+impl ConfigOutcome {
+    /// 設定が決まったかどうか
+    pub fn accepted(&self) -> bool {
+        match self {
+            ConfigOutcome::Saved | ConfigOutcome::NotSaved(_) => true,
+            ConfigOutcome::Cancelled | ConfigOutcome::Failed => false,
+        }
+    }
+}
+
 /// 出力プラグインの実装トレイト
 ///
 /// 実装した型を [`crate::register_output_plugin!`] に渡すことで
@@ -371,24 +394,18 @@ pub trait OutputPlugin {
 
     /// 設定ダイアログを表示して、決まった設定を保存する
     ///
-    /// 戻り値は設定が決まったかどうか。`HAS_CONFIG_DIALOG = true` の時のみ呼ばれる。
-    fn config(hwnd: HWND, _dll_hinst: HINSTANCE) -> bool {
+    /// 戻り値の提示はマクロ側が行う。`HAS_CONFIG_DIALOG = true` の時のみ呼ばれる。
+    fn config(hwnd: HWND, _dll_hinst: HINSTANCE) -> ConfigOutcome {
         let config = match Self::show_config_dialog(hwnd, Self::Config::load()) {
             ConfigDialog::Accepted(config) => config,
-            ConfigDialog::Cancelled => return false,
-            ConfigDialog::Failed => {
-                logger::error("設定の取得に失敗しました。");
-                MessageBox::error(Some(hwnd), "設定の取得に失敗しました。", "エラー");
-                return false;
-            }
+            ConfigDialog::Cancelled => return ConfigOutcome::Cancelled,
+            ConfigDialog::Failed => return ConfigOutcome::Failed,
         };
 
-        if let Err(e) = config.save() {
-            let error_msg = format!("設定保存エラー: {}", e);
-            logger::warn(&error_msg);
-            MessageBox::warning(Some(hwnd), &error_msg, "警告");
+        match config.save() {
+            Ok(()) => ConfigOutcome::Saved,
+            Err(e) => ConfigOutcome::NotSaved(format!("設定保存エラー: {}", e)),
         }
-        true
     }
 
     /// 出力設定のテキスト情報 (`HAS_CONFIG_TEXT = true` の時のみ呼ばれる)

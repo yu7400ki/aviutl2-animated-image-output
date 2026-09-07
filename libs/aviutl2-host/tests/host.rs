@@ -5,8 +5,8 @@
 //! が直列化する。
 
 use aviutl2::{
-    ColorFormat, ConfigDialog, FileFilter, IniConfig, OutputInfo, OutputPlugin, PipelineError,
-    PluginFlags, PluginInfo, sys, write_or_discard,
+    ColorFormat, ConfigDialog, ConfigOutcome, FileFilter, IniConfig, OutputInfo, OutputPlugin,
+    PipelineError, PluginFlags, PluginInfo, sys, write_or_discard,
 };
 use aviutl2_host::{Host, Script, temp_path};
 use std::io::Write;
@@ -384,7 +384,10 @@ fn the_saved_config_reaches_the_encoder_and_its_failure_wears_the_format_name() 
 fn the_config_the_dialog_returns_is_saved() {
     let _config = ConfigSession::new(7);
 
-    assert!(TestPlugin::config(HWND::default(), HINSTANCE::default()));
+    assert_eq!(
+        TestPlugin::config(HWND::default(), HINSTANCE::default()),
+        ConfigOutcome::Saved
+    );
     assert_eq!(TestConfig::load(), TestConfig { repeat: 8 });
 }
 
@@ -393,9 +396,9 @@ fn the_config_the_dialog_returns_is_saved() {
 fn a_cancelled_dialog_leaves_the_saved_config_alone() {
     let _config = ConfigSession::new(7);
 
-    assert!(!CancellingPlugin::config(
-        HWND::default(),
-        HINSTANCE::default()
-    ));
+    assert_eq!(
+        CancellingPlugin::config(HWND::default(), HINSTANCE::default()),
+        ConfigOutcome::Cancelled
+    );
     assert_eq!(TestConfig::load(), TestConfig { repeat: 7 });
 }

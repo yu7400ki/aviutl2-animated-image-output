@@ -2,15 +2,14 @@
 //!
 //! このモジュールの内容は公開APIではない。
 
-use crate::output::{OutputInfo, OutputPlugin, PluginInfo};
+use crate::output::{ConfigOutcome, OutputInfo, OutputPlugin, PluginInfo};
 use crate::{logger, metrics, sys};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
+use win32_ui::MessageBox;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
-use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
-use windows::core::HSTRING;
 
 pub use std::ffi::c_void;
 pub use windows::core::BOOL;
@@ -102,13 +101,8 @@ fn encode_nul_terminated(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn show_error_message_box(message: &str) {
-    let message = HSTRING::from(message);
-    let title = HSTRING::from("エラー");
-    unsafe {
-        MessageBoxW(None, &message, &title, MB_OK | MB_ICONERROR);
-    }
-}
+/// 設定ダイアログが設定を返せなかったときに報せる文言
+const CONFIG_FAILED_MESSAGE: &str = "設定の取得に失敗しました。";
 
 /// パニックのペイロードから表示可能なメッセージを取り出す
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
@@ -150,7 +144,7 @@ extern "C" fn output_shim<T: OutputPlugin>(oip: *mut sys::OUTPUT_INFO) -> bool {
             }
             Err(message) => {
                 logger::error(&format!("{name}: {message}"));
-                show_error_message_box(&message);
+                MessageBox::error(None, &message, "エラー");
                 false
             }
         }
@@ -163,7 +157,22 @@ extern "C" fn output_shim<T: OutputPlugin>(oip: *mut sys::OUTPUT_INFO) -> bool {
 }
 
 extern "C" fn config_shim<T: OutputPlugin>(hwnd: HWND, dll_hinst: HINSTANCE) -> bool {
-    catch_unwind(AssertUnwindSafe(|| T::config(hwnd, dll_hinst))).unwrap_or(false)
+    catch_unwind(AssertUnwindSafe(|| {
+        let outcome = T::config(hwnd, dll_hinst);
+        match &outcome {
+            ConfigOutcome::Failed => {
+                logger::error(CONFIG_FAILED_MESSAGE);
+                MessageBox::error(Some(hwnd), CONFIG_FAILED_MESSAGE, "エラー");
+            }
+            ConfigOutcome::NotSaved(message) => {
+                logger::warn(message);
+                MessageBox::warning(Some(hwnd), message, "警告");
+            }
+            ConfigOutcome::Saved | ConfigOutcome::Cancelled => {}
+        }
+        outcome.accepted()
+    }))
+    .unwrap_or(false)
 }
 
 extern "C" fn config_text_shim<T: OutputPlugin>() -> sys::LPCWSTR {

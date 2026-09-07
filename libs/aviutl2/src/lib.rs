@@ -30,8 +30,8 @@ pub use config::{
     read_threads,
 };
 pub use output::{
-    Audio, ConfigDialog, FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, Video,
-    write_or_discard,
+    Audio, ConfigDialog, ConfigOutcome, FileFilter, OutputInfo, OutputPlugin, PluginFlags,
+    PluginInfo, Video, write_or_discard,
 };
 pub use pipeline::PipelineError;
 pub use pixel::ColorFormat;
