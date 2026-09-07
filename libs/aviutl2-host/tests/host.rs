@@ -6,13 +6,25 @@
 
 use aviutl2::{
     ColorFormat, ConfigDialog, FileFilter, IniConfig, OutputInfo, OutputPlugin, PipelineError,
-    PluginFlags, PluginInfo, sys,
+    PluginFlags, PluginInfo, sys, write_or_discard,
 };
 use aviutl2_host::{Host, Script};
+use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::thread::ThreadId;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
+
+/// まだ存在しない一時ファイルの場所
+fn temp_path() -> PathBuf {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    std::env::temp_dir().join(format!(
+        "aviutl2-host-{}-{}.txt",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ))
+}
 
 /// 符号化側が受け取ったフレームと、受け取ったスレッド
 #[derive(Default)]
@@ -35,6 +47,28 @@ fn encode(host: &Host) -> (Result<(), PipelineError<String>>, Encoded) {
     });
 
     (result, encoded.into_inner().unwrap())
+}
+
+/// 台本が名指した寸法・刻み・保存先が、そのまま出力情報になる
+#[test]
+fn the_fields_the_script_names_reach_the_output_info() {
+    let path = temp_path();
+    let host = Host::open(
+        Script::new()
+            .size(96, 40)
+            .frame_rate(24000, 1001)
+            .frames(3)
+            .savefile(&path),
+    );
+
+    let info = host.info();
+    let video = info.video().expect("寸法");
+
+    assert_eq!((video.width(), video.height()), (96, 40));
+    assert_eq!(info.rate(), Ok(24000));
+    assert_eq!(info.scale(), Ok(1001));
+    assert_eq!(info.num_frames(), Ok(3));
+    assert_eq!(info.savefile(), path);
 }
 
 /// ホストの関数は呼び出し元のスレッドに留まり、フレームだけが渡る
@@ -153,6 +187,30 @@ fn a_frame_the_host_refuses_is_not_read() {
     assert_eq!(video.get_frame(1, ColorFormat::Rgb24), None);
 }
 
+/// 頼まれたフォーマットが変わっても、返るのは同じ絵
+#[test]
+fn a_frame_comes_back_in_the_format_the_caller_asked_for() {
+    // 行の埋めが要る幅
+    let host = Host::open(Script::new().size(5, 3).frames(2));
+
+    let info = host.info();
+    let video = info.video().expect("寸法");
+
+    let rgba = video.get_frame(1, ColorFormat::Rgba32).expect("透過付き");
+    let rgb = video.get_frame(1, ColorFormat::Rgb24).expect("透過無し");
+
+    assert_eq!(rgba, host.rgba(1));
+    assert_eq!(rgb, host.rgb(1));
+    assert_eq!(
+        rgb,
+        rgba.chunks_exact(4)
+            .flat_map(|pixel| &pixel[..3])
+            .copied()
+            .collect::<Vec<u8>>()
+    );
+    assert_eq!(host.get_video(), vec![(1, sys::PA64), (1, sys::BI_RGB)]);
+}
+
 /// ループ回数だけを持つ設定
 #[derive(Debug, Default, PartialEq, Eq)]
 struct TestConfig {
@@ -254,6 +312,69 @@ impl OutputPlugin for CancellingPlugin {
     fn show_config_dialog(_hwnd: HWND, _config: TestConfig) -> ConfigDialog<TestConfig> {
         ConfigDialog::Cancelled
     }
+}
+
+/// 取り込んだ素材の姿を保存先へ書き出すプラグイン
+struct WritingPlugin;
+
+impl OutputPlugin for WritingPlugin {
+    type Config = TestConfig;
+
+    const FORMAT_NAME: &'static str = "テスト";
+
+    fn info() -> PluginInfo {
+        TestPlugin::info()
+    }
+
+    fn encode(info: &OutputInfo, config: &TestConfig) -> Result<(), String> {
+        let video = info.video()?;
+
+        write_or_discard(&info.savefile(), |mut file| {
+            let mut frames = 0;
+            video
+                .encode_frames(ColorFormat::Rgba32, |_| {
+                    frames += 1;
+                    Ok::<(), String>(())
+                })
+                .map_err(|e| e.to_string())?;
+
+            writeln!(
+                file,
+                "{}x{} {}/{} {}枚 repeat={}",
+                video.width(),
+                video.height(),
+                info.rate()?,
+                info.scale()?,
+                frames,
+                config.repeat
+            )
+            .map_err(|e| e.to_string())
+        })
+    }
+}
+
+/// プラグインの書き出しは、台本が名指した素材と保存先を受け取る
+#[test]
+fn the_encoding_receives_the_material_the_script_names() {
+    let path = temp_path();
+    let host = Host::open(
+        Script::new()
+            .size(96, 40)
+            .frame_rate(24000, 1001)
+            .frames(3)
+            .savefile(&path),
+    );
+
+    assert_eq!(
+        host.encode::<WritingPlugin>(&TestConfig { repeat: 5 }),
+        Ok(())
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("保存先"),
+        "96x40 24000/1001 3枚 repeat=5\n"
+    );
+
+    std::fs::remove_file(&path).expect("保存先の後始末");
 }
 
 /// 出力は保存された設定で符号化し、失敗に形式名を添えて返す
