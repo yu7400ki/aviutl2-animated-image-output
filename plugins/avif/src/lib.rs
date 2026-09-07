@@ -7,7 +7,9 @@ use aviutl2::{
     register_logger, register_output_plugin, write_or_discard,
 };
 use config::{ColorFormat, Config};
+use std::fs::File;
 use std::io::BufWriter;
+use std::path::Path;
 use windows::Win32::Foundation::HWND;
 
 /// プラグイン設定をエンコーダの設定へ対応付ける
@@ -74,6 +76,42 @@ fn operating_point_message(config: &EncoderConfig, sequence: &Sequence) -> Strin
     )
 }
 
+/// `path` へ書き出し、`frames` が投入したフレームを閉じる
+///
+/// 途中で失敗したときは書きかけのファイルを残さない。
+fn write_frames<F>(
+    path: &Path,
+    width: u32,
+    height: u32,
+    num_frames: u32,
+    config: EncoderConfig,
+    frames: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&mut Encoder<BufWriter<File>>) -> Result<(), String>,
+{
+    write_or_discard(path, |output_file| {
+        let mut encoder = Encoder::new(
+            BufWriter::new(output_file),
+            width,
+            height,
+            num_frames,
+            config,
+        )
+        .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
+
+        frames(&mut encoder)?;
+
+        encoder
+            .finish()
+            .map_err(|e| format!("エンコーダー終了エラー: {}", e))?
+            .into_inner()
+            .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
+
+        Ok(())
+    })
+}
+
 struct AvifOutputPlugin;
 
 impl OutputPlugin for AvifOutputPlugin {
@@ -101,37 +139,24 @@ impl OutputPlugin for AvifOutputPlugin {
         let video = info.video()?;
         let (width, height) = (video.width(), video.height());
         let sequence = Sequence::new(info.num_frames()?, info.scale()?, info.rate()?);
-
         let encoder_config = encoder_config(config, sequence.timescale);
 
-        write_or_discard(&info.savefile(), |output_file| {
-            let mut encoder = Encoder::new(
-                BufWriter::new(output_file),
-                width,
-                height,
-                sequence.num_frames,
-                encoder_config,
-            )
-            .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
+        write_frames(
+            &info.savefile(),
+            width,
+            height,
+            sequence.num_frames,
+            encoder_config,
+            |encoder| {
+                logger::info(&operating_point_message(&encoder_config, &sequence));
 
-            logger::info(&operating_point_message(&encoder_config, &sequence));
-
-            video
-                .encode_frames(config.color_format, |frame_data| {
-                    encoder.add_frame(&frame_data, sequence.duration)
-                })
-                .map_err(|e| e.to_string())?;
-
-            let writer = encoder
-                .finish()
-                .map_err(|e| format!("エンコーダー終了エラー: {}", e))?;
-
-            writer
-                .into_inner()
-                .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
-
-            Ok(())
-        })
+                video
+                    .encode_frames(config.color_format, |frame_data| {
+                        encoder.add_frame(&frame_data, sequence.duration)
+                    })
+                    .map_err(|e| e.to_string())
+            },
+        )
     }
 
     fn show_config_dialog(hwnd: HWND, config: Config) -> ConfigDialog<Config> {
@@ -303,11 +328,7 @@ mod tests {
     }
 
     /// フレームを`declared`枚宣言し、`frames`枚だけ投入して閉じる
-    fn write_animation(
-        path: &std::path::Path,
-        declared: u32,
-        frames: u32,
-    ) -> std::result::Result<(), String> {
+    fn write_animation(path: &Path, declared: u32, frames: u32) -> Result<(), String> {
         let width = 16;
         let height = 16;
         let config = encoder_config(
@@ -318,22 +339,12 @@ mod tests {
             30,
         );
 
-        write_or_discard(path, |output_file| {
-            let mut encoder =
-                Encoder::new(BufWriter::new(output_file), width, height, declared, config)
-                    .map_err(|e| e.to_string())?;
-
+        write_frames(path, width, height, declared, config, |encoder| {
             for seed in 0..frames {
                 encoder
                     .add_frame(&frame_of(seed as u8, width, height), 1)
                     .map_err(|e| e.to_string())?;
             }
-
-            encoder
-                .finish()
-                .map_err(|e| e.to_string())?
-                .into_inner()
-                .map_err(|e| e.to_string())?;
             Ok(())
         })
     }

@@ -7,7 +7,9 @@ use aviutl2::{
     register_logger, register_output_plugin, workers, write_or_discard,
 };
 use config::{ColorFormat, Config};
+use std::fs::File;
 use std::io::BufWriter;
+use std::path::Path;
 use webp_encoder::{ColorType, Config as EncoderConfig, Encoder, Report};
 use windows::Win32::Foundation::HWND;
 
@@ -51,6 +53,45 @@ fn report_messages(report: &Report, num_frames: u32) -> Vec<(Severity, String)> 
     messages
 }
 
+/// `path` へ書き出し、`frames` が投入したフレームを閉じて、書き出しのレポートを返す
+///
+/// 途中で失敗したときは書きかけのファイルを残さない。
+fn write_frames<F>(
+    path: &Path,
+    width: u32,
+    height: u32,
+    num_frames: u32,
+    config: &Config,
+    frames: F,
+) -> Result<Report, String>
+where
+    F: FnOnce(&mut Encoder<BufWriter<File>>) -> Result<(), String>,
+{
+    write_or_discard(path, |output_file| {
+        let mut encoder = Encoder::with_workers(
+            BufWriter::new(output_file),
+            width,
+            height,
+            num_frames,
+            encoder_config(config),
+            workers(config.threads),
+        )
+        .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
+
+        frames(&mut encoder)?;
+
+        let (writer, report) = encoder
+            .finish()
+            .map_err(|e| format!("エンコーダー終了エラー: {}", e))?;
+
+        writer
+            .into_inner()
+            .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
+
+        Ok(report)
+    })
+}
+
 struct WebpOutputPlugin;
 
 impl OutputPlugin for WebpOutputPlugin {
@@ -81,34 +122,23 @@ impl OutputPlugin for WebpOutputPlugin {
         let (width, height) = (video.width(), video.height());
         let num_frames = info.num_frames()?;
 
-        write_or_discard(&info.savefile(), |output_file| {
-            let mut encoder = Encoder::with_workers(
-                BufWriter::new(output_file),
-                width,
-                height,
-                num_frames,
-                encoder_config(config),
-                workers(config.threads),
-            )
-            .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
+        let report = write_frames(
+            &info.savefile(),
+            width,
+            height,
+            num_frames,
+            config,
+            |encoder| {
+                video
+                    .encode_frames(config.color_format, |frame_data| {
+                        encoder.add_frame(frame_data, delay)
+                    })
+                    .map_err(|e| e.to_string())
+            },
+        )?;
 
-            video
-                .encode_frames(config.color_format, |frame_data| {
-                    encoder.add_frame(frame_data, delay)
-                })
-                .map_err(|e| e.to_string())?;
-
-            let (writer, report) = encoder
-                .finish()
-                .map_err(|e| format!("エンコーダー終了エラー: {}", e))?;
-
-            writer
-                .into_inner()
-                .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
-
-            logger::report(report_messages(&report, num_frames));
-            Ok(())
-        })
+        logger::report(report_messages(&report, num_frames));
+        Ok(())
     }
 
     fn show_config_dialog(hwnd: HWND, config: Config) -> ConfigDialog<Config> {
@@ -155,42 +185,29 @@ mod tests {
     }
 
     /// フレームを `declared` 枚宣言し、`frames` 枚だけ投入して閉じる
-    fn write_animation(
-        path: &std::path::Path,
-        declared: u32,
-        frames: u32,
-    ) -> std::result::Result<(), String> {
+    fn write_animation(path: &Path, declared: u32, frames: u32) -> Result<(), String> {
         let config = Config {
             color_format: ColorFormat::Rgba32,
             ..Config::default()
         };
         let delay = FrameDelay::new(1, 30).unwrap();
 
-        write_or_discard(path, |output_file| {
-            let mut encoder = Encoder::with_workers(
-                BufWriter::new(output_file),
-                FRAME_WIDTH,
-                FRAME_HEIGHT,
-                declared,
-                encoder_config(&config),
-                workers(config.threads),
-            )
-            .map_err(|e| e.to_string())?;
-
-            for seed in 0..frames {
-                encoder
-                    .add_frame(frame_of(seed), delay)
-                    .map_err(|e| e.to_string())?;
-            }
-
-            encoder
-                .finish()
-                .map_err(|e| e.to_string())?
-                .0
-                .into_inner()
-                .map_err(|e| e.to_string())?;
-            Ok(())
-        })
+        write_frames(
+            path,
+            FRAME_WIDTH,
+            FRAME_HEIGHT,
+            declared,
+            &config,
+            |encoder| {
+                for seed in 0..frames {
+                    encoder
+                        .add_frame(frame_of(seed), delay)
+                        .map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            },
+        )
+        .map(|_| ())
     }
 
     /// 書き出しの経路がRIFFのサイズを書き戻す
