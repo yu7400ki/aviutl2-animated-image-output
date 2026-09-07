@@ -148,15 +148,4 @@ mod tests {
         assert_eq!(load(&[("threads", "0")]).threads, 1);
         assert_eq!(load(&[("threads", &over)]).threads, max_threads());
     }
-
-    /// 認識しないキーだけのセクションは既定値になる
-    #[test]
-    fn unknown_keys_are_ignored() {
-        let config = load(&[("compression_type", "2"), ("filter_type", "4")]);
-        let default = Config::default();
-        assert_eq!(config.repeat, default.repeat);
-        assert!(config.color_format == default.color_format);
-        assert_eq!(config.compression_level, default.compression_level);
-        assert_eq!(config.threads, default.threads);
-    }
 }

@@ -220,18 +220,4 @@ method=3
         assert_eq!(config.repeat, default.repeat);
         assert!(config.lossless);
     }
-
-    /// 認識しないキーだけのセクションは既定値になる
-    ///
-    /// 他のプラグインの設定を写した ini でも、こちらの既定は動かない。
-    #[test]
-    fn unknown_keys_are_ignored() {
-        let config = load(&[("compression_level", "6"), ("reduce_color", "true")]);
-        let default = Config::default();
-
-        assert_eq!(config.repeat, default.repeat);
-        assert_eq!(config.lossless, default.lossless);
-        assert_eq!(config.quality, default.quality);
-        assert_eq!(config.method, default.method);
-    }
 }

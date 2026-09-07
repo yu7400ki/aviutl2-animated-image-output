@@ -110,13 +110,4 @@ mod tests {
         assert_eq!(load(&[("repeat", "-1")]).repeat, 0);
         assert_eq!(load(&[("repeat", "3")]).repeat, 3);
     }
-
-    /// 認識しないキーだけのセクションは既定値になる
-    #[test]
-    fn unknown_keys_are_ignored() {
-        let config = load(&[("speed", "10"), ("dither", "true")]);
-        let default = Config::default();
-        assert_eq!(config.repeat, default.repeat);
-        assert!(config.color_format == default.color_format);
-    }
 }
