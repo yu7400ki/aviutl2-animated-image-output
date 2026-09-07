@@ -17,4 +17,5 @@ windows = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+aviutl2_host = { path = "../../libs/aviutl2-host" }
 jxl = "=0.6.0"

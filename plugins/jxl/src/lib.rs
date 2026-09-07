@@ -145,24 +145,13 @@ register_logger!();
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aviutl2_host::{Host, Script, temp_path};
     use jxl::api::{self, states::Initialized};
     use std::num::NonZeroUsize;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
     /// 書き出しを通すフレームの大きさ
     const FRAME_WIDTH: u32 = 32;
     const FRAME_HEIGHT: u32 = 16;
-
-    /// まだ存在しない一時ファイルの場所
-    fn temp_path() -> PathBuf {
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        std::env::temp_dir().join(format!(
-            "jxl-output-{}-{}.jxl",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ))
-    }
 
     /// 画素ごとに値の違う不透明なRGBA
     fn frame_of(seed: u32) -> Vec<u8> {
@@ -298,11 +287,18 @@ mod tests {
         }
     }
 
-    /// 書き出した `.jxl` から、アニメーションの設定とフレームの並びを読み出す
-    fn decode(bytes: &[u8]) -> (api::JxlAnimation, Vec<api::VisibleFrameInfo>) {
+    /// 書き出した `.jxl` から、寸法とアニメーションの設定、フレームの並びを読み出す
+    fn decode(
+        bytes: &[u8],
+    ) -> (
+        (usize, usize),
+        api::JxlAnimation,
+        Vec<api::VisibleFrameInfo>,
+    ) {
         let mut input = bytes;
         let decoder = api::JxlDecoder::<Initialized>::new(api::JxlDecoderOptions::default());
         let mut decoder = complete(decoder.process(&mut input, None).unwrap());
+        let size = decoder.basic_info().size;
         let animation = decoder
             .basic_info()
             .animation
@@ -314,13 +310,13 @@ mod tests {
             decoder = complete(with_frame.skip_frame(&mut input).unwrap());
         }
 
-        (animation, decoder.scanned_frames().to_vec())
+        (size, animation, decoder.scanned_frames().to_vec())
     }
 
     /// 書き出しはJPEG XLのcodestreamの印から始まり、素材の刻みと全フレームを持つ
     #[test]
     fn a_written_file_carries_every_frame_of_the_material() {
-        let path = temp_path();
+        let path = temp_path("jxl");
 
         write_animation(&path, 4, 4).unwrap();
 
@@ -329,7 +325,7 @@ mod tests {
 
         assert_eq!(&bytes[..2], &[0xFF, 0x0A]);
 
-        let (animation, frames) = decode(&bytes);
+        let (_, animation, frames) = decode(&bytes);
         assert_eq!(animation.tps_numerator, RATE);
         assert_eq!(animation.tps_denominator, SCALE);
         assert_eq!(frames.len(), 4);
@@ -340,7 +336,7 @@ mod tests {
     /// 失敗した書き出しは、書きかけのファイルを残さない
     #[test]
     fn a_failed_write_leaves_no_file() {
-        let path = temp_path();
+        let path = temp_path("jxl");
 
         write_animation(&path, 4, 3).expect_err("宣言より少ないので閉じられない");
 
@@ -350,7 +346,7 @@ mod tests {
     /// 書けない1秒あたりのtick数は、直し方を添えて利用者へ届く
     #[test]
     fn an_unwritable_ticks_per_second_reaches_the_user() {
-        let path = temp_path();
+        let path = temp_path("jxl");
         let sequence = Sequence::new(2, 1025, 1);
 
         let message = write_frames(
@@ -365,5 +361,71 @@ mod tests {
 
         assert!(message.contains("1〜1024"), "{message}");
         assert!(!path.exists(), "{}", path.display());
+    }
+
+    /// 偽ホストから通す素材の枚数
+    const HOST_FRAMES: u32 = 6;
+
+    /// 偽ホストの素材の寸法・表示時間・枚数がそのまま`.jxl`になる
+    ///
+    /// 1秒あたりのtick数が素材の刻みそのものなので、1フレームは1tickになる。
+    #[test]
+    fn an_encoded_animation_carries_the_size_and_the_timing_of_the_material() {
+        let path = temp_path("jxl");
+        let host = Host::open(
+            Script::new()
+                .size(FRAME_WIDTH, FRAME_HEIGHT)
+                .frame_rate(RATE, SCALE)
+                .frames(HOST_FRAMES)
+                .savefile(&path),
+        );
+
+        host.encode::<JxlOutputPlugin>(&Config::default())
+            .expect("書き出し");
+
+        let bytes = std::fs::read(&path).expect("書き出した先");
+        std::fs::remove_file(&path).expect("書き出した先の後始末");
+
+        let (size, animation, frames) = decode(&bytes);
+        assert_eq!(
+            size,
+            (FRAME_WIDTH as usize, FRAME_HEIGHT as usize),
+            "画像の寸法"
+        );
+        assert_eq!(
+            (animation.tps_numerator, animation.tps_denominator),
+            (RATE, SCALE),
+            "1秒あたりのtick数"
+        );
+        assert_eq!(frames.len(), HOST_FRAMES as usize, "フレーム数");
+        let ticks: Vec<u32> = frames.iter().map(|frame| frame.duration_ticks).collect();
+        assert_eq!(ticks, vec![1; HOST_FRAMES as usize], "フレームごとのtick数");
+    }
+
+    /// ホストが返さなかったフレームで書き出しを止め、その先を取りに行かない
+    #[test]
+    fn a_frame_the_host_refuses_stops_the_encoding() {
+        const MISSING: i32 = 3;
+
+        let path = temp_path("jxl");
+        let host = Host::open(
+            Script::new()
+                .size(FRAME_WIDTH, FRAME_HEIGHT)
+                .frames(HOST_FRAMES)
+                .missing_at(MISSING)
+                .savefile(&path),
+        );
+
+        let error = host
+            .encode::<JxlOutputPlugin>(&Config::default())
+            .expect_err("返らないフレームがある");
+
+        assert_eq!(error, format!("フレーム取得エラー: フレーム {MISSING}"));
+        assert!(!path.exists(), "{}", path.display());
+        assert_eq!(
+            host.get_video().len(),
+            MISSING as usize + 1,
+            "取りに行ったフレーム数"
+        );
     }
 }

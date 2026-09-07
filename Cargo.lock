@@ -321,6 +321,7 @@ name = "jxl_output"
 version = "2.0.0"
 dependencies = [
  "aviutl2",
+ "aviutl2_host",
  "jxl",
  "jxl_encoder",
  "win32-ui",
