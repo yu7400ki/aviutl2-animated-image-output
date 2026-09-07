@@ -21,10 +21,7 @@ impl std::error::Error for Error {}
 
 /// エンコーダへ投入された入力が検査を通らなかった
 ///
-/// 受け付けられる寸法の範囲は画像フォーマットごとに違う。範囲そのものは
-/// [`InvalidDimensions`] を返す側が持つ。
-///
-/// [`InvalidDimensions`]: InputError::InvalidDimensions
+/// 受け付けられる寸法の範囲は [`InputError::InvalidDimensions`] を返す側が持つ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputError {
     /// 幅または高さが受け付けられる範囲の外
