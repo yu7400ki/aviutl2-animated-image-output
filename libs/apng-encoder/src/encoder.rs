@@ -85,18 +85,6 @@ struct Staged {
     kept: Kept,
 }
 
-/// 決定点が組み立てた、blend_op=OVERの候補
-///
-/// 書き出し点はこの3つから、比べる相手があるかどうかを読む。
-enum Over {
-    /// アルファを持たない出力と先頭フレーム。そのままblend_op=SOURCEで書く
-    Skipped,
-    /// 詰め直せなかったフレーム。blend_op=SOURCEで書く
-    Unpacked,
-    /// 詰め直して投入したフレーム。圧縮した候補と比べる
-    Packed(Ticket<Region>),
-}
-
 /// 決定を終えたフレーム
 ///
 /// dispose_opは次のフレームの決定で、blend_opは書き出し点で確定する。
@@ -105,8 +93,8 @@ struct Decided {
     delay: FrameDelay,
     /// `rect` をblend_op=SOURCEで圧縮した候補
     source: Candidate,
-    /// blend_op=OVERの候補
-    over: Over,
+    /// 詰め直して投入したblend_op=OVERの候補。無ければblend_op=SOURCEで書く
+    over: Option<Ticket<Region>>,
 }
 
 /// 書き出しを待っているフレーム
@@ -523,9 +511,15 @@ impl<W: Write> Encoder<W> {
     ///
     /// 潰した画素は完全な透明として書くため、アルファを持つ出力でだけ候補が立つ。
     /// 重ねる先を持つのは、キャンバスの埋まった2フレーム目以降になる。
-    fn submit_over(&mut self, data: &[u8], index: u32, dispose: u8, rect: Rect) -> Over {
+    fn submit_over(
+        &mut self,
+        data: &[u8],
+        index: u32,
+        dispose: u8,
+        rect: Rect,
+    ) -> Option<Ticket<Region>> {
         if !matches!(self.layout.input, ColorType::Rgba8) || index == 0 {
-            return Over::Skipped;
+            return None;
         }
 
         let base = self.delta.base(dispose);
@@ -533,11 +527,11 @@ impl<W: Write> Encoder<W> {
         let mut region = self.pipeline.buffer();
         if !over::pack_over(base, data, stride, rect, &mut region) {
             self.pipeline.recycle(region);
-            return Over::Unpacked;
+            return None;
         }
 
         let bpp = self.layout.bytes_per_pixel;
-        Over::Packed(
+        Some(
             self.pipeline
                 .submit_region(region, rect.width as usize * bpp),
         )
@@ -547,8 +541,12 @@ impl<W: Write> Encoder<W> {
     ///
     /// 詰め直して投入したフレームは、圧縮した候補と `source` を比べて小さい方を採り、
     /// 退けた側のバッファを配り直す先へ返す。同じ大きさならSOURCEを採る。
-    fn resolve_blend(&mut self, over: Over, source: Candidate) -> (u8, Candidate) {
-        let Over::Packed(job) = over else {
+    fn resolve_blend(
+        &mut self,
+        over: Option<Ticket<Region>>,
+        source: Candidate,
+    ) -> (u8, Candidate) {
+        let Some(job) = over else {
             return (BLEND_OP_SOURCE, source);
         };
 
@@ -1120,7 +1118,7 @@ mod tests {
                 encoder.decide().unwrap();
                 let submitted = prepared(&encoder.staged);
                 let decided = encoder.writing.open.as_ref().expect("決めたフレームが残る");
-                let packed = usize::from(matches!(decided.over, Over::Packed(_)));
+                let packed = usize::from(decided.over.is_some());
                 assert_eq!(
                     encoder.pipeline.pooled() + packed + submitted,
                     before + taken,
@@ -1134,7 +1132,7 @@ mod tests {
                     .writing
                     .overflowing(0)
                     .expect("書き出すフレームが残る");
-                let packed = usize::from(matches!(pending.frame.over, Over::Packed(_)));
+                let packed = usize::from(pending.frame.over.is_some());
                 let before = encoder.pipeline.pooled();
                 encoder.write(pending).unwrap();
                 assert_eq!(
