@@ -169,7 +169,8 @@ impl<W: Write> Encoder<W> {
     /// `width` x `height` の `num_frames` フレームを `writer` へ書き出す
     ///
     /// # Errors
-    /// フレーム数が0のとき、寸法が0のとき [`Error::Input`]。1秒あたりのtick数が
+    /// フレーム数が0のとき、寸法が0のとき、1フレームのバイト数が `usize` に
+    /// 収まらないとき [`Error::Input`]。1秒あたりのtick数が
     /// 0を含むか、約した比がヘッダの値域に収まらないとき [`Error::InvalidTps`]。
     /// 品質が [`QUALITY_RANGE`] の外のとき [`Error::InvalidQuality`]。均衡が
     /// [`EFFORT_RANGE`] の外のとき [`Error::InvalidEffort`]。符号化器を

@@ -25,7 +25,8 @@ impl Layout {
     /// 寸法の上限は画像フォーマットごとに違うため、呼び出し側が締める。
     ///
     /// # Errors
-    /// 寸法が0のとき [`InputError::InvalidDimensions`]。
+    /// 寸法が0のとき、1フレームのバイト数が `usize` に収まらないとき
+    /// [`InputError::InvalidDimensions`]。
     pub fn new(width: u32, height: u32, color_type: ColorType) -> Result<Self, InputError> {
         if width == 0 || height == 0 {
             return Err(InputError::InvalidDimensions { width, height });
@@ -33,13 +34,16 @@ impl Layout {
 
         let bytes_per_pixel = color_type.bytes_per_pixel();
         let stride = width as usize * bytes_per_pixel;
+        let Some(frame_len) = stride.checked_mul(height as usize) else {
+            return Err(InputError::InvalidDimensions { width, height });
+        };
         Ok(Layout {
             width,
             height,
             color_type,
             bytes_per_pixel,
             stride,
-            frame_len: stride * height as usize,
+            frame_len,
         })
     }
 
@@ -92,6 +96,20 @@ mod tests {
         let layout = Layout::new(100_000, 100_000, ColorType::Rgba8).unwrap();
         assert_eq!(layout.stride, 400_000);
         assert_eq!(layout.frame_len, 40_000_000_000);
+    }
+
+    /// 1フレームのバイト数がusizeに収まらない寸法は弾く
+    ///
+    /// 溢れた積は0や小さな値へ化けるため、長さの検査がそれを期待値として通す。
+    #[test]
+    fn a_canvas_whose_length_overflows_is_rejected() {
+        assert!(matches!(
+            Layout::new(1 << 31, 1 << 31, ColorType::Rgba8),
+            Err(InputError::InvalidDimensions {
+                width: 2147483648,
+                height: 2147483648
+            })
+        ));
     }
 
     #[test]
