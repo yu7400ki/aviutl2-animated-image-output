@@ -22,6 +22,9 @@ pub const QUALITY_RANGE: RangeInclusive<f32> = 0.0..=100.0;
 /// [`Config::method`] が採れる値
 pub const METHOD_RANGE: RangeInclusive<u8> = 0..=6;
 
+/// ANIMのループ数欄に収まる上限
+pub const MAX_LOOP_COUNT: u32 = u16::MAX as u32;
+
 /// エンコード設定
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
@@ -38,6 +41,8 @@ pub struct Config {
     /// 圧縮率と速度の均衡 ([`METHOD_RANGE`] の範囲)
     pub method: u8,
     /// アニメーションの再生回数 (0で無限ループ)
+    ///
+    /// [`MAX_LOOP_COUNT`] を超える回数は上限に丸めて書く。
     pub num_plays: u32,
 }
 

@@ -4,8 +4,7 @@ use aviutl2::{IniConfig, default_threads, max_threads, read, read_clamped, read_
 use std::ops::RangeInclusive;
 use webp_encoder::{METHOD_RANGE, QUALITY_RANGE};
 
-/// ANIMのループ数欄に収まる回数の上限
-pub const MAX_NUM_PLAYS: u32 = u16::MAX as u32;
+pub use webp_encoder::MAX_LOOP_COUNT as MAX_NUM_PLAYS;
 
 /// iniが採る品質の値域
 fn quality_range() -> RangeInclusive<u8> {

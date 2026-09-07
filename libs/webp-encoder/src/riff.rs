@@ -1,5 +1,6 @@
 //! RIFF/VP8X/ANIM/ANMFの書き出しと後埋め
 
+use crate::MAX_LOOP_COUNT;
 use crate::error::Error;
 use anim_core::Rect;
 use std::io::{Seek, SeekFrom, Write};
@@ -30,9 +31,6 @@ const FLAG_ALPHA: u8 = 0x10;
 
 /// キャンバスの空きと廃棄の跡を埋める色 (BGRA)
 const BACKGROUND_COLOR: [u8; 4] = [0, 0, 0, 0];
-
-/// ANIMのループ数欄に収まる上限
-const MAX_LOOP_COUNT: u32 = u16::MAX as u32;
 
 /// ANMFへ載せる1フレーム
 pub(crate) struct Frame<'a> {
