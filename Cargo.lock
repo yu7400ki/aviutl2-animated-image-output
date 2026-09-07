@@ -241,6 +241,8 @@ name = "gif_output"
 version = "2.0.0"
 dependencies = [
  "aviutl2",
+ "aviutl2_host",
+ "gif",
  "gif_encoder",
  "win32-ui",
  "windows",

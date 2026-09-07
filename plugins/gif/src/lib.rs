@@ -1,5 +1,7 @@
 mod config;
 mod dialog;
+#[cfg(test)]
+mod encode_tests;
 
 use aviutl2::{
     ConfigDialog, FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo,
