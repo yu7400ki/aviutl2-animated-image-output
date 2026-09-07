@@ -3,6 +3,9 @@ members = ["libs/*", "plugins/*"]
 default-members = ["plugins/*"]
 resolver = "3"
 
+[workspace.package]
+version = "2.0.0"
+
 [workspace.dependencies]
 windows = { version = "0.62" }
 widestring = { version = "1.2" }

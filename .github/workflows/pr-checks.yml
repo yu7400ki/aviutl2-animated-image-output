@@ -25,6 +25,11 @@ jobs:
               - '**/*.rs'
               - '**/Cargo.toml'
               - '**/Cargo.lock'
+              - 'aviutl2.toml'
+              - 'packaging/**'
+              - 'scripts/**'
+              - 'about.toml'
+              - 'about.hbs'
             frontend:
               - '**/*.{ts,tsx,js,jsx,json,html,css,md}'
               - 'package.json'
@@ -51,6 +56,9 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Check version consistency
+        run: bash scripts/check-version.sh
 
       - name: Install NASM
         run: |
