@@ -2,7 +2,7 @@
 //!
 //! このモジュールの内容は公開APIではない。
 
-use crate::output::{OutputInfo, OutputPlugin};
+use crate::output::{OutputInfo, OutputPlugin, PluginInfo};
 use crate::{logger, metrics, sys};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
@@ -16,6 +16,15 @@ pub use std::ffi::c_void;
 pub use windows::core::BOOL;
 
 pub const TRUE: BOOL = BOOL(1);
+
+/// `T::info()` を初回だけ評価して持ち続ける
+///
+/// テーブルの構築とシムの両方が引く。マクロ契約(1つのcdylibに1プラグイン)により
+/// `T` はどの呼び出しでも同じ。
+fn info<T: OutputPlugin>() -> &'static PluginInfo {
+    static INFO: OnceLock<PluginInfo> = OnceLock::new();
+    INFO.get_or_init(T::info)
+}
 
 struct TableRepr {
     // OUTPUT_PLUGIN_TABLE内のポインタが指すUTF-16バッファ(NUL終端済み)。
@@ -48,7 +57,7 @@ impl TableStorage {
     /// `T::info()` からテーブルを構築(初回のみ)してポインタを返す
     pub fn get_or_init<T: OutputPlugin>(&'static self) -> *mut sys::OUTPUT_PLUGIN_TABLE {
         let repr = self.cell.get_or_init(|| {
-            let info = T::info();
+            let info = info::<T>();
 
             let name: Vec<u16> = encode_nul_terminated(&info.name);
             let filefilter: Vec<u16> = info.file_filter.to_wide();
@@ -120,7 +129,7 @@ fn output_size(path: &Path) -> String {
 // devビルドでFFI境界を越えるunwindを防ぐ。
 
 extern "C" fn output_shim<T: OutputPlugin>(oip: *mut sys::OUTPUT_INFO) -> bool {
-    let name = T::info().name;
+    let name = &info::<T>().name;
     let result = catch_unwind(AssertUnwindSafe(|| {
         let Some(info) = (unsafe { OutputInfo::from_raw(oip) }) else {
             logger::error(&format!("{name}: 出力情報の取得に失敗しました"));
@@ -166,4 +175,62 @@ extern "C" fn config_text_shim<T: OutputPlugin>() -> sys::LPCWSTR {
     let mut guard = TEXT.lock().unwrap_or_else(|e| e.into_inner());
     *guard = encode_nul_terminated(&text);
     guard.as_ptr()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::IniConfig;
+    use crate::ini::{Ini, Properties};
+    use crate::output::{FileFilter, PluginFlags, PluginInfo};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static INFO_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Default)]
+    struct CountingConfig;
+
+    impl IniConfig for CountingConfig {
+        const FILE_NAME: &'static str = "private-test.ini";
+
+        fn load_from(_section: Option<&Properties>) -> Self {
+            CountingConfig
+        }
+
+        fn save_to(&self, _ini: &mut Ini) {}
+    }
+
+    struct CountingPlugin;
+
+    impl OutputPlugin for CountingPlugin {
+        type Config = CountingConfig;
+
+        const FORMAT_NAME: &'static str = "計数";
+
+        fn info() -> PluginInfo {
+            INFO_CALLS.fetch_add(1, Ordering::Relaxed);
+            PluginInfo {
+                flags: PluginFlags::VIDEO,
+                name: "計数出力プラグイン".into(),
+                file_filter: FileFilter::new().add("All Files (*)", "*"),
+                information: "計数出力プラグイン v0.1.0".into(),
+            }
+        }
+
+        fn encode(_info: &OutputInfo, _config: &CountingConfig) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// テーブルの構築と出力の呼び出しを通して、`info()` の評価は1回
+    #[test]
+    fn info_is_evaluated_once() {
+        static TABLE: TableStorage = TableStorage::new();
+
+        assert!(!TABLE.get_or_init::<CountingPlugin>().is_null());
+        assert!(!output_shim::<CountingPlugin>(std::ptr::null_mut()));
+        assert!(!output_shim::<CountingPlugin>(std::ptr::null_mut()));
+
+        assert_eq!(INFO_CALLS.load(Ordering::Relaxed), 1);
+    }
 }
