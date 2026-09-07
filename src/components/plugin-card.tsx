@@ -1,12 +1,21 @@
 import { clsx } from "clsx";
-import type { Plugin, PluginRelease } from "../libs/types";
+import type { Plugin } from "../libs/types";
 
 interface PluginCardProps {
   plugin: Plugin;
-  release: PluginRelease;
+  url: string | undefined;
 }
 
-const pluginInfo = {
+const pluginInfo: Record<
+  Plugin,
+  {
+    title: string;
+    description: string;
+    features: string[];
+    color: string;
+    textColor: string;
+  }
+> = {
   png: {
     title: "PNG (APNG)",
     description: "高品質、可逆圧縮",
@@ -40,11 +49,22 @@ const pluginInfo = {
     color: "bg-orange-100 border-orange-300",
     textColor: "text-orange-800",
   },
+  jxl: {
+    title: "JPEG XL",
+    description: "高圧縮率、可逆・非可逆両対応、半透明が残る",
+    features: [
+      "高圧縮率",
+      "可逆・非可逆両対応",
+      "品質 100 なら入力と同じ画素",
+      "画質を保ったまま配布したい場合",
+    ],
+    color: "bg-rose-100 border-rose-300",
+    textColor: "text-rose-800",
+  },
 };
 
-export function PluginCard({ plugin, release }: PluginCardProps) {
+export function PluginCard({ plugin, url }: PluginCardProps) {
   const info = pluginInfo[plugin];
-  const pluginRelease = release[plugin];
 
   return (
     <article className={clsx("rounded-lg border-2 p-6", info.color)}>
@@ -68,50 +88,26 @@ export function PluginCard({ plugin, release }: PluginCardProps) {
         </ul>
       </div>
       <div className="border-t border-current opacity-20 my-4" />
-      {pluginRelease ? (
-        <div className="space-y-2">
-          <div className="flex justify-between items-center">
-            <span className={clsx("font-semibold", info.textColor)}>
-              バージョン: {pluginRelease.version}
-            </span>
-            <span className={clsx("text-sm opacity-75", info.textColor)}>
-              {new Date(pluginRelease.date).toLocaleDateString("ja-JP", {
-                year: "numeric",
-                month: "2-digit",
-                day: "2-digit",
-              })}
-            </span>
-          </div>
-          <a
-            href={pluginRelease.url}
-            className={clsx(
-              "block w-full text-center py-2 px-4 rounded font-semibold bg-white hover:bg-opacity-80 transition-colors",
-              info.textColor,
-            )}
-            download
-            aria-label={`${info.title} バージョン ${pluginRelease.version} をダウンロード`}
-          >
-            ダウンロード
-          </a>
-        </div>
+      {url ? (
+        <a
+          href={url}
+          className={clsx(
+            "block w-full text-center py-2 px-4 rounded font-semibold bg-white hover:bg-opacity-80 transition-colors",
+            info.textColor,
+          )}
+          download
+          aria-label={`${info.title} のパッケージをダウンロード`}
+        >
+          ダウンロード
+        </a>
       ) : (
-        <div className="space-y-2">
-          <div className="flex justify-between items-center">
-            <span className={clsx("font-semibold opacity-50", info.textColor)}>
-              準備中
-            </span>
-            <span className={clsx("text-sm opacity-50", info.textColor)}>
-              近日公開
-            </span>
-          </div>
-          <div
-            className={clsx(
-              "block w-full text-center py-2 px-4 rounded font-semibold bg-white opacity-50 cursor-not-allowed",
-              info.textColor,
-            )}
-          >
-            準備中
-          </div>
+        <div
+          className={clsx(
+            "block w-full text-center py-2 px-4 rounded font-semibold bg-white opacity-50 cursor-not-allowed",
+            info.textColor,
+          )}
+        >
+          準備中
         </div>
       )}
     </article>

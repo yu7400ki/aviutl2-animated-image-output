@@ -1,6 +1,22 @@
 import { clsx } from "clsx";
+import type { Plugin } from "../libs/types";
 
-const pluginSettings = {
+const colorMap = {
+  green: "marker:text-green-500",
+  blue: "marker:text-blue-500",
+  purple: "marker:text-purple-500",
+  orange: "marker:text-orange-500",
+  rose: "marker:text-rose-500",
+} as const;
+
+const pluginSettings: Record<
+  Plugin,
+  {
+    title: string;
+    color: keyof typeof colorMap;
+    items: { name: string; description: string }[];
+  }
+> = {
   png: {
     title: "PNG（APNG）出力設定",
     color: "green",
@@ -91,14 +107,36 @@ const pluginSettings = {
       },
     ],
   },
+  jxl: {
+    title: "JPEG XL 出力設定",
+    color: "rose",
+    items: [
+      {
+        name: "ループ回数",
+        description: "アニメーションの繰り返し回数（0 = 無限ループ）",
+      },
+      {
+        name: "カラーフォーマット",
+        description: "透過無し / 透過付き",
+      },
+      {
+        name: "品質",
+        description:
+          "画質（0-100、既定 90、100 で入力と同じ画素になる。透過付きの α は品質によらず可逆）",
+      },
+      {
+        name: "均衡",
+        description:
+          "圧縮率と速度のトレードオフ（1-10、既定 7、値が大きいほど時間がかかる）",
+      },
+      {
+        name: "スレッド数",
+        description:
+          "並列にエンコードする数（1 から論理 CPU 数まで、既定は論理 CPU 数の半分）",
+      },
+    ],
+  },
 };
-
-const colorMap = {
-  green: "marker:text-green-500",
-  blue: "marker:text-blue-500",
-  purple: "marker:text-purple-500",
-  orange: "marker:text-orange-500",
-} as const;
 
 export function PluginSettings() {
   return (
@@ -117,7 +155,7 @@ export function PluginSettings() {
             <ul
               className={clsx(
                 "space-y-3 list-disc pl-4",
-                colorMap[setting.color as keyof typeof colorMap],
+                colorMap[setting.color],
               )}
             >
               {setting.items.map((item, index) => (

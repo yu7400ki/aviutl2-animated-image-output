@@ -12,6 +12,12 @@ const notices = [
     title: "ファイルサイズについて",
     description: "動画に比べてファイルサイズが大きくなる傾向があります",
   },
+  {
+    type: "warning" as const,
+    title: "パッケージの混在について",
+    description:
+      "全部入りと形式ごとのパッケージは同じプラグインファイルを置きます。両方を入れた状態で片方をアンインストールすると、もう片方が使うファイルも消えます。どちらか一方だけを入れてください",
+  },
 ];
 
 export function Notices() {

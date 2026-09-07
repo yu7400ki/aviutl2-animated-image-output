@@ -1,5 +1,5 @@
 import { Octokit } from "@octokit/rest";
-import type { Plugin, PluginRelease } from "./types";
+import type { Plugin, Release } from "./types";
 
 interface Config {
   owner: string;
@@ -7,11 +7,11 @@ interface Config {
 }
 
 interface ReleaseAsset {
-  id: number;
   name: string;
+  browser_download_url: string;
 }
 
-interface ReleaseData {
+export interface ReleaseData {
   tag_name: string;
   published_at: string | null;
   draft: boolean;
@@ -19,24 +19,10 @@ interface ReleaseData {
   assets: ReleaseAsset[];
 }
 
-const PLUGIN_MAP = {
-  png: {
-    tagPrefix: "apng-v",
-    fileName: "png_output.auo2",
-  },
-  gif: {
-    tagPrefix: "gif-v",
-    fileName: "gif_output.auo2",
-  },
-  webp: {
-    tagPrefix: "webp-v",
-    fileName: "webp_output.auo2",
-  },
-  avif: {
-    tagPrefix: "avif-v",
-    fileName: "avif_output.auo2",
-  },
-} as const;
+type PublishedRelease = ReleaseData & { published_at: string };
+
+const PACKAGE_ID = "aviutl2-animated-image-output";
+const TAG_PREFIX = "v";
 
 const DEFAULT_CONFIG: Config = {
   owner: "yu7400ki",
@@ -52,58 +38,56 @@ export function getConfig(): Config {
   return { owner, repo };
 }
 
-async function fetchReleases(config: Config): Promise<ReleaseData[]> {
+function isPublished(release: ReleaseData): release is PublishedRelease {
+  return (
+    !release.draft &&
+    !release.prerelease &&
+    typeof release.published_at === "string"
+  );
+}
+
+function assetName(version: string, plugin?: Plugin): string {
+  const format = plugin ? `-${plugin}` : "";
+
+  return `${PACKAGE_ID}${format}-v${version}.au2pkg.zip`;
+}
+
+function assetUrl(release: ReleaseData, name: string): string | undefined {
+  return release.assets.find((asset) => asset.name === name)
+    ?.browser_download_url;
+}
+
+/** 版タグの最新の公開リリースから 6 本揃ったパッケージを引く。 */
+export function selectRelease(releases: ReleaseData[]): Release | undefined {
+  const [latest] = releases
+    .filter(isPublished)
+    .filter((release) => release.tag_name.startsWith(TAG_PREFIX))
+    .sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at));
+  if (!latest) return undefined;
+
+  const version = latest.tag_name.slice(TAG_PREFIX.length);
+  const bundle = assetUrl(latest, assetName(version));
+  const png = assetUrl(latest, assetName(version, "png"));
+  const gif = assetUrl(latest, assetName(version, "gif"));
+  const webp = assetUrl(latest, assetName(version, "webp"));
+  const avif = assetUrl(latest, assetName(version, "avif"));
+  const jxl = assetUrl(latest, assetName(version, "jxl"));
+  if (!bundle || !png || !gif || !webp || !avif || !jxl) return undefined;
+
+  return {
+    version,
+    date: new Date(latest.published_at).toISOString(),
+    bundle,
+    assets: { png, gif, webp, avif, jxl },
+  };
+}
+
+export async function getRelease(config: Config): Promise<Release | undefined> {
   const { data: releases } = await octokit.rest.repos.listReleases({
     owner: config.owner,
     repo: config.repo,
     per_page: 100,
   });
 
-  return releases.filter((release) => !release.draft && !release.prerelease);
-}
-
-async function downloadAsset(
-  config: Config,
-  asset: ReleaseAsset,
-): Promise<string> {
-  const response = await octokit.rest.repos.getReleaseAsset({
-    owner: config.owner,
-    repo: config.repo,
-    asset_id: asset.id,
-  });
-
-  return response.data.browser_download_url;
-}
-
-export async function getPluginReleases(
-  config: Config,
-): Promise<PluginRelease> {
-  const releases = await fetchReleases(config);
-
-  const pluginRelease: PluginRelease = {};
-
-  for (const [pluginType, pluginConfig] of Object.entries(PLUGIN_MAP)) {
-    if (pluginRelease[pluginType as Plugin]) continue;
-
-    for (const release of releases) {
-      if (!release.published_at) continue;
-      if (!release.tag_name.startsWith(pluginConfig.tagPrefix)) continue;
-
-      const asset = release.assets.find(
-        (a) => a.name === pluginConfig.fileName,
-      );
-      if (!asset) continue;
-
-      const url = await downloadAsset(config, asset);
-
-      pluginRelease[pluginType as Plugin] = {
-        version: release.tag_name.slice(pluginConfig.tagPrefix.length),
-        date: new Date(release.published_at).toISOString(),
-        url,
-      };
-      break;
-    }
-  }
-
-  return pluginRelease;
+  return selectRelease(releases);
 }

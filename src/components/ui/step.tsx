@@ -1,11 +1,9 @@
 import { clsx } from "clsx";
-import type { ReactNode } from "react";
 
 export interface StepProps {
   number: number;
   title: string;
   description: string;
-  children?: ReactNode;
   className?: string;
 }
 
@@ -13,7 +11,6 @@ export function Step({
   number,
   title,
   description,
-  children,
   className = "",
 }: StepProps) {
   return (
@@ -24,7 +21,6 @@ export function Step({
       <div>
         <p className="font-semibold text-gray-900 mb-2">{title}</p>
         <p className="text-gray-600">{description}</p>
-        {children}
       </div>
     </li>
   );

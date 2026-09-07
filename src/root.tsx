@@ -10,7 +10,7 @@ export default function Root({ children }: { children: React.ReactNode }) {
         <title>AviUtl2 アニメーション画像出力プラグイン</title>
         <meta
           name="description"
-          content="AviUtl ExEdit2 で動画をアニメーション画像として出力できるプラグインセット。PNG(APNG)、GIF、WebP、AVIFの4つのフォーマットに対応。"
+          content="AviUtl ExEdit2 で動画をアニメーション画像として出力できるプラグインセット。PNG(APNG)、GIF、WebP、AVIF、JPEG XLの5つのフォーマットに対応。"
         />
       </head>
       <body>{children}</body>

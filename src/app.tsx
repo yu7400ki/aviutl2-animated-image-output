@@ -1,13 +1,13 @@
 import { DistributionSite } from "./components/distribution-site";
-import { getConfig, getPluginReleases } from "./libs/release";
+import { getConfig, getRelease } from "./libs/release";
 
 export default async function App() {
   const config = getConfig();
-  const releases = await getPluginReleases(config);
+  const release = await getRelease(config);
 
   return (
     <main>
-      <DistributionSite releases={releases} />
+      <DistributionSite release={release} />
     </main>
   );
 }

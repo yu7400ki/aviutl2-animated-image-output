@@ -1,4 +1,4 @@
-import type { PluginRelease } from "../libs/types";
+import type { Release } from "../libs/types";
 import { Disclaimer } from "./disclaimer";
 import { Footer } from "./footer";
 import { InstallationSteps } from "./installation-steps";
@@ -9,10 +9,10 @@ import { Requirements } from "./requirements";
 import { UsageSteps } from "./usage-steps";
 
 interface DistributionSiteProps {
-  releases: PluginRelease;
+  release: Release | undefined;
 }
 
-export function DistributionSite({ releases }: DistributionSiteProps) {
+export function DistributionSite({ release }: DistributionSiteProps) {
   return (
     <>
       <article className="min-h-screen bg-white @container">
@@ -26,7 +26,7 @@ export function DistributionSite({ releases }: DistributionSiteProps) {
               ExEdit2で動画をアニメーション画像として出力するプラグインセット
             </p>
           </header>
-          <PluginGrid releases={releases} />
+          <PluginGrid release={release} />
           <Requirements />
           <InstallationSteps />
           <UsageSteps />
