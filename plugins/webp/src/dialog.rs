@@ -1,8 +1,8 @@
-use crate::config::{ColorFormat, Config, MAX_NUM_PLAYS};
+use crate::config::{ColorFormat, Config};
 use aviutl2::dialog::{ConfigInputs, RangedInput, repeat_input};
 use aviutl2::max_threads;
 use std::ops::RangeInclusive;
-use webp_encoder::{METHOD_RANGE, QUALITY_RANGE};
+use webp_encoder::{MAX_NUM_PLAYS, METHOD_RANGE, QUALITY_RANGE};
 use win32_ui::{
     layout::{FlexLayout, SizeValue, labeled},
     widget::{CheckBox, ComboBox},

@@ -1,6 +1,6 @@
 //! RIFF/VP8X/ANIM/ANMFの書き出しと後埋め
 
-use crate::MAX_LOOP_COUNT;
+use crate::MAX_NUM_PLAYS;
 use crate::error::Error;
 use anim_core::Rect;
 use std::io::{Seek, SeekFrom, Write};
@@ -72,7 +72,7 @@ impl<W: Write + Seek> Riff<W> {
         height: u32,
         num_plays: u32,
     ) -> Result<Self, Error> {
-        let loop_count = num_plays.min(MAX_LOOP_COUNT) as u16;
+        let loop_count = num_plays.min(MAX_NUM_PLAYS) as u16;
 
         let mut header = Vec::new();
         header.extend_from_slice(b"RIFF");

@@ -2,9 +2,7 @@ pub use aviutl2::ColorFormat;
 use aviutl2::ini::{Ini, Properties};
 use aviutl2::{IniConfig, default_threads, max_threads, read, read_clamped, read_flag};
 use std::ops::RangeInclusive;
-use webp_encoder::{METHOD_RANGE, QUALITY_RANGE};
-
-pub use webp_encoder::MAX_LOOP_COUNT as MAX_NUM_PLAYS;
+use webp_encoder::{MAX_NUM_PLAYS, METHOD_RANGE, QUALITY_RANGE};
 
 /// iniが採る品質の値域
 fn quality_range() -> RangeInclusive<u8> {
@@ -196,10 +194,8 @@ method=3
     /// ANIMのループ数欄に収まらないループ回数は、収まる上限へ丸められる
     #[test]
     fn out_of_range_num_plays_are_clamped() {
-        let ceiling = u32::from(u16::MAX);
-
-        assert_eq!(load(&[("repeat", "3000000000")]).repeat, ceiling);
-        assert_eq!(load(&[("repeat", "70000")]).repeat, ceiling);
+        assert_eq!(load(&[("repeat", "3000000000")]).repeat, MAX_NUM_PLAYS);
+        assert_eq!(load(&[("repeat", "70000")]).repeat, MAX_NUM_PLAYS);
         assert_eq!(load(&[("repeat", "-5")]).repeat, 0);
         assert_eq!(load(&[("repeat", "3")]).repeat, 3);
     }
