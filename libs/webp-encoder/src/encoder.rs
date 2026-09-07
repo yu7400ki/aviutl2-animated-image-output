@@ -232,7 +232,8 @@ impl<W: Write + Seek> Encoder<W> {
     ///
     /// # Errors
     /// フレーム数が0のとき、寸法が0か16383を超えるとき [`Error::Input`]。設定が
-    /// 値域の外のとき [`Error::Encode`]。書き出しに失敗したとき [`Error::Io`]。
+    /// 値域の外のとき [`Error::Encode`]。スレッドを起こせないとき、書き出しに
+    /// 失敗したとき [`Error::Io`]。
     pub fn new(
         writer: W,
         width: u32,
@@ -251,7 +252,7 @@ impl<W: Write + Seek> Encoder<W> {
     /// どちらでも同じになる。
     ///
     /// # Errors
-    /// [`Encoder::new`] と同じ。加えてスレッドを起こせないとき [`Error::Io`]。
+    /// [`Encoder::new`] と同じ。
     pub fn with_workers(
         writer: W,
         width: u32,
