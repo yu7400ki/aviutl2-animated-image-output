@@ -442,6 +442,35 @@ fn invalid_parameters_are_rejected() {
         ),
         Err(Error::InvalidCompressionLevel(10))
     ));
+    assert!(matches!(
+        Encoder::new(
+            Cursor::new(Vec::new()),
+            4,
+            4,
+            1,
+            Config {
+                compression_level: 0,
+                ..rgba
+            }
+        ),
+        Err(Error::InvalidCompressionLevel(0))
+    ));
+    for compression_level in [1, 9] {
+        assert!(
+            Encoder::new(
+                Cursor::new(Vec::new()),
+                4,
+                4,
+                1,
+                Config {
+                    compression_level,
+                    ..rgba
+                }
+            )
+            .is_ok(),
+            "compression_level={compression_level}"
+        );
+    }
 }
 
 /// 差分クロップの検証に使うキャンバスの大きさ
