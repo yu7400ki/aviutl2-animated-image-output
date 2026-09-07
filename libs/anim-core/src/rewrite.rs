@@ -228,6 +228,10 @@ fn differs<const BPP: usize>(a: &[u8], b: &[u8]) -> bool {
 /// 投入されたフレームの並びから、書き直す画素を決める
 ///
 /// 変わった画素は、その投入と次の投入で書かれる。
+///
+/// αを持つ色種別の一致はαを厳密に見て、両方が完全透過な画素はRGBが違っても
+/// 一致とする。完全透過の領域のRGBは以前の投入のまま残るので、入力のバイト列を
+/// そのまま保つ書き出しは画素どうしの厳密な一致で決めること。
 pub struct Rewrite {
     /// 直前の投入で変わった画素
     recent: Triggers,
@@ -250,7 +254,8 @@ impl Rewrite {
     /// `against` と違う画素の地図
     ///
     /// `src` と `against` は `color_type` の画素が隙間なく1フレームぶん並んで
-    /// いること。
+    /// いること。αを持つ色種別では、αが違えば違う画素とし、両方が完全透過なら
+    /// RGBが違っても同じ画素とする。
     pub fn changes(&self, src: &[u8], against: &[u8]) -> Triggers {
         match self.color_type {
             ColorType::Rgb8 => self.scan::<3>(src, against),
