@@ -87,6 +87,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aviutl2_host"
+version = "0.1.0"
+dependencies = [
+ "aviutl2",
+ "widestring",
+ "windows",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
