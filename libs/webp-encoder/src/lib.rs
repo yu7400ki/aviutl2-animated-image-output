@@ -11,7 +11,7 @@ mod picture;
 mod pipeline;
 mod riff;
 
-pub use anim_core::{ColorType, FrameDelay};
+pub use anim_core::{ColorType, FrameDelay, InputError};
 pub use encoder::Encoder;
 pub use error::{EncodingError, Error};
 

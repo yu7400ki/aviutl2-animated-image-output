@@ -12,7 +12,7 @@ mod quantize;
 mod ring;
 mod table;
 
-pub use anim_core::{ColorType, FrameDelay};
+pub use anim_core::{ColorType, FrameDelay, InputError};
 pub use encoder::{Config, Encoder, PaletteKind, Report};
 pub use error::Error;
 

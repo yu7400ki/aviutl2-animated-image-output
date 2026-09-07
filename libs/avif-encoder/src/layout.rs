@@ -1,7 +1,7 @@
 //! キャンバスの大きさと、入力フレームのバイト並び
 
 use crate::error::Error;
-use anim_core::ColorType;
+use anim_core::{ColorType, InputError};
 
 /// キャンバスの大きさと、入力フレームのバイト並び
 #[derive(Debug, Clone, Copy)]
@@ -23,15 +23,15 @@ impl Layout {
     /// に収まることまでを見る。
     ///
     /// # Errors
-    /// 寸法が0か、1行のバイト数がu32に収まらないとき [`Error::InvalidDimensions`]。
+    /// 寸法が0か、1行のバイト数がu32に収まらないとき [`Error::Input`]。
     pub(crate) fn new(width: u32, height: u32, color_type: ColorType) -> Result<Self, Error> {
         if width == 0 || height == 0 {
-            return Err(Error::InvalidDimensions { width, height });
+            return Err(InputError::InvalidDimensions { width, height }.into());
         }
 
         let stride = width as usize * color_type.bytes_per_pixel();
         let Ok(stride) = u32::try_from(stride) else {
-            return Err(Error::InvalidDimensions { width, height });
+            return Err(InputError::InvalidDimensions { width, height }.into());
         };
 
         Ok(Layout {
@@ -46,15 +46,16 @@ impl Layout {
     /// `data` が1フレームぶんの長さか検める
     ///
     /// # Errors
-    /// 長さが違うとき [`Error::FrameSizeMismatch`]。
+    /// 長さが違うとき [`Error::Input`]。
     pub(crate) fn check_frame(&self, data: &[u8]) -> Result<(), Error> {
         if data.len() == self.frame_len {
             Ok(())
         } else {
-            Err(Error::FrameSizeMismatch {
+            Err(InputError::FrameSizeMismatch {
                 expected: self.frame_len,
                 actual: data.len(),
-            })
+            }
+            .into())
         }
     }
 }
@@ -69,7 +70,7 @@ mod tests {
             assert!(
                 matches!(
                     Layout::new(width, height, ColorType::Rgb8),
-                    Err(Error::InvalidDimensions { .. })
+                    Err(Error::Input(InputError::InvalidDimensions { .. }))
                 ),
                 "{width}x{height}"
             );
@@ -88,7 +89,7 @@ mod tests {
     fn a_row_beyond_the_row_bytes_field_is_rejected() {
         assert!(matches!(
             Layout::new(u32::MAX, 1, ColorType::Rgb8),
-            Err(Error::InvalidDimensions { .. })
+            Err(Error::Input(InputError::InvalidDimensions { .. }))
         ));
         let layout = Layout::new(u32::MAX / 4, 1, ColorType::Rgba8).unwrap();
         assert_eq!(layout.stride, (u32::MAX / 4) * 4);
@@ -103,17 +104,17 @@ mod tests {
         assert!(layout.check_frame(&[0; 4 * 3 * 4]).is_ok());
         assert!(matches!(
             layout.check_frame(&[0; 4 * 3 * 3]),
-            Err(Error::FrameSizeMismatch {
+            Err(Error::Input(InputError::FrameSizeMismatch {
                 expected: 48,
                 actual: 36
-            })
+            }))
         ));
         assert!(matches!(
             layout.check_frame(&[0; 4 * 3 * 4 + 1]),
-            Err(Error::FrameSizeMismatch {
+            Err(Error::Input(InputError::FrameSizeMismatch {
                 expected: 48,
                 actual: 49
-            })
+            }))
         ));
     }
 }

@@ -1,20 +1,15 @@
 //! エンコード時のエラー
 
+use anim_core::InputError;
 use std::fmt;
 
 /// GIFエンコード中に発生するエラー
 #[derive(Debug)]
 pub enum Error {
-    /// 幅または高さが0、または論理画面の上限65535を超えている
-    InvalidDimensions { width: u32, height: u32 },
-    /// フレーム数が0
-    InvalidFrameCount,
+    /// 入力の検査に失敗した
+    Input(InputError),
     /// 1フレームのバイト数が `usize` で表現できない
     ImageTooLarge { width: u32, height: u32 },
-    /// フレームのバイト数が `幅 * 高さ * チャンネル数` と一致しない
-    FrameSizeMismatch { expected: usize, actual: usize },
-    /// 投入されたフレーム数が宣言したフレーム数と一致しない
-    FrameCountMismatch { expected: u32, actual: u32 },
     /// 書き出し先のI/Oエラー
     Io(std::io::Error),
     /// 書き出しに失敗したエンコーダを再利用しようとした
@@ -24,24 +19,9 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::InvalidDimensions { width, height } => {
-                write!(f, "画像サイズが不正です: {width}x{height}")
-            }
-            Error::InvalidFrameCount => write!(f, "フレーム数は1以上である必要があります"),
+            Error::Input(e) => e.fmt(f),
             Error::ImageTooLarge { width, height } => {
                 write!(f, "画像が大きすぎます: {width}x{height}")
-            }
-            Error::FrameSizeMismatch { expected, actual } => {
-                write!(
-                    f,
-                    "フレームのバイト数が一致しません: {expected} バイト必要ですが {actual} バイトです"
-                )
-            }
-            Error::FrameCountMismatch { expected, actual } => {
-                write!(
-                    f,
-                    "フレーム数が一致しません: 宣言 {expected}、投入 {actual}"
-                )
             }
             Error::Io(e) => write!(f, "書き出しに失敗しました: {e}"),
             Error::Poisoned => write!(f, "書き出しに失敗したエンコーダは再利用できません"),
@@ -55,6 +35,12 @@ impl std::error::Error for Error {
             Error::Io(e) => Some(e),
             _ => None,
         }
+    }
+}
+
+impl From<InputError> for Error {
+    fn from(e: InputError) -> Self {
+        Error::Input(e)
     }
 }
 

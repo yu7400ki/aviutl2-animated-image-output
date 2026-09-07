@@ -8,7 +8,7 @@ use crate::layout::Layout;
 use crate::pipeline::Pipeline;
 use crate::riff::{Frame, Riff};
 use crate::{Config, Report};
-use anim_core::{Accumulator, ColorType, FrameDelay, Rect};
+use anim_core::{Accumulator, ColorType, FrameDelay, InputError, Rect};
 use std::collections::VecDeque;
 use std::io::{Seek, Write};
 use std::num::NonZeroUsize;
@@ -217,9 +217,8 @@ impl<W: Write + Seek> Encoder<W> {
     /// [`Encoder::workers`] が返す。
     ///
     /// # Errors
-    /// フレーム数が0のとき [`Error::InvalidFrameCount`]。寸法が0か16383を超える
-    /// とき [`Error::InvalidDimensions`]。設定が値域の外のとき [`Error::Encode`]。
-    /// 書き出しに失敗したとき [`Error::Io`]。
+    /// フレーム数が0のとき、寸法が0か16383を超えるとき [`Error::Input`]。設定が
+    /// 値域の外のとき [`Error::Encode`]。書き出しに失敗したとき [`Error::Io`]。
     pub fn new(
         writer: W,
         width: u32,
@@ -248,7 +247,7 @@ impl<W: Write + Seek> Encoder<W> {
         workers: NonZeroUsize,
     ) -> Result<Self, Error> {
         if num_frames == 0 {
-            return Err(Error::InvalidFrameCount);
+            return Err(InputError::InvalidFrameCount.into());
         }
         let layout = Layout::new(width, height, config.color_type)?;
         let codec = Codec::new(&config)?;
@@ -302,9 +301,8 @@ impl<W: Write + Seek> Encoder<W> {
     /// 符号化を並列に回すため、書き出しは仕掛かりが上限を超えるまで遅れる。
     ///
     /// # Errors
-    /// バイト数が寸法と色種別から決まる長さと違うとき
-    /// [`Error::FrameSizeMismatch`]。宣言したフレーム数を超えたとき
-    /// [`Error::FrameCountMismatch`]。符号化に失敗したとき [`Error::Encode`]。
+    /// バイト数が寸法と色種別から決まる長さと違うとき、宣言したフレーム数を
+    /// 超えたとき [`Error::Input`]。符号化に失敗したとき [`Error::Encode`]。
     /// 符号化した内容のチャンク構成を読み取れないとき
     /// [`Error::MalformedOutput`]。ファイルがRIFFの上限を超えるとき
     /// [`Error::FileTooLarge`]。書き出しに失敗したとき [`Error::Io`]。
@@ -314,10 +312,11 @@ impl<W: Write + Seek> Encoder<W> {
             return Err(Error::Poisoned);
         }
         if self.frames_accepted == self.num_frames {
-            return Err(Error::FrameCountMismatch {
+            return Err(InputError::FrameCountMismatch {
                 expected: self.num_frames,
                 actual: self.frames_accepted + 1,
-            });
+            }
+            .into());
         }
         self.layout.check_frame(&data)?;
 
@@ -335,9 +334,9 @@ impl<W: Write + Seek> Encoder<W> {
     /// VP8XのALPHAフラグを書き戻す。
     ///
     /// # Errors
-    /// 投入されたフレーム数が宣言したフレーム数に満たないとき
-    /// [`Error::FrameCountMismatch`]。以前の投入が書き出しに失敗しているとき
-    /// [`Error::Poisoned`]。表示時間を分けるフレームの符号化に失敗したとき
+    /// 投入されたフレーム数が宣言したフレーム数に満たないとき [`Error::Input`]。
+    /// 以前の投入が書き出しに失敗しているとき [`Error::Poisoned`]。表示時間を
+    /// 分けるフレームの符号化に失敗したとき
     /// [`Error::Encode`] か [`Error::MalformedOutput`]。ファイルがRIFFの上限を
     /// 超えるとき [`Error::FileTooLarge`]。書き出しに失敗したとき [`Error::Io`]。
     pub fn finish(self) -> Result<(W, Report), Error> {
@@ -345,10 +344,11 @@ impl<W: Write + Seek> Encoder<W> {
             return Err(Error::Poisoned);
         }
         if self.frames_accepted != self.num_frames {
-            return Err(Error::FrameCountMismatch {
+            return Err(InputError::FrameCountMismatch {
                 expected: self.num_frames,
                 actual: self.frames_accepted,
-            });
+            }
+            .into());
         }
 
         let Encoder {

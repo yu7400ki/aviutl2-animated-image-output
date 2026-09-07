@@ -1,5 +1,6 @@
 //! `JxlEncoderStatus` / `JxlEncoderError` の写像と、入力検査のエラー
 
+use anim_core::InputError;
 use jxl_sys::{
     JXL_ENC_ERR_API_USAGE, JXL_ENC_ERR_BAD_INPUT, JXL_ENC_ERR_GENERIC, JXL_ENC_ERR_JBRD,
     JXL_ENC_ERR_NOT_SUPPORTED, JXL_ENC_ERR_OK, JXL_ENC_ERR_OOM,
@@ -10,10 +11,8 @@ use std::fmt;
 /// JPEG XLエンコード中に発生するエラー
 #[derive(Debug)]
 pub enum Error {
-    /// 幅または高さが0
-    InvalidDimensions { width: u32, height: u32 },
-    /// フレーム数が0
-    InvalidFrameCount,
+    /// 入力の検査に失敗した
+    Input(InputError),
     /// 1秒あたりのtick数が0を含むか、約した比が書ける値域の外
     InvalidTps { numerator: u32, denominator: u32 },
     /// フレームの表示時間が0
@@ -22,10 +21,6 @@ pub enum Error {
     InvalidQuality { quality: f32 },
     /// 速度と圧縮率の均衡が値域の外
     InvalidEffort { effort: u8 },
-    /// フレームのバイト数が `幅 * 高さ * チャンネル数` と一致しない
-    FrameSizeMismatch { expected: usize, actual: usize },
-    /// 投入されたフレーム数が宣言したフレーム数と一致しない
-    FrameCountMismatch { expected: u32, actual: u32 },
     /// libjxlの符号化が失敗した
     Encode(EncodingError),
     /// 書き出し先のI/Oエラー
@@ -94,10 +89,7 @@ impl EncodingError {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::InvalidDimensions { width, height } => {
-                write!(f, "画像サイズが不正です: {width}x{height}")
-            }
-            Error::InvalidFrameCount => write!(f, "フレーム数は1以上である必要があります"),
+            Error::Input(e) => e.fmt(f),
             Error::InvalidTps {
                 numerator,
                 denominator,
@@ -111,16 +103,6 @@ impl fmt::Display for Error {
             }
             Error::InvalidEffort { effort } => {
                 write!(f, "均衡は1以上10以下である必要があります: {effort}")
-            }
-            Error::FrameSizeMismatch { expected, actual } => write!(
-                f,
-                "フレームのバイト数が一致しません: {expected} バイト必要ですが {actual} バイトです"
-            ),
-            Error::FrameCountMismatch { expected, actual } => {
-                write!(
-                    f,
-                    "フレーム数が一致しません: 宣言 {expected}、投入 {actual}"
-                )
             }
             Error::Encode(e) => write!(f, "符号化に失敗しました: {e}"),
             Error::Io(e) => write!(f, "書き出しに失敗しました: {e}"),
@@ -159,6 +141,12 @@ impl std::error::Error for Error {
 }
 
 impl std::error::Error for EncodingError {}
+
+impl From<InputError> for Error {
+    fn from(e: InputError) -> Self {
+        Error::Input(e)
+    }
+}
 
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {

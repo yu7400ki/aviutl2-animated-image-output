@@ -6,6 +6,7 @@
 //! 外れているため、`assert_close` がその逸脱の形へ絞って逃がす。ffmpeg が
 //! 見つからない環境では、そちらのデコードを飛ばして `image-webp` の結果で判定する。
 
+use anim_core::InputError;
 use image_webp::{LoopCount, WebPDecoder};
 use std::cell::RefCell;
 use std::io::{Cursor, Seek, SeekFrom, Write};
@@ -951,7 +952,7 @@ fn zero_frames_are_refused() {
             0,
             config(ColorType::Rgba8, 0)
         ),
-        Err(Error::InvalidFrameCount)
+        Err(Error::Input(InputError::InvalidFrameCount))
     ));
 }
 
@@ -970,10 +971,10 @@ fn a_frame_count_other_than_the_declared_one_is_refused() {
     encoder.add_frame(frames[0].clone(), delay_of(0)).unwrap();
     assert!(matches!(
         encoder.finish(),
-        Err(Error::FrameCountMismatch {
+        Err(Error::Input(InputError::FrameCountMismatch {
             expected: 3,
             actual: 1
-        })
+        }))
     ));
 
     let mut encoder = Encoder::new(
@@ -989,10 +990,10 @@ fn a_frame_count_other_than_the_declared_one_is_refused() {
     }
     assert!(matches!(
         encoder.add_frame(frames[2].clone(), delay_of(2)),
-        Err(Error::FrameCountMismatch {
+        Err(Error::Input(InputError::FrameCountMismatch {
             expected: 2,
             actual: 3
-        })
+        }))
     ));
 }
 

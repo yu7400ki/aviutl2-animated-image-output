@@ -5,6 +5,7 @@
 //! ffmpeg の2つでデコードする。ffmpeg が見つからない環境では、そちらだけを
 //! 飛ばして `gif` クレートの結果で判定する。
 
+use anim_core::InputError;
 use gif_encoder::{ColorType, Config, Encoder, Error, FrameDelay, PaletteKind, Report};
 use std::cell::RefCell;
 use std::io::{Cursor, Seek, SeekFrom, Write};
@@ -1736,7 +1737,7 @@ fn zero_and_oversized_dimensions_are_rejected() {
         assert!(
             matches!(
                 Encoder::new(Cursor::new(Vec::new()), width, height, 1, config),
-                Err(Error::InvalidDimensions { .. })
+                Err(Error::Input(InputError::InvalidDimensions { .. }))
             ),
             "{width}x{height}"
         );
@@ -1748,7 +1749,7 @@ fn zero_and_oversized_dimensions_are_rejected() {
 fn a_frame_count_of_zero_is_rejected() {
     assert!(matches!(
         Encoder::new(Cursor::new(Vec::new()), 1, 1, 0, Config::default()),
-        Err(Error::InvalidFrameCount)
+        Err(Error::Input(InputError::InvalidFrameCount))
     ));
 }
 
@@ -1955,10 +1956,10 @@ fn a_frame_of_the_wrong_length_is_rejected() {
     let mut encoder = Encoder::new(Cursor::new(Vec::new()), 4, 4, 1, config).unwrap();
     assert!(matches!(
         encoder.add_frame(vec![0; 47], delay_of(0)),
-        Err(Error::FrameSizeMismatch {
+        Err(Error::Input(InputError::FrameSizeMismatch {
             expected: 48,
             actual: 47
-        })
+        }))
     ));
 }
 
@@ -1968,20 +1969,20 @@ fn a_missing_or_extra_frame_is_rejected() {
     let encoder = Encoder::new(Cursor::new(Vec::new()), 1, 1, 1, config).unwrap();
     assert!(matches!(
         encoder.finish(),
-        Err(Error::FrameCountMismatch {
+        Err(Error::Input(InputError::FrameCountMismatch {
             expected: 1,
             actual: 0
-        })
+        }))
     ));
 
     let mut encoder = Encoder::new(Cursor::new(Vec::new()), 1, 1, 1, config).unwrap();
     encoder.add_frame(vec![1, 2, 3], delay_of(0)).unwrap();
     assert!(matches!(
         encoder.add_frame(vec![1, 2, 3], delay_of(1)),
-        Err(Error::FrameCountMismatch {
+        Err(Error::Input(InputError::FrameCountMismatch {
             expected: 1,
             actual: 2
-        })
+        }))
     ));
 }
 

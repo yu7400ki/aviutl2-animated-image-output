@@ -5,7 +5,7 @@ mod error;
 mod image;
 mod layout;
 
-pub use anim_core::ColorType;
+pub use anim_core::{ColorType, InputError};
 pub use encoder::{Encoder, OperatingPoint, Usage};
 pub use error::{EncodingError, Error};
 pub use image::YuvFormat;

@@ -4,6 +4,7 @@ use crate::error::{EncodingError, Error};
 use crate::image::{Image, RwData};
 use crate::layout::Layout;
 use crate::{Config, QUALITY_RANGE, SPEED_RANGE, YuvFormat};
+use anim_core::InputError;
 use avif_sys::{
     AVIF_ADD_IMAGE_FLAG_NONE, AVIF_ADD_IMAGE_FLAG_SINGLE, AVIF_REPETITION_COUNT_INFINITE,
     AVIF_RESULT_OK, AVIF_RESULT_OUT_OF_MEMORY, avifEncoder, avifEncoderAddImage, avifEncoderCreate,
@@ -128,11 +129,11 @@ impl<W: Write> Encoder<W> {
     /// `width` x `height` の `num_frames` フレームを `writer` へ書き出す
     ///
     /// # Errors
-    /// フレーム数が0のとき [`Error::InvalidFrameCount`]。時間刻み数が0のとき
-    /// [`Error::InvalidTimescale`]。品質が [`QUALITY_RANGE`] の外のとき
-    /// [`Error::InvalidQuality`]。速度が [`SPEED_RANGE`] の外のとき
-    /// [`Error::InvalidSpeed`]。寸法が0か行間が欄に収まらないとき
-    /// [`Error::InvalidDimensions`]。符号化器を確保できないとき [`Error::Encode`]。
+    /// フレーム数が0のとき、寸法が0か行間が欄に収まらないとき
+    /// [`Error::Input`]。時間刻み数が0のとき [`Error::InvalidTimescale`]。
+    /// 品質が [`QUALITY_RANGE`] の外のとき [`Error::InvalidQuality`]。速度が
+    /// [`SPEED_RANGE`] の外のとき [`Error::InvalidSpeed`]。符号化器を確保
+    /// できないとき [`Error::Encode`]。
     pub fn new(
         writer: W,
         width: u32,
@@ -141,7 +142,7 @@ impl<W: Write> Encoder<W> {
         config: Config,
     ) -> Result<Self, Error> {
         if num_frames == 0 {
-            return Err(Error::InvalidFrameCount);
+            return Err(InputError::InvalidFrameCount.into());
         }
         if config.timescale == 0 {
             return Err(Error::InvalidTimescale);
@@ -176,16 +177,16 @@ impl<W: Write> Encoder<W> {
     /// 書かれない。
     ///
     /// # Errors
-    /// 宣言したフレーム数を超えたとき [`Error::FrameCountMismatch`]。表示時間が
-    /// 0のとき [`Error::InvalidDuration`]。バイト数が寸法と色種別から決まる長さと
-    /// 違うとき [`Error::FrameSizeMismatch`]。符号化に失敗したとき
-    /// [`Error::Encode`]。
+    /// 宣言したフレーム数を超えたとき、バイト数が寸法と色種別から決まる長さと
+    /// 違うとき [`Error::Input`]。表示時間が0のとき
+    /// [`Error::InvalidDuration`]。符号化に失敗したとき [`Error::Encode`]。
     pub fn add_frame(&mut self, data: &[u8], duration: u32) -> Result<(), Error> {
         if self.frames_accepted == self.num_frames {
-            return Err(Error::FrameCountMismatch {
+            return Err(InputError::FrameCountMismatch {
                 expected: self.num_frames,
                 actual: self.frames_accepted + 1,
-            });
+            }
+            .into());
         }
         if duration == 0 {
             return Err(Error::InvalidDuration);
@@ -209,15 +210,16 @@ impl<W: Write> Encoder<W> {
     /// ファイル全体を組み立てて `writer` へ書き切る
     ///
     /// # Errors
-    /// 投入されたフレーム数が宣言したフレーム数に満たないとき
-    /// [`Error::FrameCountMismatch`]。組み立てに失敗したとき [`Error::Encode`]。
-    /// 書き出しに失敗したとき [`Error::Io`]。
+    /// 投入されたフレーム数が宣言したフレーム数に満たないとき [`Error::Input`]。
+    /// 組み立てに失敗したとき [`Error::Encode`]。書き出しに失敗したとき
+    /// [`Error::Io`]。
     pub fn finish(self) -> Result<W, Error> {
         if self.frames_accepted != self.num_frames {
-            return Err(Error::FrameCountMismatch {
+            return Err(InputError::FrameCountMismatch {
                 expected: self.num_frames,
                 actual: self.frames_accepted,
-            });
+            }
+            .into());
         }
 
         let Encoder {
@@ -353,7 +355,7 @@ mod tests {
     fn a_zero_frame_count_is_rejected() {
         assert!(matches!(
             encoder(0, config()),
-            Err(Error::InvalidFrameCount)
+            Err(Error::Input(InputError::InvalidFrameCount))
         ));
     }
 
@@ -433,10 +435,10 @@ mod tests {
         let mut encoder = encoder(2, config()).unwrap();
         assert!(matches!(
             encoder.add_frame(&[0; 16 * 16 * 4], 1),
-            Err(Error::FrameSizeMismatch {
+            Err(Error::Input(InputError::FrameSizeMismatch {
                 expected: 768,
                 actual: 1024
-            })
+            }))
         ));
     }
 
@@ -446,10 +448,10 @@ mod tests {
         encoder.add_frame(&[0; 16 * 16 * 3], 1).unwrap();
         assert!(matches!(
             encoder.add_frame(&[0; 16 * 16 * 3], 1),
-            Err(Error::FrameCountMismatch {
+            Err(Error::Input(InputError::FrameCountMismatch {
                 expected: 1,
                 actual: 2
-            })
+            }))
         ));
     }
 
@@ -459,10 +461,10 @@ mod tests {
         encoder.add_frame(&[0; 16 * 16 * 3], 1).unwrap();
         assert!(matches!(
             encoder.finish(),
-            Err(Error::FrameCountMismatch {
+            Err(Error::Input(InputError::FrameCountMismatch {
                 expected: 3,
                 actual: 1
-            })
+            }))
         ));
     }
 }

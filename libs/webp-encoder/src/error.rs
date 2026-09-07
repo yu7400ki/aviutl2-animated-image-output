@@ -1,19 +1,14 @@
 //! エンコード時のエラー
 
+use anim_core::InputError;
 use std::ffi::c_int;
 use std::fmt;
 
 /// WebPエンコード中に発生するエラー
 #[derive(Debug)]
 pub enum Error {
-    /// 幅または高さが0、またはフレームの上限16383を超えている
-    InvalidDimensions { width: u32, height: u32 },
-    /// フレーム数が0
-    InvalidFrameCount,
-    /// フレームのバイト数が `幅 * 高さ * チャンネル数` と一致しない
-    FrameSizeMismatch { expected: usize, actual: usize },
-    /// 投入されたフレーム数が宣言したフレーム数と一致しない
-    FrameCountMismatch { expected: u32, actual: u32 },
+    /// 入力の検査に失敗した
+    Input(InputError),
     /// ファイルサイズがRIFFの上限4GiBを超えた
     FileTooLarge,
     /// libwebpの符号化が失敗した
@@ -75,22 +70,7 @@ impl EncodingError {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::InvalidDimensions { width, height } => {
-                write!(f, "画像サイズが不正です: {width}x{height}")
-            }
-            Error::InvalidFrameCount => write!(f, "フレーム数は1以上である必要があります"),
-            Error::FrameSizeMismatch { expected, actual } => {
-                write!(
-                    f,
-                    "フレームのバイト数が一致しません: {expected} バイト必要ですが {actual} バイトです"
-                )
-            }
-            Error::FrameCountMismatch { expected, actual } => {
-                write!(
-                    f,
-                    "フレーム数が一致しません: 宣言 {expected}、投入 {actual}"
-                )
-            }
+            Error::Input(e) => e.fmt(f),
             Error::FileTooLarge => write!(f, "ファイルサイズが4GiBを超えました"),
             Error::Encode(e) => write!(f, "符号化に失敗しました: {e}"),
             Error::MalformedOutput => {
@@ -132,6 +112,12 @@ impl std::error::Error for Error {
 }
 
 impl std::error::Error for EncodingError {}
+
+impl From<InputError> for Error {
+    fn from(e: InputError) -> Self {
+        Error::Input(e)
+    }
+}
 
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {

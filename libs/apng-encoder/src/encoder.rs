@@ -9,7 +9,7 @@ use crate::error::Error;
 use crate::layout::Layout;
 use crate::over;
 use crate::pipeline::Pipeline;
-use anim_core::{ColorType, FrameDelay, Pacing, Rect};
+use anim_core::{ColorType, FrameDelay, InputError, Pacing, Rect};
 use std::collections::VecDeque;
 use std::io::Write;
 use std::num::NonZeroUsize;
@@ -260,10 +260,10 @@ impl<W: Write> Encoder<W> {
         workers: NonZeroUsize,
     ) -> Result<Self, Error> {
         if width == 0 || height == 0 {
-            return Err(Error::InvalidDimensions { width, height });
+            return Err(InputError::InvalidDimensions { width, height }.into());
         }
         if num_frames == 0 {
-            return Err(Error::InvalidFrameCount);
+            return Err(InputError::InvalidFrameCount.into());
         }
         if !COMPRESSION_LEVELS.contains(&config.compression_level) {
             return Err(Error::InvalidCompressionLevel(config.compression_level));
@@ -335,17 +335,19 @@ impl<W: Write> Encoder<W> {
             return Err(Error::Poisoned);
         }
         if self.frames_accepted == self.num_frames {
-            return Err(Error::FrameCountMismatch {
+            return Err(InputError::FrameCountMismatch {
                 expected: self.num_frames,
                 actual: self.frames_accepted + 1,
-            });
+            }
+            .into());
         }
 
         if data.len() != self.layout.frame_len {
-            return Err(Error::FrameSizeMismatch {
+            return Err(InputError::FrameSizeMismatch {
                 expected: self.layout.frame_len,
                 actual: data.len(),
-            });
+            }
+            .into());
         }
 
         // 途中で失敗するとfcTLだけが書かれた状態で残るため、以降の書き出しを拒否する
@@ -432,10 +434,11 @@ impl<W: Write> Encoder<W> {
             return Err(Error::Poisoned);
         }
         if self.frames_accepted != self.num_frames {
-            return Err(Error::FrameCountMismatch {
+            return Err(InputError::FrameCountMismatch {
                 expected: self.num_frames,
                 actual: self.frames_accepted,
-            });
+            }
+            .into());
         }
 
         while !self.staged.is_empty() {

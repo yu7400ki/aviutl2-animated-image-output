@@ -48,7 +48,7 @@ impl Image {
     /// 色はBT.709の原色・sRGBの伝達特性・BT.601の色行列・full rangeとして書く。
     ///
     /// # Errors
-    /// `data` の長さが1フレームぶんと違うとき [`Error::FrameSizeMismatch`]。
+    /// `data` の長さが1フレームぶんと違うとき [`Error::Input`]。
     /// 画像を確保できないか変換に失敗したとき [`Error::Encode`]。
     pub(crate) fn import(
         data: &[u8],
@@ -153,16 +153,17 @@ impl Drop for RwData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anim_core::InputError;
 
     #[test]
     fn a_buffer_of_another_length_is_refused_before_the_conversion() {
         let layout = Layout::new(2, 2, ColorType::Rgba8).unwrap();
         assert!(matches!(
             Image::import(&[0; 15], &layout, YuvFormat::Yuv420),
-            Err(Error::FrameSizeMismatch {
+            Err(Error::Input(InputError::FrameSizeMismatch {
                 expected: 16,
                 actual: 15
-            })
+            }))
         ));
     }
 

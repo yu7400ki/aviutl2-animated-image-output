@@ -1,7 +1,7 @@
 //! キャンバスの大きさと、入力フレームのバイト並び
 
 use crate::error::Error;
-use anim_core::{ColorType, Rect};
+use anim_core::{ColorType, InputError, Rect};
 
 /// 論理画面と画像記述子が持てる寸法の上限
 const MAX_DIMENSION: u32 = u16::MAX as u32;
@@ -25,11 +25,11 @@ impl Layout {
     /// `width` x `height` の `color_type` を並べる配置を作る
     ///
     /// # Errors
-    /// 寸法が0か65535を超えるとき [`Error::InvalidDimensions`]。1フレームの
-    /// バイト数が `usize` で表現できないとき [`Error::ImageTooLarge`]。
+    /// 寸法が0か65535を超えるとき [`Error::Input`]。1フレームのバイト数が
+    /// `usize` で表現できないとき [`Error::ImageTooLarge`]。
     pub(crate) fn new(width: u32, height: u32, color_type: ColorType) -> Result<Self, Error> {
         if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
-            return Err(Error::InvalidDimensions { width, height });
+            return Err(InputError::InvalidDimensions { width, height }.into());
         }
 
         let bytes_per_pixel = color_type.bytes_per_pixel();
@@ -71,7 +71,7 @@ mod tests {
             assert!(
                 matches!(
                     Layout::new(width, height, ColorType::Rgb8),
-                    Err(Error::InvalidDimensions { .. })
+                    Err(Error::Input(InputError::InvalidDimensions { .. }))
                 ),
                 "{width}x{height}"
             );

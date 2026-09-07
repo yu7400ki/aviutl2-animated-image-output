@@ -12,7 +12,7 @@ mod over;
 mod pipeline;
 mod zlib;
 
-pub use anim_core::{ColorType, FrameDelay};
+pub use anim_core::{ColorType, FrameDelay, InputError};
 pub use delay::delay_parts;
 pub use encoder::{COMPRESSION_LEVELS, Config, Encoder};
 pub use error::Error;

@@ -4,7 +4,7 @@ use crate::delta::{Delta, Pending, Region};
 use crate::error::{EncodingError, Error};
 use crate::layout::Layout;
 use crate::{Config, EFFORT_RANGE, QUALITY_RANGE};
-use anim_core::{ColorType, gcd};
+use anim_core::{ColorType, InputError, gcd};
 use jxl_sys::{
     JXL_ENC_ERR_OOM, JXL_ENC_ERROR, JXL_ENC_FRAME_SETTING_EFFORT, JXL_ENC_NEED_MORE_OUTPUT,
     JXL_ENC_SUCCESS, JXL_FALSE, JXL_NATIVE_ENDIAN, JXL_TRUE, JXL_TYPE_UINT8, JxlBasicInfo,
@@ -168,12 +168,11 @@ impl<W: Write> Encoder<W> {
     /// `width` x `height` の `num_frames` フレームを `writer` へ書き出す
     ///
     /// # Errors
-    /// フレーム数が0のとき [`Error::InvalidFrameCount`]。1秒あたりのtick数が
-    /// 0を含むか、約した比がヘッダの値域に収まらないとき
-    /// [`Error::InvalidTps`]。品質が [`QUALITY_RANGE`]
-    /// の外のとき [`Error::InvalidQuality`]。均衡が [`EFFORT_RANGE`] の外のとき
-    /// [`Error::InvalidEffort`]。寸法が0のとき [`Error::InvalidDimensions`]。
-    /// 符号化器を組み立てられないとき [`Error::Encode`]。
+    /// フレーム数が0のとき、寸法が0のとき [`Error::Input`]。1秒あたりのtick数が
+    /// 0を含むか、約した比がヘッダの値域に収まらないとき [`Error::InvalidTps`]。
+    /// 品質が [`QUALITY_RANGE`] の外のとき [`Error::InvalidQuality`]。均衡が
+    /// [`EFFORT_RANGE`] の外のとき [`Error::InvalidEffort`]。符号化器を
+    /// 組み立てられないとき [`Error::Encode`]。
     pub fn new(
         writer: W,
         width: u32,
@@ -182,7 +181,7 @@ impl<W: Write> Encoder<W> {
         config: Config,
     ) -> Result<Self, Error> {
         if num_frames == 0 {
-            return Err(Error::InvalidFrameCount);
+            return Err(InputError::InvalidFrameCount.into());
         }
         let tps = Tps::new(config.tps_numerator, config.tps_denominator)?;
         if !QUALITY_RANGE.contains(&config.quality) {
@@ -274,19 +273,20 @@ impl<W: Write> Encoder<W> {
     /// 一致する内容は、そちらの表示時間へ畳まれる。
     ///
     /// # Errors
-    /// 宣言したフレーム数を超えたとき [`Error::FrameCountMismatch`]。表示時間が
-    /// 0のとき [`Error::InvalidDuration`]。バイト数が寸法と色種別から決まる長さと
-    /// 違うとき [`Error::FrameSizeMismatch`]。符号化に失敗したとき
-    /// [`Error::Encode`]。書き出しに失敗したとき [`Error::Io`]。
+    /// 宣言したフレーム数を超えたとき、バイト数が寸法と色種別から決まる長さと
+    /// 違うとき [`Error::Input`]。表示時間が0のとき
+    /// [`Error::InvalidDuration`]。符号化に失敗したとき [`Error::Encode`]。
+    /// 書き出しに失敗したとき [`Error::Io`]。
     ///
     /// 符号化と書き出しの失敗は1つ前に投入されたフレームのものになる。最後に
     /// 投入したフレームの書き出しは [`Encoder::finish`] で報告される。
     pub fn add_frame(&mut self, data: Vec<u8>, duration: u32) -> Result<(), Error> {
         if self.frames_accepted == self.num_frames {
-            return Err(Error::FrameCountMismatch {
+            return Err(InputError::FrameCountMismatch {
                 expected: self.num_frames,
                 actual: self.frames_accepted + 1,
-            });
+            }
+            .into());
         }
         if duration == 0 {
             return Err(Error::InvalidDuration);
@@ -367,19 +367,19 @@ impl<W: Write> Encoder<W> {
     /// 最後に投入されたフレームを書き出し、`writer` を返す
     ///
     /// # Errors
-    /// 投入されたフレーム数が宣言したフレーム数に満たないとき
-    /// [`Error::FrameCountMismatch`]。このとき、投入されたフレームがあれば
-    /// 書き出してストリームを閉じてから返す。符号化に失敗したとき
-    /// [`Error::Encode`]。書き出しに失敗したとき [`Error::Io`]。
+    /// 投入されたフレーム数が宣言したフレーム数に満たないとき [`Error::Input`]。
+    /// このとき、投入されたフレームがあれば書き出してストリームを閉じてから
+    /// 返す。符号化に失敗したとき [`Error::Encode`]。書き出しに失敗したとき
+    /// [`Error::Io`]。
     pub fn finish(mut self) -> Result<W, Error> {
         let mismatch =
-            (self.frames_accepted != self.num_frames).then_some(Error::FrameCountMismatch {
+            (self.frames_accepted != self.num_frames).then_some(InputError::FrameCountMismatch {
                 expected: self.num_frames,
                 actual: self.frames_accepted,
             });
         self.close()?;
         if let Some(mismatch) = mismatch {
-            return Err(mismatch);
+            return Err(mismatch.into());
         }
 
         let Encoder { mut writer, .. } = self;
@@ -567,7 +567,7 @@ mod tests {
     fn a_zero_frame_count_is_rejected() {
         assert!(matches!(
             encoder(0, config()),
-            Err(Error::InvalidFrameCount)
+            Err(Error::Input(InputError::InvalidFrameCount))
         ));
     }
 
@@ -660,7 +660,7 @@ mod tests {
     fn a_zero_dimension_is_rejected() {
         assert!(matches!(
             Encoder::new(Cursor::new(Vec::new()), 0, 16, 1, config()),
-            Err(Error::InvalidDimensions { .. })
+            Err(Error::Input(InputError::InvalidDimensions { .. }))
         ));
     }
 
@@ -730,10 +730,10 @@ mod tests {
         let mut encoder = encoder(2, config()).unwrap();
         assert!(matches!(
             encoder.add_frame(vec![0; 16 * 16 * 4], 1),
-            Err(Error::FrameSizeMismatch {
+            Err(Error::Input(InputError::FrameSizeMismatch {
                 expected: 768,
                 actual: 1024
-            })
+            }))
         ));
     }
 
@@ -757,10 +757,10 @@ mod tests {
         encoder.add_frame(vec![0; 16 * 16 * 3], 1).unwrap();
         assert!(matches!(
             encoder.add_frame(vec![0; 16 * 16 * 3], 1),
-            Err(Error::FrameCountMismatch {
+            Err(Error::Input(InputError::FrameCountMismatch {
                 expected: 1,
                 actual: 2
-            })
+            }))
         ));
     }
 
@@ -770,10 +770,10 @@ mod tests {
         encoder.add_frame(vec![0; 16 * 16 * 3], 1).unwrap();
         assert!(matches!(
             encoder.finish(),
-            Err(Error::FrameCountMismatch {
+            Err(Error::Input(InputError::FrameCountMismatch {
                 expected: 3,
                 actual: 1
-            })
+            }))
         ));
     }
 }

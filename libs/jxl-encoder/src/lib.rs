@@ -12,7 +12,7 @@ mod split;
 #[cfg(test)]
 mod tests;
 
-pub use anim_core::ColorType;
+pub use anim_core::{ColorType, InputError};
 pub use encoder::Encoder;
 pub use error::{EncodingError, Error, ErrorCode};
 

@@ -13,7 +13,7 @@ use crate::normalize::{self, Binarized, TRANSPARENT, pack};
 use crate::quantize::{Histogram, material};
 use crate::ring::Ring;
 use crate::table::{ColorTable, Palette, QUANTIZED_COLORS};
-use anim_core::{ColorType, Colors, FrameDelay, Pacing, Rect};
+use anim_core::{ColorType, Colors, FrameDelay, InputError, Pacing, Rect};
 use std::io::{Seek, SeekFrom, Write};
 
 /// エンコード設定
@@ -494,10 +494,9 @@ impl<W: Write + Seek> Encoder<W> {
     /// ここで書く。
     ///
     /// # Errors
-    /// 寸法が0か65535を超えるとき [`Error::InvalidDimensions`]。フレーム数が0の
-    /// とき [`Error::InvalidFrameCount`]。1フレームのバイト数が `usize` で
-    /// 表現できないとき [`Error::ImageTooLarge`]。書き出しに失敗したとき
-    /// [`Error::Io`]。
+    /// 寸法が0か65535を超えるとき、フレーム数が0のとき [`Error::Input`]。
+    /// 1フレームのバイト数が `usize` で表現できないとき
+    /// [`Error::ImageTooLarge`]。書き出しに失敗したとき [`Error::Io`]。
     pub fn new(
         mut writer: W,
         width: u32,
@@ -506,7 +505,7 @@ impl<W: Write + Seek> Encoder<W> {
         config: Config,
     ) -> Result<Self, Error> {
         if num_frames == 0 {
-            return Err(Error::InvalidFrameCount);
+            return Err(InputError::InvalidFrameCount.into());
         }
         let layout = Layout::new(width, height, config.color_type)?;
 
@@ -534,24 +533,25 @@ impl<W: Write + Seek> Encoder<W> {
     /// 並んでいること。渡した面はそのままエンコーダが抱える。
     ///
     /// # Errors
-    /// バイト数が寸法と色種別から決まる長さと違うとき
-    /// [`Error::FrameSizeMismatch`]。宣言したフレーム数を超えたとき
-    /// [`Error::FrameCountMismatch`]。
+    /// バイト数が寸法と色種別から決まる長さと違うとき、宣言したフレーム数を
+    /// 超えたとき [`Error::Input`]。
     pub fn add_frame(&mut self, mut data: Vec<u8>, delay: FrameDelay) -> Result<(), Error> {
         if self.poisoned {
             return Err(Error::Poisoned);
         }
         if data.len() != self.layout.frame_len {
-            return Err(Error::FrameSizeMismatch {
+            return Err(InputError::FrameSizeMismatch {
                 expected: self.layout.frame_len,
                 actual: data.len(),
-            });
+            }
+            .into());
         }
         if self.frames_accepted == self.num_frames {
-            return Err(Error::FrameCountMismatch {
+            return Err(InputError::FrameCountMismatch {
                 expected: self.num_frames,
                 actual: self.frames_accepted + 1,
-            });
+            }
+            .into());
         }
 
         match self.layout.color_type {
@@ -575,17 +575,17 @@ impl<W: Write + Seek> Encoder<W> {
     /// 書き戻す。
     ///
     /// # Errors
-    /// 投入されたフレーム数が宣言したフレーム数に満たないとき
-    /// [`Error::FrameCountMismatch`]。
+    /// 投入されたフレーム数が宣言したフレーム数に満たないとき [`Error::Input`]。
     pub fn finish(mut self) -> Result<(W, Report), Error> {
         if self.poisoned {
             return Err(Error::Poisoned);
         }
         if self.frames_accepted != self.num_frames {
-            return Err(Error::FrameCountMismatch {
+            return Err(InputError::FrameCountMismatch {
                 expected: self.num_frames,
                 actual: self.frames_accepted,
-            });
+            }
+            .into());
         }
 
         let (ring, writing, mut parts) = self.split();

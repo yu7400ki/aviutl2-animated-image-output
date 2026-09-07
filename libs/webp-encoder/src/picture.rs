@@ -1,7 +1,7 @@
 //! `WebPPicture` と `WebPMemoryWriter` のRAII
 
 use crate::error::{EncodingError, Error};
-use anim_core::ColorType;
+use anim_core::{ColorType, InputError};
 use std::ffi::{c_int, c_void};
 use std::mem::MaybeUninit;
 use std::slice;
@@ -24,7 +24,7 @@ impl Picture {
     ///
     /// # Errors
     /// `data` の長さが `width * height * 1画素のバイト数` と違うとき
-    /// [`Error::FrameSizeMismatch`]。取り込みに失敗したとき [`Error::Encode`]。
+    /// [`Error::Input`]。取り込みに失敗したとき [`Error::Encode`]。
     pub(crate) fn import(
         data: &[u8],
         width: u32,
@@ -34,10 +34,11 @@ impl Picture {
         let stride = width as usize * color_type.bytes_per_pixel();
         let expected = stride * height as usize;
         if data.len() != expected {
-            return Err(Error::FrameSizeMismatch {
+            return Err(InputError::FrameSizeMismatch {
                 expected,
                 actual: data.len(),
-            });
+            }
+            .into());
         }
 
         let (Ok(width), Ok(height), Ok(stride)) = (
@@ -146,10 +147,10 @@ mod tests {
     fn a_buffer_of_another_length_is_refused_before_the_import() {
         assert!(matches!(
             Picture::import(&[0; 15], 2, 2, ColorType::Rgba8),
-            Err(Error::FrameSizeMismatch {
+            Err(Error::Input(InputError::FrameSizeMismatch {
                 expected: 16,
                 actual: 15
-            })
+            }))
         ));
     }
 

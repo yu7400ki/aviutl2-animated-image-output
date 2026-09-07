@@ -1,7 +1,7 @@
 //! キャンバスの大きさと、入力フレームのバイト並び
 
 use crate::error::Error;
-use anim_core::{ColorType, Rect};
+use anim_core::{ColorType, InputError, Rect};
 
 /// キャンバスが取りうる幅・高さの上限
 const MAX_DIMENSION: u32 = webp_sys::WEBP_MAX_DIMENSION as u32;
@@ -25,10 +25,10 @@ impl Layout {
     /// `width` x `height` の `color_type` を並べる配置を作る
     ///
     /// # Errors
-    /// 寸法が0か16383を超えるとき [`Error::InvalidDimensions`]。
+    /// 寸法が0か16383を超えるとき [`Error::Input`]。
     pub(crate) fn new(width: u32, height: u32, color_type: ColorType) -> Result<Self, Error> {
         if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
-            return Err(Error::InvalidDimensions { width, height });
+            return Err(InputError::InvalidDimensions { width, height }.into());
         }
 
         let bytes_per_pixel = color_type.bytes_per_pixel();
@@ -57,15 +57,16 @@ impl Layout {
     /// `data` が1フレームぶんの長さか検める
     ///
     /// # Errors
-    /// 長さが違うとき [`Error::FrameSizeMismatch`]。
+    /// 長さが違うとき [`Error::Input`]。
     pub(crate) fn check_frame(&self, data: &[u8]) -> Result<(), Error> {
         if data.len() == self.frame_len {
             Ok(())
         } else {
-            Err(Error::FrameSizeMismatch {
+            Err(InputError::FrameSizeMismatch {
                 expected: self.frame_len,
                 actual: data.len(),
-            })
+            }
+            .into())
         }
     }
 }
@@ -80,7 +81,7 @@ mod tests {
             assert!(
                 matches!(
                     Layout::new(width, height, ColorType::Rgb8),
-                    Err(Error::InvalidDimensions { .. })
+                    Err(Error::Input(InputError::InvalidDimensions { .. }))
                 ),
                 "{width}x{height}"
             );
@@ -118,17 +119,17 @@ mod tests {
         assert!(layout.check_frame(&[0; 4 * 3 * 4]).is_ok());
         assert!(matches!(
             layout.check_frame(&[0; 4 * 3 * 3]),
-            Err(Error::FrameSizeMismatch {
+            Err(Error::Input(InputError::FrameSizeMismatch {
                 expected: 48,
                 actual: 36
-            })
+            }))
         ));
         assert!(matches!(
             layout.check_frame(&[0; 4 * 3 * 4 + 1]),
-            Err(Error::FrameSizeMismatch {
+            Err(Error::Input(InputError::FrameSizeMismatch {
                 expected: 48,
                 actual: 49
-            })
+            }))
         ));
     }
 }

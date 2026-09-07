@@ -1,5 +1,6 @@
 //! 単葉の .webp を `image-webp` でデコードして入力と突き合わせる
 
+use anim_core::InputError;
 use image_webp::WebPDecoder;
 use std::io::Cursor;
 use webp_encoder::{ColorType, Config, Encoder, Error, FrameDelay, Report};
@@ -192,7 +193,7 @@ fn a_canvas_outside_the_limits_is_refused() {
     for (width, height) in [(0, 8), (8, 0), (16384, 8), (8, 16384)] {
         assert!(matches!(
             encode(width, height, &[], config(ColorType::Rgba8, true)),
-            Err(Error::InvalidDimensions { .. })
+            Err(Error::Input(InputError::InvalidDimensions { .. }))
         ));
     }
 }
@@ -202,9 +203,9 @@ fn a_frame_of_another_length_is_refused() {
     let data = vec![0u8; 8 * 8 * 4 - 1];
     assert!(matches!(
         encode(8, 8, &data, config(ColorType::Rgba8, true)),
-        Err(Error::FrameSizeMismatch {
+        Err(Error::Input(InputError::FrameSizeMismatch {
             expected: 256,
             actual: 255
-        })
+        }))
     ));
 }

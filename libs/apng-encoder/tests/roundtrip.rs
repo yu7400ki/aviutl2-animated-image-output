@@ -1,5 +1,6 @@
 //! 出力したAPNGを`png`クレートでデコードし、入力フレームと一致することを確認する
 
+use anim_core::InputError;
 use apng_encoder::{ColorType, Config, Encoder, Error, FrameDelay};
 use std::io::{self, Cursor, Write};
 use std::num::NonZeroUsize;
@@ -372,10 +373,10 @@ fn frame_of_the_wrong_size_is_rejected() {
         Encoder::new(Cursor::new(Vec::new()), 4, 4, 1, config(ColorType::Rgba8)).unwrap();
     assert!(matches!(
         encoder.add_frame(vec![0u8; 63], FrameDelay::new(1, 30).unwrap()),
-        Err(Error::FrameSizeMismatch {
+        Err(Error::Input(InputError::FrameSizeMismatch {
             expected: 64,
             actual: 63
-        })
+        }))
     ));
 }
 
@@ -389,10 +390,10 @@ fn extra_frame_is_rejected() {
 
     assert!(matches!(
         encoder.add_frame(input[0].clone(), delay),
-        Err(Error::FrameCountMismatch {
+        Err(Error::Input(InputError::FrameCountMismatch {
             expected: 1,
             actual: 2
-        })
+        }))
     ));
 }
 
@@ -407,10 +408,10 @@ fn missing_frame_is_rejected_on_finish() {
 
     assert!(matches!(
         encoder.finish(),
-        Err(Error::FrameCountMismatch {
+        Err(Error::Input(InputError::FrameCountMismatch {
             expected: 3,
             actual: 1
-        })
+        }))
     ));
 }
 
@@ -419,14 +420,14 @@ fn invalid_parameters_are_rejected() {
     let rgba = config(ColorType::Rgba8);
     assert!(matches!(
         Encoder::new(Cursor::new(Vec::new()), 0, 4, 1, rgba),
-        Err(Error::InvalidDimensions {
+        Err(Error::Input(InputError::InvalidDimensions {
             width: 0,
             height: 4
-        })
+        }))
     ));
     assert!(matches!(
         Encoder::new(Cursor::new(Vec::new()), 4, 4, 0, rgba),
-        Err(Error::InvalidFrameCount)
+        Err(Error::Input(InputError::InvalidFrameCount))
     ));
     assert!(matches!(
         Encoder::new(

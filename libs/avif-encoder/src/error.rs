@@ -1,15 +1,14 @@
 //! `avifResult` の写像と、入力検査のエラー
 
+use anim_core::InputError;
 use std::ffi::{CStr, c_int};
 use std::fmt;
 
 /// AVIFエンコード中に発生するエラー
 #[derive(Debug)]
 pub enum Error {
-    /// 幅または高さが0、または1行のバイト数が符号化器の欄に収まらない
-    InvalidDimensions { width: u32, height: u32 },
-    /// フレーム数が0
-    InvalidFrameCount,
+    /// 入力の検査に失敗した
+    Input(InputError),
     /// 1秒あたりの時間刻み数が0
     InvalidTimescale,
     /// フレームの表示時間が0
@@ -18,10 +17,6 @@ pub enum Error {
     InvalidQuality { quality: u8 },
     /// 速度と圧縮率の均衡が値域の外
     InvalidSpeed { speed: u8 },
-    /// フレームのバイト数が `幅 * 高さ * チャンネル数` と一致しない
-    FrameSizeMismatch { expected: usize, actual: usize },
-    /// 投入されたフレーム数が宣言したフレーム数と一致しない
-    FrameCountMismatch { expected: u32, actual: u32 },
     /// libavifの符号化が失敗した
     Encode(EncodingError),
     /// 書き出し先のI/Oエラー
@@ -66,10 +61,7 @@ impl EncodingError {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::InvalidDimensions { width, height } => {
-                write!(f, "画像サイズが不正です: {width}x{height}")
-            }
-            Error::InvalidFrameCount => write!(f, "フレーム数は1以上である必要があります"),
+            Error::Input(e) => e.fmt(f),
             Error::InvalidTimescale => write!(f, "時間刻み数は1以上である必要があります"),
             Error::InvalidDuration => write!(f, "表示時間は1以上である必要があります"),
             Error::InvalidQuality { quality } => {
@@ -77,18 +69,6 @@ impl fmt::Display for Error {
             }
             Error::InvalidSpeed { speed } => {
                 write!(f, "速度は0以上10以下である必要があります: {speed}")
-            }
-            Error::FrameSizeMismatch { expected, actual } => {
-                write!(
-                    f,
-                    "フレームのバイト数が一致しません: {expected} バイト必要ですが {actual} バイトです"
-                )
-            }
-            Error::FrameCountMismatch { expected, actual } => {
-                write!(
-                    f,
-                    "フレーム数が一致しません: 宣言 {expected}、投入 {actual}"
-                )
             }
             Error::Encode(e) => write!(f, "符号化に失敗しました: {e}"),
             Error::Io(e) => write!(f, "書き出しに失敗しました: {e}"),
@@ -116,6 +96,12 @@ impl std::error::Error for Error {
 }
 
 impl std::error::Error for EncodingError {}
+
+impl From<InputError> for Error {
+    fn from(e: InputError) -> Self {
+        Error::Input(e)
+    }
+}
 
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
