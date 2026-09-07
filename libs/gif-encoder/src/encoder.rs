@@ -535,7 +535,8 @@ impl<W: Write + Seek> Encoder<W> {
     ///
     /// # Errors
     /// バイト数が寸法と色種別から決まる長さと違うとき、宣言したフレーム数を
-    /// 超えたとき [`Error::Input`]。
+    /// 超えたとき [`Error::Input`]。書き出しに失敗したとき [`Error::Io`]。
+    /// 以前の投入が書き出しに失敗しているとき [`Error::Poisoned`]。
     pub fn add_frame(&mut self, mut data: Vec<u8>, delay: FrameDelay) -> Result<(), Error> {
         if self.poisoned {
             return Err(Error::Poisoned);
@@ -577,6 +578,8 @@ impl<W: Write + Seek> Encoder<W> {
     ///
     /// # Errors
     /// 投入されたフレーム数が宣言したフレーム数に満たないとき [`Error::Input`]。
+    /// 以前の投入が書き出しに失敗しているとき [`Error::Poisoned`]。書き出しに
+    /// 失敗したとき [`Error::Io`]。
     pub fn finish(mut self) -> Result<(W, Report), Error> {
         if self.poisoned {
             return Err(Error::Poisoned);
