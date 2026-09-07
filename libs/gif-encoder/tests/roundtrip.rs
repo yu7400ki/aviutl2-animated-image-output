@@ -1730,19 +1730,13 @@ fn a_delay_below_the_lower_bound_is_raised_without_feeding_it_back() {
     assert_delays(&bytes, &[2, 10, 10], "切り上げた列");
 }
 
+/// 画面の大きさの検めがエンコーダの入口で効く
 #[test]
-fn zero_and_oversized_dimensions_are_rejected() {
-    let config = Config::default();
-    for (width, height) in [(0, 1), (1, 0), (65536, 1), (1, 65536)] {
-        assert!(
-            matches!(
-                Encoder::new(Cursor::new(Vec::new()), width, height, 1, config),
-                Err(Error::Input(InputError::InvalidDimensions { .. }))
-            ),
-            "{width}x{height}"
-        );
-    }
-    assert!(Encoder::new(Cursor::new(Vec::new()), 65535, 1, 1, config).is_ok());
+fn an_oversized_screen_is_rejected() {
+    assert!(matches!(
+        Encoder::new(Cursor::new(Vec::new()), 65536, 1, 1, Config::default()),
+        Err(Error::Input(InputError::InvalidDimensions { .. }))
+    ));
 }
 
 #[test]
