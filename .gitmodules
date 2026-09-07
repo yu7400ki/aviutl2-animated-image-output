@@ -13,3 +13,6 @@
 [submodule "libs/jxl-sys/vendor/libjxl"]
 	path = libs/jxl-sys/vendor/libjxl
 	url = https://github.com/libjxl/libjxl.git
+[submodule "libs/aviutl2-sys/vendor/aviutl2_sdk"]
+	path = libs/aviutl2-sys/vendor/aviutl2_sdk
+	url = https://github.com/aviutl2/aviutl2_sdk_mirror.git

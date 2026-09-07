@@ -28,7 +28,7 @@ THE SOFTWARE.
 
 //! AviUtl ExEdit2 Plugin SDK の生FFIバインディング
 //!
-//! `aviutl2_sdk/output2.h` に忠実な `#[repr(C)]` 定義のみを提供する。
+//! `vendor/aviutl2_sdk/include/aviutl2_sdk/output2.h` に忠実な `#[repr(C)]` 定義のみを提供する。
 //! 安全なラッパーは `aviutl2` クレートを使用すること。
 //!
 //! # 出力プラグインの外部公開関数 (output2.h より)
