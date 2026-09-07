@@ -21,47 +21,40 @@ const pluginInfo: Record<
   png: {
     title: "PNG（APNG）",
     description: "高品質、可逆圧縮",
-    features: ["高品質なアニメーション画像", "可逆圧縮", "半透明が残る"],
-    cautions: ["ファイルサイズが大きい"],
+    features: ["高品質なアニメーション画像", "可逆圧縮"],
+    cautions: ["巨大なファイルサイズ"],
     color: "bg-green-100 border-green-300",
     textColor: "text-green-800",
   },
   gif: {
     title: "GIF",
     description: "広く対応、軽量",
-    features: [
-      "広い互換性",
-      "軽量なアニメーション",
-      "全フレームを通した色の和集合が 256 色以内の素材は無劣化",
-    ],
-    cautions: ["256 色制限", "半透明は残らない"],
+    features: ["広い互換性", "軽量なアニメーション"],
+    cautions: ["256 色制限", "半透明非対応"],
     color: "bg-blue-100 border-blue-300",
     textColor: "text-blue-800",
   },
   webp: {
     title: "WebP",
     description: "高圧縮率、可逆・非可逆両対応",
-    features: ["高圧縮率", "可逆・非可逆両対応", "半透明が残る", "ロスレス圧縮なら入力と同じ画素"],
-    cautions: ["ロスレス圧縮でメソッドを最大にすると数十倍の時間がかかる"],
+    features: ["高圧縮率", "可逆・非可逆両対応"],
+    cautions: [],
     color: "bg-purple-100 border-purple-300",
     textColor: "text-purple-800",
   },
   avif: {
     title: "AVIF",
     description: "最高の圧縮率、最新フォーマット",
-    features: ["最高の圧縮率", "最小ファイルサイズ", "半透明が残る"],
-    cautions: [
-      "対応する環境が限られる",
-      "エンコード速度 0-6 と 7-10 で動作点が変わり、ファイルサイズが大きく変わる",
-    ],
+    features: ["最高の圧縮率", "最小ファイルサイズ"],
+    cautions: ["低速なエンコード"],
     color: "bg-orange-100 border-orange-300",
     textColor: "text-orange-800",
   },
   jxl: {
     title: "JXL",
-    description: "高圧縮率、可逆・非可逆両対応",
-    features: ["高圧縮率", "可逆・非可逆両対応", "半透明が残る", "品質 100 なら入力と同じ画素"],
-    cautions: ["対応する環境が限られる", "均衡を 8 以上にすると時間が 6〜9 倍近くになる"],
+    description: "次世代フォーマット、可逆・非可逆両対応",
+    features: ["高圧縮率", "可逆・非可逆両対応"],
+    cautions: ["対応する環境が限られる"],
     color: "bg-rose-100 border-rose-300",
     textColor: "text-rose-800",
   },
@@ -76,6 +69,8 @@ function Bullets({
   items: string[];
   textColor: string;
 }) {
+  if (items.length === 0) return null;
+
   return (
     <div className="mb-4">
       <h4 className={clsx("font-semibold mb-2", textColor)}>{heading}</h4>
