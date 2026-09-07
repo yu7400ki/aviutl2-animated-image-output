@@ -29,7 +29,7 @@ pub enum Error {
 
 /// libjxlが保持する失敗の内訳
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorCode {
+enum ErrorCode {
     Ok,
     Generic,
     OutOfMemory,
@@ -73,16 +73,6 @@ impl EncodingError {
             status,
             code: ErrorCode::from_raw(code),
         }
-    }
-
-    /// libjxlが返した `JxlEncoderStatus`
-    pub fn status(&self) -> c_int {
-        self.status
-    }
-
-    /// 失敗の内訳
-    pub fn code(&self) -> ErrorCode {
-        self.code
     }
 }
 
@@ -208,8 +198,8 @@ mod tests {
     #[test]
     fn the_status_is_shown_beside_the_code() {
         let e = EncodingError::new(JXL_ENC_ERROR, JXL_ENC_ERR_BAD_INPUT);
-        assert_eq!(e.status(), JXL_ENC_ERROR);
-        assert_eq!(e.code(), ErrorCode::BadInput);
+        assert_eq!(e.status, JXL_ENC_ERROR);
+        assert_eq!(e.code, ErrorCode::BadInput);
         assert_eq!(
             e.to_string(),
             "JXL_ENC_ERR_BAD_INPUT (JxlEncoderStatus = 1)"

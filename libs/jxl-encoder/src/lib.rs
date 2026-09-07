@@ -13,7 +13,7 @@ mod tests;
 
 pub use anim_core::{ColorType, InputError};
 pub use encoder::Encoder;
-pub use error::{EncodingError, Error, ErrorCode};
+pub use error::{EncodingError, Error};
 
 use std::ops::RangeInclusive;
 

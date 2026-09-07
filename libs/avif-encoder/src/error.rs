@@ -41,21 +41,6 @@ impl EncodingError {
             .into_owned();
         EncodingError { code, name, detail }
     }
-
-    /// libavifが返した `avifResult`
-    pub fn code(&self) -> c_int {
-        self.code
-    }
-
-    /// `avifResult` の総称名
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// 符号化器が書いた原因。書かれていなければ空
-    pub fn detail(&self) -> &str {
-        &self.detail
-    }
 }
 
 impl fmt::Display for Error {
@@ -116,8 +101,8 @@ mod tests {
     #[test]
     fn the_generic_name_comes_from_the_linked_library() {
         let e = EncodingError::new(avif_sys::AVIF_RESULT_INVALID_ARGUMENT, String::new());
-        assert_eq!(e.code(), avif_sys::AVIF_RESULT_INVALID_ARGUMENT);
-        assert_eq!(e.name(), "Invalid argument");
+        assert_eq!(e.code, avif_sys::AVIF_RESULT_INVALID_ARGUMENT);
+        assert_eq!(e.name, "Invalid argument");
         assert_eq!(e.to_string(), "Invalid argument");
     }
 
@@ -136,6 +121,6 @@ mod tests {
 
     #[test]
     fn a_code_outside_the_enumeration_still_has_a_name() {
-        assert!(!EncodingError::new(9999, String::new()).name().is_empty());
+        assert!(!EncodingError::new(9999, String::new()).name.is_empty());
     }
 }

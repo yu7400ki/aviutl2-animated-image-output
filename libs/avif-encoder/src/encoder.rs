@@ -339,6 +339,34 @@ mod tests {
         }
     }
 
+    /// speedごとの動作点を実値で固定する
+    ///
+    /// libavifがaomへ渡す用途とcpu-usedの対応を写したものなので、同梱の
+    /// libavifを更新して対応が変われば、記録した動作点は静かにずれる。
+    #[test]
+    fn every_speed_of_a_sequence_resolves_to_its_operating_point() {
+        const TABLE: [(u8, Usage, u8); 11] = [
+            (0, Usage::GoodQuality, 0),
+            (1, Usage::GoodQuality, 1),
+            (2, Usage::GoodQuality, 2),
+            (3, Usage::GoodQuality, 3),
+            (4, Usage::GoodQuality, 4),
+            (5, Usage::GoodQuality, 5),
+            (6, Usage::GoodQuality, 6),
+            (7, Usage::Realtime, 7),
+            (8, Usage::Realtime, 8),
+            (9, Usage::Realtime, 9),
+            (10, Usage::Realtime, 9),
+        ];
+        for (speed, usage, cpu_used) in TABLE {
+            assert_eq!(
+                Config { speed, ..config() }.operating_point(false),
+                OperatingPoint { usage, cpu_used },
+                "speed {speed}"
+            );
+        }
+    }
+
     #[test]
     fn the_cpu_used_stops_at_nine() {
         let cpu_used = |speed| Config { speed, ..config() }.operating_point(false).cpu_used;
