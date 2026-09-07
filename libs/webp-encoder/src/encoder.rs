@@ -349,8 +349,8 @@ impl<W: Write + Seek> Encoder<W> {
     ///
     /// # Errors
     /// 投入されたフレーム数が宣言したフレーム数に満たないとき [`Error::Input`]。
-    /// 以前の投入が書き出しに失敗しているとき [`Error::Poisoned`]。表示時間を
-    /// 分けるフレームの符号化に失敗したとき
+    /// 以前の投入が書き出しに失敗しているとき [`Error::Poisoned`]。保留中の
+    /// フレームと、表示時間を分けるフレームの符号化に失敗したとき
     /// [`Error::Encode`] か [`Error::MalformedOutput`]。ファイルがRIFFの上限を
     /// 超えるとき [`Error::FileTooLarge`]。書き出しに失敗したとき [`Error::Io`]。
     pub fn finish(self) -> Result<(W, Report), Error> {
