@@ -8,23 +8,12 @@ use aviutl2::{
     ColorFormat, ConfigDialog, FileFilter, IniConfig, OutputInfo, OutputPlugin, PipelineError,
     PluginFlags, PluginInfo, sys, write_or_discard,
 };
-use aviutl2_host::{Host, Script};
+use aviutl2_host::{Host, Script, temp_path};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::thread::ThreadId;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
-
-/// まだ存在しない一時ファイルの場所
-fn temp_path() -> PathBuf {
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-    std::env::temp_dir().join(format!(
-        "aviutl2-host-{}-{}.txt",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ))
-}
 
 /// 符号化側が受け取ったフレームと、受け取ったスレッド
 #[derive(Default)]
@@ -52,7 +41,7 @@ fn encode(host: &Host) -> (Result<(), PipelineError<String>>, Encoded) {
 /// 台本が名指した寸法・刻み・保存先が、そのまま出力情報になる
 #[test]
 fn the_fields_the_script_names_reach_the_output_info() {
-    let path = temp_path();
+    let path = temp_path("txt");
     let host = Host::open(
         Script::new()
             .size(96, 40)
@@ -356,7 +345,7 @@ impl OutputPlugin for WritingPlugin {
 /// プラグインの書き出しは、台本が名指した素材と保存先を受け取る
 #[test]
 fn the_encoding_receives_the_material_the_script_names() {
-    let path = temp_path();
+    let path = temp_path("txt");
     let host = Host::open(
         Script::new()
             .size(96, 40)

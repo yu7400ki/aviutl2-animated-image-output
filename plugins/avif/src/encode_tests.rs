@@ -72,6 +72,7 @@ fn an_encoded_animation_carries_the_size_and_the_timing_of_the_material() {
     let entries = probe(
         &path,
         &[
+            // 透過無しの avif は 0 が静止画、1 が動画のトラック
             "-select_streams",
             "1",
             "-count_frames",
@@ -116,11 +117,11 @@ fn a_frame_the_host_refuses_stops_the_encoding() {
         .encode::<AvifOutputPlugin>(&Config::default())
         .expect_err("返らないフレームがある");
 
-    assert_eq!(error, format!("フレーム取得エラー: フレーム {MISSING}"));
-    assert!(!path.exists(), "{}", path.display());
     assert_eq!(
         host.get_video().len(),
         MISSING as usize + 1,
         "取りに行ったフレーム数"
     );
+    assert_eq!(error, format!("フレーム取得エラー: フレーム {MISSING}"));
+    assert!(!path.exists(), "{}", path.display());
 }

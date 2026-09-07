@@ -420,12 +420,12 @@ mod tests {
             .encode::<JxlOutputPlugin>(&Config::default())
             .expect_err("返らないフレームがある");
 
-        assert_eq!(error, format!("フレーム取得エラー: フレーム {MISSING}"));
-        assert!(!path.exists(), "{}", path.display());
         assert_eq!(
             host.get_video().len(),
             MISSING as usize + 1,
             "取りに行ったフレーム数"
         );
+        assert_eq!(error, format!("フレーム取得エラー: フレーム {MISSING}"));
+        assert!(!path.exists(), "{}", path.display());
     }
 }
