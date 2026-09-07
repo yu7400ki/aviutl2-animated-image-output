@@ -274,7 +274,7 @@ impl<W: Write> Encoder<W> {
     /// 保留中のフレームの表示時間へ畳まれる。書き直すのは、可逆
     /// ([`Config::quality`] が [`QUALITY_RANGE`] の上限) では直前に投入された
     /// フレームとバイト単位で違う画素、非可逆では
-    /// [`anim_core::Rewrite::changes`] の規則で直前に投入されたフレームと違う
+    /// `anim_core::Rewrite::changes` の規則で直前に投入されたフレームと違う
     /// 画素に、直前の投入で変わった画素を合わせたもの。
     ///
     /// # Errors
