@@ -62,14 +62,14 @@ enum Source {
         /// 比べる相手の矩形の面積
         kept_area: u64,
     },
-    /// 圧縮の代わりに `message` を payload として巻き戻す
+    /// `message` を payload として巻き戻すジョブ
     #[cfg(test)]
     Panicking { message: &'static str },
 }
 
 /// ジョブ1つの結末
 ///
-/// 巻き戻し以外の変種は、[`Source`] の埋め方と1対1で対応する。
+/// 巻き戻し以外の変種は、引換券の種類と1対1で対応する。
 enum Outcome {
     Compressed(Candidate),
     /// 切り出した矩形と、そこを圧縮した候補
@@ -334,6 +334,7 @@ pub(crate) enum Restored {}
 /// 投入したジョブの結果を受け取る引換券
 ///
 /// 投入が1枚配り、受け取りが1枚使う。`K` が受け取り口を決める。
+#[must_use = "受け取らない引換券は結末と本体のバッファを列に残す"]
 pub(crate) struct Ticket<K> {
     index: usize,
     kind: PhantomData<fn() -> K>,
@@ -556,7 +557,7 @@ impl Pipeline {
 
     /// 結末を、引換券が指されるまで溜める
     ///
-    /// ワーカーの巻き戻しは溜めずに、その場で駆動側へ投げ直す。
+    /// ワーカーの巻き戻しは受け取った場で駆動側へ投げ直す。
     fn deliver(&mut self, index: usize, outcome: Outcome) {
         match outcome {
             Outcome::Compressed(candidate) => {
@@ -818,7 +819,7 @@ mod tests {
 
         let mut pipeline = pipeline(WORKERS);
         for region in heavy {
-            pipeline.submit_region(region, STRIDE);
+            let _ = pipeline.submit_region(region, STRIDE);
         }
         let restored = pipeline.submit_restored(canvas, frame, u64::MAX);
 

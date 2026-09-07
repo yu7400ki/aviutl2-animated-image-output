@@ -299,6 +299,7 @@ impl Pipeline {
     /// `index` のジョブの結果を受け取る
     ///
     /// 届いていなければ届くまで待つ。先に届いた別の番号の結果は溜めておく。
+    /// ワーカーの巻き戻しは受け取った場で駆動側へ投げ直す。
     ///
     /// # Errors
     /// そのジョブの符号化に失敗したとき [`Error::Encode`]。結果のチャンク構成を
@@ -319,7 +320,12 @@ impl Pipeline {
                 .recv()
                 .expect("ワーカーは結末を返してから抜ける");
             self.buffers.push(done.buffer);
-            self.ready.insert(done.index, done.outcome);
+            match done.outcome {
+                Outcome::Panicked(payload) => panic::resume_unwind(payload),
+                outcome => {
+                    self.ready.insert(done.index, outcome);
+                }
+            }
         }
     }
 }
