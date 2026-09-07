@@ -6,7 +6,7 @@ use crate::block::{
 };
 use crate::delay::Hundredths;
 use crate::error::Error;
-use crate::frame::{Canvas, Screen, Written};
+use crate::frame::{AlphaCanvas, Canvas, Screen, Written};
 use crate::layout::Layout;
 use crate::lzw;
 use crate::normalize::{self, Binarized, TRANSPARENT, pack};
@@ -740,9 +740,13 @@ impl<W: Write + Seek> Parts<'_, W> {
                 !palettes.global.is_open(),
                 "書き戻していないテーブルから逃げている"
             );
-            let disposed = pending.as_ref().and_then(|waiting| {
-                (!canvas.kept().expressible(rendered)).then(|| canvas.widen(waiting.rect, rendered))
-            });
+            let pending_rect = pending
+                .as_ref()
+                .and_then(|waiting| (!canvas.kept().expressible(rendered)).then_some(waiting.rect));
+            let disposed = match (pending_rect, canvas.alpha()) {
+                (Some(rect), Some(alpha)) => Some(alpha.widen(rect, rendered)),
+                _ => None,
+            };
             palettes.escape(escape_table(
                 self.layout,
                 previous,
@@ -896,10 +900,8 @@ impl<W: Write + Seek> Parts<'_, W> {
 /// 画面だけを変える。「不透明 → 透過」の遷移を含まないフレームはキャンバスを
 /// そのまま残し、含むフレームだけがキャンバスから画素を抜く候補を立てる。
 ///
-/// 抜く候補が2つ立ったときは、両方を符号化して圧縮後の大きさで選ぶ。抜きたい
-/// 画素が保留中のフレームの矩形の外にあるときは、その矩形を広げて符号化し直す。
-/// 符号化し直すのは保留中のフレームなので、そのフレームを符号化したテーブルを
-/// 引く。
+/// 画素を抜けるのはαの欄がある入力だけで、そうでない入力は遷移そのものを
+/// 持たない。
 fn choose_disposal(
     canvas: &mut Canvas,
     palettes: &mut Palettes,
@@ -909,7 +911,15 @@ fn choose_disposal(
     delay: u16,
     pacing: &mut Pacing,
 ) -> (u8, Pending) {
-    if canvas.kept().expressible(rendered) {
+    let disposed = canvas
+        .alpha()
+        .filter(|alpha| !alpha.kept().expressible(rendered))
+        .map(|mut alpha| {
+            dispose_pending(
+                &mut alpha, palettes, indices, pending, rendered, delay, pacing,
+            )
+        });
+    disposed.unwrap_or_else(|| {
         let laid = lay_out(
             canvas.kept(),
             rendered,
@@ -917,9 +927,25 @@ fn choose_disposal(
             indices,
             delay,
         );
-        return (DISPOSAL_DO_NOT_DISPOSE, laid);
-    }
+        (DISPOSAL_DO_NOT_DISPOSE, laid)
+    })
+}
 
+/// キャンバスから画素を抜く候補を立て、圧縮後の大きさで選ぶ
+///
+/// 抜く候補が2つ立ったときは、両方を符号化して圧縮後の大きさで選ぶ。抜きたい
+/// 画素が保留中のフレームの矩形の外にあるときは、その矩形を広げて符号化し直す。
+/// 符号化し直すのは保留中のフレームなので、そのフレームを符号化したテーブルを
+/// 引く。
+fn dispose_pending(
+    canvas: &mut AlphaCanvas<'_>,
+    palettes: &mut Palettes,
+    indices: &mut Vec<u8>,
+    pending: &mut Pending,
+    rendered: &mut [u8],
+    delay: u16,
+    pacing: &mut Pacing,
+) -> (u8, Pending) {
     // ここへ来るのは投入されたフレームに透過画素があるときだけで、そのとき
     // テーブルは必ず透過インデックスを持つ。抜いた画素を書かずに済ませる添字が
     // 無ければ、透過の位置そのものを表現できない

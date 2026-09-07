@@ -240,7 +240,7 @@ pub(crate) struct Canvas {
     after: Vec<u8>,
     /// 保留中のフレームの矩形を透過へ抜いた画面
     ///
-    /// 抜く矩形はフレームごとに変わるため、[`Canvas::dispose`] が組み立て直す。
+    /// 抜く矩形はフレームごとに変わるため、[`AlphaCanvas::dispose`] が組み立て直す。
     cleared: Vec<u8>,
     /// 先頭フレームを描いたか
     drawn: bool,
@@ -270,80 +270,14 @@ impl Canvas {
         self.screen(&self.after)
     }
 
-    /// 保留中のフレームを、描く直前の画面とその上に描いた色の組で借りる
+    /// 透過を読み書きできる面として借りる
     ///
-    /// そのフレームを符号化し直す経路が使う。書いた色を描いた後の面へ戻せる。
-    pub(crate) fn pending_frame(&mut self) -> (Screen<'_>, &mut [u8]) {
-        debug_assert_eq!(
-            self.layout.color_type,
-            ColorType::Rgba8,
-            "透過を持てない面には戻す先が無い"
-        );
-        let Canvas {
-            layout,
-            before,
-            after,
-            drawn,
-            ..
-        } = self;
-        (
-            Screen {
-                layout,
-                pixels: drawn.then_some(before.as_slice()),
-            },
-            after,
-        )
-    }
-
-    /// `frame` が透過にしたい画素をすべて含むまで `rect` を広げる
-    ///
-    /// 矩形を丸ごと抜く候補は、この矩形の中しか抜けない。返した矩形が `rect` と
-    /// 同じなら、抜きたい画素はすべて中にあってその候補で表現できる。
-    pub(crate) fn widen(&self, rect: Rect, frame: &[u8]) -> Rect {
-        let bpp = self.layout.bytes_per_pixel;
-        let width = usize::from(self.layout.width);
-        let (mut left, mut right) = (usize::MAX, 0usize);
-        let (mut top, mut bottom) = (usize::MAX, 0usize);
-
-        let pixels = self.after.chunks_exact(bpp).zip(frame.chunks_exact(bpp));
-        for (at, (screen, pixel)) in pixels.enumerate() {
-            if !is_transparent(pixel) || is_transparent(screen) {
-                continue;
-            }
-            left = left.min(at % width);
-            right = right.max(at % width);
-            top = top.min(at / width);
-            bottom = bottom.max(at / width);
-        }
-        if left > right {
-            return rect;
-        }
-
-        let clearing = Rect {
-            x: left as u32,
-            y: top as u32,
-            width: (right - left + 1) as u32,
-            height: (bottom - top + 1) as u32,
-        };
-        union(rect, clearing)
-    }
-
-    /// 保留中のフレームをキャンバスから廃棄した画面を組み立てる
-    ///
-    /// `rect` は保留中のフレームの矩形。
-    pub(crate) fn dispose(&mut self, rect: Rect) -> Disposed<'_> {
-        debug_assert_eq!(
-            self.layout.color_type,
-            ColorType::Rgba8,
-            "透過を持てない面を廃棄しようとしている"
-        );
-        self.cleared.clear();
-        self.cleared.extend_from_slice(&self.after);
-        fill_rect(&mut self.cleared, rect, &self.layout);
-
-        Disposed {
-            background: self.screen(&self.cleared),
-            previous: self.screen(&self.before),
+    /// 透過標識を持てるのはαの欄がある入力だけで、標識を抜いたり戻したりする
+    /// 操作はそのときにしか成り立たない。
+    pub(crate) fn alpha(&mut self) -> Option<AlphaCanvas<'_>> {
+        match self.layout.color_type {
+            ColorType::Rgba8 => Some(AlphaCanvas { canvas: self }),
+            ColorType::Rgb8 => None,
         }
     }
 
@@ -480,6 +414,90 @@ impl Canvas {
     }
 }
 
+/// 透過を読み書きできるキャンバス
+///
+/// [`Canvas::alpha`] からだけ取れる。透過標識を抜いた画面も、標識を書き戻す先も、
+/// αの欄がある入力でしか作れない。
+pub(crate) struct AlphaCanvas<'a> {
+    canvas: &'a mut Canvas,
+}
+
+impl AlphaCanvas<'_> {
+    /// 保留中のフレームをそのまま残した画面
+    pub(crate) fn kept(&self) -> Screen<'_> {
+        self.canvas.kept()
+    }
+
+    /// 保留中のフレームを、描く直前の画面とその上に描いた色の組で借りる
+    ///
+    /// そのフレームを符号化し直す経路が使う。書いた色を描いた後の面へ戻せる。
+    pub(crate) fn pending_frame(&mut self) -> (Screen<'_>, &mut [u8]) {
+        let Canvas {
+            layout,
+            before,
+            after,
+            drawn,
+            ..
+        } = &mut *self.canvas;
+        (
+            Screen {
+                layout,
+                pixels: drawn.then_some(before.as_slice()),
+            },
+            after,
+        )
+    }
+
+    /// `frame` が透過にしたい画素をすべて含むまで `rect` を広げる
+    ///
+    /// 矩形を丸ごと抜く候補は、この矩形の中しか抜けない。返した矩形が `rect` と
+    /// 同じなら、抜きたい画素はすべて中にあってその候補で表現できる。
+    pub(crate) fn widen(&self, rect: Rect, frame: &[u8]) -> Rect {
+        let canvas = &*self.canvas;
+        let bpp = canvas.layout.bytes_per_pixel;
+        let width = usize::from(canvas.layout.width);
+        let (mut left, mut right) = (usize::MAX, 0usize);
+        let (mut top, mut bottom) = (usize::MAX, 0usize);
+
+        let pixels = canvas.after.chunks_exact(bpp).zip(frame.chunks_exact(bpp));
+        for (at, (screen, pixel)) in pixels.enumerate() {
+            if !is_transparent(pixel) || is_transparent(screen) {
+                continue;
+            }
+            left = left.min(at % width);
+            right = right.max(at % width);
+            top = top.min(at / width);
+            bottom = bottom.max(at / width);
+        }
+        if left > right {
+            return rect;
+        }
+
+        let clearing = Rect {
+            x: left as u32,
+            y: top as u32,
+            width: (right - left + 1) as u32,
+            height: (bottom - top + 1) as u32,
+        };
+        union(rect, clearing)
+    }
+
+    /// 保留中のフレームをキャンバスから廃棄した画面を組み立てる
+    ///
+    /// `rect` は保留中のフレームの矩形。
+    pub(crate) fn dispose(&mut self, rect: Rect) -> Disposed<'_> {
+        let canvas = &mut *self.canvas;
+        canvas.cleared.clear();
+        canvas.cleared.extend_from_slice(&canvas.after);
+        fill_rect(&mut canvas.cleared, rect, &canvas.layout);
+
+        Disposed {
+            background: canvas.screen(&canvas.cleared),
+            previous: canvas.screen(&canvas.before),
+        }
+    }
+}
+
 /// 2つの矩形をどちらも含む最小の矩形
 fn union(a: Rect, b: Rect) -> Rect {
     let x = a.x.min(b.x);
@@ -555,6 +573,11 @@ mod tests {
         let rect = canvas.kept().rect_of(frame);
         canvas.start(frame);
         rect
+    }
+
+    /// 透過を読み書きできる面として借りる
+    fn alpha(canvas: &mut Canvas) -> AlphaCanvas<'_> {
+        canvas.alpha().expect("αを持つ入力")
     }
 
     /// 保留中のフレームをそのまま残して `frame` を描き、その矩形を返す
@@ -659,7 +682,10 @@ mod tests {
         );
         assert_eq!(canvas.before, first, "描く直前の画面が違う");
 
-        let cleared = canvas.dispose(rect).background().rect_of(&third);
+        let cleared = alpha(&mut canvas)
+            .dispose(rect)
+            .background()
+            .rect_of(&third);
         canvas.advance(DISPOSAL_RESTORE_TO_BACKGROUND, rect, &third, cleared);
 
         let mut expected = first.clone();
@@ -680,7 +706,7 @@ mod tests {
         let rect = draw(&mut canvas, rect, &second);
         assert_eq!(canvas.before, first, "描く直前の画面が違う");
 
-        let restored = canvas.dispose(rect).previous().rect_of(&first);
+        let restored = alpha(&mut canvas).dispose(rect).previous().rect_of(&first);
         assert_eq!(restored, UNCHANGED, "戻した画面が投入されたフレームと違う");
         canvas.advance(DISPOSAL_RESTORE_TO_PREVIOUS, rect, &first, restored);
 
@@ -892,12 +918,10 @@ mod tests {
         // 矩形を透過へ抜いた画面では、持ち越した画素も書き直す
         let rect = layout(ColorType::Rgba8).whole();
         let mut indices = Vec::new();
-        canvas.dispose(rect).background().append_indices(
-            &mut rendered,
-            rect,
-            &mut palette,
-            &mut indices,
-        );
+        alpha(&mut canvas)
+            .dispose(rect)
+            .background()
+            .append_indices(&mut rendered, rect, &mut palette, &mut indices);
 
         let written = palette.color_at(indices[0]).to_le_bytes();
         assert_ne!(written, CARRIED, "持ち越した色がテーブルに残っている");
@@ -933,12 +957,10 @@ mod tests {
 
         let rect = layout(ColorType::Rgba8).whole();
         let mut indices = Vec::new();
-        let written = canvas.dispose(rect).background().append_indices(
-            &mut rendered,
-            rect,
-            &mut palette,
-            &mut indices,
-        );
+        let written = alpha(&mut canvas)
+            .dispose(rect)
+            .background()
+            .append_indices(&mut rendered, rect, &mut palette, &mut indices);
 
         assert_eq!(
             written.approximated,
