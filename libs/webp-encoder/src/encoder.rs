@@ -23,7 +23,7 @@ const MAX_DIMENSION: u32 = webp_sys::WEBP_MAX_DIMENSION as u32;
 ///
 /// # Errors
 /// 寸法が0か16383を超えるとき [`InputError::InvalidDimensions`]。
-fn canvas(width: u32, height: u32, color_type: ColorType) -> Result<Layout, InputError> {
+fn layout(width: u32, height: u32, color_type: ColorType) -> Result<Layout, InputError> {
     if width > MAX_DIMENSION || height > MAX_DIMENSION {
         return Err(InputError::InvalidDimensions { width, height });
     }
@@ -175,7 +175,7 @@ fn filler<'a>(
     codec: &Codec,
 ) -> Result<&'a EncodedFrame, Error> {
     if slot.is_none() {
-        let layout = canvas(1, 1, ColorType::Rgba8)?;
+        let layout = layout(1, 1, ColorType::Rgba8)?;
         let job = Job::crop(&FILLER_PIXEL, &layout, layout.whole(), None, Vec::new());
         *slot = Some(codec.encode(&job)?);
     }
@@ -263,7 +263,7 @@ impl<W: Write + Seek> Encoder<W> {
         if num_frames == 0 {
             return Err(InputError::InvalidFrameCount.into());
         }
-        let layout = canvas(width, height, config.color_type)?;
+        let layout = layout(width, height, config.color_type)?;
         let codec = Codec::new(&config)?;
 
         let sink = if num_frames == 1 {
@@ -470,7 +470,7 @@ mod tests {
         for (width, height) in [(0, 1), (1, 0), (16384, 1), (1, 16384), (70000, 70000)] {
             assert!(
                 matches!(
-                    canvas(width, height, ColorType::Rgb8),
+                    layout(width, height, ColorType::Rgb8),
                     Err(InputError::InvalidDimensions { .. })
                 ),
                 "{width}x{height}"
@@ -480,7 +480,7 @@ mod tests {
 
     #[test]
     fn the_largest_canvas_is_accepted() {
-        let layout = canvas(16383, 16383, ColorType::Rgba8).unwrap();
+        let layout = layout(16383, 16383, ColorType::Rgba8).unwrap();
         assert_eq!((layout.width, layout.height), (16383, 16383));
         assert_eq!(layout.stride, 16383 * 4);
         assert_eq!(layout.frame_len, 16383 * 16383 * 4);

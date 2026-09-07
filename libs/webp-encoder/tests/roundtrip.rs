@@ -6,7 +6,6 @@
 //! 外れているため、`assert_close` がその逸脱の形へ絞って逃がす。ffmpeg が
 //! 見つからない環境では、そちらのデコードを飛ばして `image-webp` の結果で判定する。
 
-use anim_core::InputError;
 use image_webp::{LoopCount, WebPDecoder};
 use std::cell::RefCell;
 use std::io::{Cursor, Seek, SeekFrom, Write};
@@ -16,6 +15,7 @@ use std::process::{Command, Output};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread::available_parallelism;
+use webp_encoder::InputError;
 use webp_encoder::{ColorType, Config, Encoder, Error, FrameDelay, Report};
 
 /// 決定的な擬似乱数列

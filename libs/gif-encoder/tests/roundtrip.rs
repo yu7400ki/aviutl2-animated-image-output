@@ -5,7 +5,7 @@
 //! ffmpeg の2つでデコードする。ffmpeg が見つからない環境では、そちらだけを
 //! 飛ばして `gif` クレートの結果で判定する。
 
-use anim_core::InputError;
+use gif_encoder::InputError;
 use gif_encoder::{ColorType, Config, Encoder, Error, FrameDelay, PaletteKind, Report};
 use std::cell::RefCell;
 use std::io::{Cursor, Seek, SeekFrom, Write};

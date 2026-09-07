@@ -1,8 +1,8 @@
 //! 単葉の .webp を `image-webp` でデコードして入力と突き合わせる
 
-use anim_core::InputError;
 use image_webp::WebPDecoder;
 use std::io::Cursor;
+use webp_encoder::InputError;
 use webp_encoder::{ColorType, Config, Encoder, Error, FrameDelay, Report};
 
 /// 決定的な擬似乱数列

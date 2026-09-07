@@ -63,7 +63,6 @@ impl std::error::Error for InputError {}
 mod tests {
     use super::*;
 
-    /// 5つのエンコーダが同じ文面を出す
     #[test]
     fn each_input_error_keeps_its_wording() {
         assert_eq!(

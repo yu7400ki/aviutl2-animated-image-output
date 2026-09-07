@@ -494,7 +494,8 @@ impl<W: Write + Seek> Encoder<W> {
     /// ここで書く。
     ///
     /// # Errors
-    /// 寸法が0か65535を超えるとき、フレーム数が0のとき [`Error::Input`]。
+    /// 寸法が0か65535を超えるとき [`InputError::InvalidDimensions`]、フレーム数が0のとき
+    /// [`InputError::InvalidFrameCount`] を [`Error::Input`] で返す。
     /// 1フレームのバイト数が `usize` で表現できないとき
     /// [`Error::ImageTooLarge`]。書き出しに失敗したとき [`Error::Io`]。
     pub fn new(

@@ -1,6 +1,6 @@
 //! 出力したAPNGを`png`クレートでデコードし、入力フレームと一致することを確認する
 
-use anim_core::InputError;
+use apng_encoder::InputError;
 use apng_encoder::{ColorType, Config, Encoder, Error, FrameDelay};
 use std::io::{self, Cursor, Write};
 use std::num::NonZeroUsize;
