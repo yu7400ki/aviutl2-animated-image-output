@@ -7,7 +7,7 @@ use aviutl2::{
     register_output_plugin, write_or_discard,
 };
 use config::{ColorFormat, Config};
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use windows::Win32::Foundation::HWND;
 
 /// プラグイン設定をエンコーダの設定へ対応付ける
@@ -20,6 +20,26 @@ fn encoder_config(config: &Config) -> EncoderConfig {
         compression_level: config.compression_level,
         num_plays: config.repeat,
     }
+}
+
+/// 設定のとおりのエンコーダを `writer` へ組む
+///
+/// 起こすワーカー数は設定のスレッド数になる。
+fn new_encoder<W: Write>(
+    writer: W,
+    width: u32,
+    height: u32,
+    num_frames: u32,
+    config: &Config,
+) -> Result<Encoder<W>, apng_encoder::Error> {
+    Encoder::with_workers(
+        writer,
+        width,
+        height,
+        num_frames,
+        encoder_config(config),
+        config.threads,
+    )
 }
 
 struct ApngOutputPlugin;
@@ -52,13 +72,12 @@ impl OutputPlugin for ApngOutputPlugin {
         let num_frames = info.num_frames()?;
 
         write_or_discard(&info.savefile(), |output_file| {
-            let mut encoder = Encoder::with_workers(
+            let mut encoder = new_encoder(
                 BufWriter::new(output_file),
                 width,
                 height,
                 num_frames,
-                encoder_config(config),
-                config.threads,
+                config,
             )
             .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
 
@@ -93,7 +112,6 @@ mod tests {
     use super::*;
     use apng_encoder::{Error as EncoderError, FrameDelay};
     use std::fs::File;
-    use std::io::Write;
     use std::num::NonZeroUsize;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -156,7 +174,7 @@ mod tests {
         let result: Result<(), String> = write_or_discard(&path, |file| {
             let probe = file.try_clone().map_err(|e| e.to_string())?;
 
-            let mut encoder = Encoder::with_workers(
+            let mut encoder = new_encoder(
                 FailingWriter {
                     file,
                     remaining: BUDGET,
@@ -164,11 +182,11 @@ mod tests {
                 8,
                 8,
                 COUNT,
-                encoder_config(&Config {
+                &Config {
                     color_format: ColorFormat::Rgba32,
+                    threads: NonZeroUsize::MIN,
                     ..Config::default()
-                }),
-                NonZeroUsize::MIN,
+                },
             )
             .map_err(|e| e.to_string())?;
 
@@ -200,6 +218,28 @@ mod tests {
             ..Config::default()
         });
         assert_eq!(rgba.color_type, ColorType::Rgba8);
+    }
+
+    /// 設定のスレッド数が、エンコーダの起こすワーカー数になる
+    #[test]
+    fn workers_are_passed_through_as_the_number_to_wake() {
+        for threads in [1, 3, 7] {
+            let threads = NonZeroUsize::new(threads).unwrap();
+
+            let encoder = new_encoder(
+                std::io::sink(),
+                8,
+                8,
+                4,
+                &Config {
+                    threads,
+                    ..Config::default()
+                },
+            )
+            .expect("寸法もフレーム数も値域の内側");
+
+            assert_eq!(encoder.workers(), threads, "起こしたワーカー数");
+        }
     }
 
     #[test]

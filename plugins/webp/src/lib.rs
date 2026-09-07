@@ -153,6 +153,7 @@ register_logger!();
 mod tests {
     use super::*;
     use aviutl2::MAX_REPEAT;
+    use std::num::NonZeroUsize;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
     use webp_encoder::FrameDelay;
@@ -297,6 +298,47 @@ mod tests {
         assert!(lossless.lossless);
         assert_eq!(lossless.quality, 100.0);
         assert_eq!(lossless.method, 6);
+    }
+
+    /// 設定のスレッド数が、エンコーダの起こすワーカー数になる
+    ///
+    /// 単葉の書き出しは群れを起こさないので、2フレーム以上を宣言して測る。
+    #[test]
+    fn workers_are_passed_through_as_the_number_to_wake() {
+        const FRAMES: u32 = 2;
+        let delay = FrameDelay::new(1, 30).unwrap();
+
+        for threads in [2, 3, 7] {
+            let threads = NonZeroUsize::new(threads).unwrap();
+            let path = temp_path();
+            let config = Config {
+                color_format: ColorFormat::Rgba32,
+                threads,
+                ..Config::default()
+            };
+            let mut woken = None;
+
+            write_frames(
+                &path,
+                FRAME_WIDTH,
+                FRAME_HEIGHT,
+                FRAMES,
+                &config,
+                |encoder| {
+                    woken = Some(encoder.workers());
+                    for seed in 0..FRAMES {
+                        encoder
+                            .add_frame(frame_of(seed), delay)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+            std::fs::remove_file(&path).unwrap();
+
+            assert_eq!(woken, Some(threads), "起こしたワーカー数");
+        }
     }
 
     /// 素材のとおりに書けた出力は何も報せない
