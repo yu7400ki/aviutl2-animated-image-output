@@ -4,12 +4,12 @@ use crate::codec::{Codec, EncodedFrame, Job};
 use crate::error::Error;
 use anim_core::{ColorType, Layout};
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 
 /// ワーカーに付ける名前
@@ -36,10 +36,66 @@ struct Done {
     buffer: Vec<u8>,
 }
 
+/// 取り出しを待つジョブ
+///
+/// 投入の順に取る。
+#[derive(Default)]
+struct Queue {
+    jobs: VecDeque<(usize, Job)>,
+    /// 投入口を閉じたか
+    closed: bool,
+}
+
+/// ジョブの投入口と、ワーカーの取り出し口
+#[derive(Default)]
+struct Jobs {
+    queue: Mutex<Queue>,
+    /// 取れるジョブが増えたことと、投入口が閉じたことを知らせる
+    available: Condvar,
+}
+
+impl Jobs {
+    /// 毒された錠も通して列を開く
+    fn lock(&self) -> MutexGuard<'_, Queue> {
+        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// ジョブを1つ投入する
+    fn push(&self, index: usize, job: Job) {
+        self.lock().jobs.push_back((index, job));
+        self.available.notify_one();
+    }
+
+    /// ジョブを1つ取り出す
+    ///
+    /// 取れるジョブが無ければ待ち、投入口が閉じて列が尽きたとき `None` を返す。
+    fn pop(&self) -> Option<(usize, Job)> {
+        let mut queue = self.lock();
+        loop {
+            if let Some(job) = queue.jobs.pop_front() {
+                return Some(job);
+            }
+            if queue.closed {
+                return None;
+            }
+            queue = self
+                .available
+                .wait(queue)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// 投入口を閉じ、待っているワーカーを全て起こす
+    fn close(&self) {
+        self.lock().closed = true;
+        self.available.notify_all();
+    }
+}
+
 /// 符号化を回すワーカーの群れ
 struct Pool {
-    /// ジョブの投入口。落とすとワーカーが順に抜ける
-    jobs: Option<Sender<(usize, Job)>>,
+    /// ジョブの列。投入口を閉じるとワーカーが順に抜ける
+    jobs: Arc<Jobs>,
     /// 投入済みのジョブを符号化せずに捨てるか
     abandoned: Arc<AtomicBool>,
     results: Receiver<Done>,
@@ -54,7 +110,7 @@ struct Pool {
 impl Drop for Pool {
     fn drop(&mut self) {
         self.abandoned.store(true, Ordering::Relaxed);
-        self.jobs = None;
+        self.jobs.close();
         for worker in self.workers.drain(..) {
             drop(worker.join());
         }
@@ -64,20 +120,14 @@ impl Drop for Pool {
 /// ジョブを1つずつ取り、符号化して結末を返す
 ///
 /// 巻き戻しで抜けたワーカーは抱えていたジョブの結末を返さず、駆動はその番号を
-/// 待ち続ける。符号化の巻き戻しは結末として持ち帰り、受け口の毒も取り出しだけは
+/// 待ち続ける。符号化の巻き戻しは結末として持ち帰り、列の毒も取り出しだけは
 /// 通して、この関数から巻き戻しの出口を無くす。
 ///
 /// `abandoned` が立った後に取り出したジョブは捨てて抜ける。立てるのは群れを
 /// 畳むときだけで、そこから先は結末を指す相手がいない。
-fn work(
-    codec: &Codec,
-    jobs: &Mutex<Receiver<(usize, Job)>>,
-    results: &Sender<Done>,
-    abandoned: &AtomicBool,
-) {
+fn work(codec: &Codec, jobs: &Jobs, results: &Sender<Done>, abandoned: &AtomicBool) {
     loop {
-        let received = jobs.lock().unwrap_or_else(PoisonError::into_inner).recv();
-        let Ok((index, job)) = received else {
+        let Some((index, job)) = jobs.pop() else {
             return;
         };
         if abandoned.load(Ordering::Relaxed) {
@@ -105,18 +155,16 @@ fn work(
 /// # Errors
 /// スレッドを起こせないとき [`Error::Io`]。
 fn spawn(codec: Codec, workers: NonZeroUsize) -> Result<Pool, Error> {
-    let (sender, receiver) = channel();
     let (results, done) = channel();
-    let jobs = Arc::new(Mutex::new(receiver));
 
     let mut pool = Pool {
-        jobs: Some(sender),
+        jobs: Arc::new(Jobs::default()),
         abandoned: Arc::new(AtomicBool::new(false)),
         results: done,
         workers: Vec::with_capacity(workers.get()),
     };
     for _ in 0..workers.get() {
-        let jobs = Arc::clone(&jobs);
+        let jobs = Arc::clone(&pool.jobs);
         let results = results.clone();
         let abandoned = Arc::clone(&pool.abandoned);
         let worker = thread::Builder::new()
@@ -229,10 +277,7 @@ impl Pipeline {
         self.submitted += 1;
 
         match &self.pool {
-            Some(pool) => {
-                let jobs = pool.jobs.as_ref().expect("投入口は畳むときだけ落とす");
-                jobs.send((index, job)).expect("ワーカーは畳むまで受け取る");
-            }
+            Some(pool) => pool.jobs.push(index, job),
             None => {
                 let outcome = match self.codec.encode(&job) {
                     Ok(encoded) => Outcome::Encoded(encoded),
@@ -378,18 +423,15 @@ mod tests {
         let data = ramp(16, 12, 0);
 
         for abandoned in [false, true] {
-            let (sender, receiver) = channel();
             let (results, done) = channel();
-            let job = Job::crop(&data, &layout, layout.whole(), None, Vec::new());
-            sender.send((0, job)).unwrap();
-            drop(sender);
-
-            work(
-                &codec,
-                &Mutex::new(receiver),
-                &results,
-                &AtomicBool::new(abandoned),
+            let jobs = Jobs::default();
+            jobs.push(
+                0,
+                Job::crop(&data, &layout, layout.whole(), None, Vec::new()),
             );
+            jobs.close();
+
+            work(&codec, &jobs, &results, &AtomicBool::new(abandoned));
             drop(results);
 
             assert_eq!(done.try_recv().is_ok(), !abandoned, "捨てる={abandoned}");
