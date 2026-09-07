@@ -69,7 +69,7 @@ function Bullets({
   items: string[];
   textColor: string;
 }) {
-  if (items.length === 0) return null;
+  if (items.length === 0) return <div />;
 
   return (
     <div className="mb-4">
@@ -90,7 +90,9 @@ export function PluginCard({ plugin, url }: PluginCardProps) {
   const info = pluginInfo[plugin];
 
   return (
-    <article className={clsx("rounded-lg border-2 p-6", info.color)}>
+    <article
+      className={clsx("grid grid-rows-subgrid row-span-6 rounded-lg border-2 p-6", info.color)}
+    >
       <h3 className={clsx("text-xl font-bold mb-2", info.textColor)}>{info.title}</h3>
       <p className={clsx("mb-4", info.textColor)}>{info.description}</p>
 
