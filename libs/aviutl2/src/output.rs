@@ -598,4 +598,13 @@ mod tests {
             "フレームレートのスケールが不正です: -1"
         );
     }
+
+    /// 設定が決まったと言えるのは、保存できた結末と保存できなかった結末だけ
+    #[test]
+    fn only_a_settled_config_is_accepted() {
+        assert!(ConfigOutcome::Saved.accepted());
+        assert!(ConfigOutcome::NotSaved("設定保存エラー: 書けません".into()).accepted());
+        assert!(!ConfigOutcome::Cancelled.accepted());
+        assert!(!ConfigOutcome::Failed.accepted());
+    }
 }

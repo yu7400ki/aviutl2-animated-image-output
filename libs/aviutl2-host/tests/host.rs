@@ -402,3 +402,93 @@ fn a_cancelled_dialog_leaves_the_saved_config_alone() {
     );
     assert_eq!(TestConfig::load(), TestConfig { repeat: 7 });
 }
+
+/// 設定ダイアログが設定を返せないプラグイン
+struct FailingDialogPlugin;
+
+impl OutputPlugin for FailingDialogPlugin {
+    type Config = TestConfig;
+
+    const FORMAT_NAME: &'static str = "テスト";
+    const HAS_CONFIG_DIALOG: bool = true;
+
+    fn info() -> PluginInfo {
+        TestPlugin::info()
+    }
+
+    fn encode(info: &OutputInfo, config: &TestConfig) -> Result<(), String> {
+        TestPlugin::encode(info, config)
+    }
+
+    fn show_config_dialog(_hwnd: HWND, _config: TestConfig) -> ConfigDialog<TestConfig> {
+        ConfigDialog::Failed
+    }
+}
+
+/// 無いディレクトリの下を置き場所に名指す設定
+#[derive(Default)]
+struct UnwritableConfig;
+
+impl IniConfig for UnwritableConfig {
+    const FILE_NAME: &'static str = "host-test-unwritable.ini";
+
+    fn load_from(_section: Option<&aviutl2::ini::Properties>) -> Self {
+        UnwritableConfig
+    }
+
+    fn save_to(&self, _ini: &mut aviutl2::ini::Ini) {}
+
+    fn config_path() -> Result<PathBuf, String> {
+        Ok(std::env::temp_dir()
+            .join(format!("aviutl2-{}-missing", std::process::id()))
+            .join(Self::FILE_NAME))
+    }
+}
+
+/// 保存できない設定をダイアログが返すプラグイン
+struct UnwritablePlugin;
+
+impl OutputPlugin for UnwritablePlugin {
+    type Config = UnwritableConfig;
+
+    const FORMAT_NAME: &'static str = "テスト";
+    const HAS_CONFIG_DIALOG: bool = true;
+
+    fn info() -> PluginInfo {
+        TestPlugin::info()
+    }
+
+    fn encode(_info: &OutputInfo, _config: &UnwritableConfig) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn show_config_dialog(_hwnd: HWND, config: UnwritableConfig) -> ConfigDialog<UnwritableConfig> {
+        ConfigDialog::Accepted(config)
+    }
+}
+
+/// 設定を返せなかったダイアログは、保存された設定に触れない
+#[test]
+fn a_failed_dialog_leaves_the_saved_config_alone() {
+    let _config = ConfigSession::new(7);
+
+    assert_eq!(
+        FailingDialogPlugin::config(HWND::default(), HINSTANCE::default()),
+        ConfigOutcome::Failed
+    );
+    assert_eq!(TestConfig::load(), TestConfig { repeat: 7 });
+}
+
+/// 保存できなかった設定は、その理由を連れて返る
+#[test]
+fn a_config_that_cannot_be_saved_comes_back_with_the_reason() {
+    let path = UnwritableConfig::config_path().expect("設定の置き場所");
+
+    let outcome = UnwritablePlugin::config(HWND::default(), HINSTANCE::default());
+
+    let ConfigOutcome::NotSaved(message) = &outcome else {
+        panic!("保存の失敗が返らなかった: {outcome:?}");
+    };
+    assert!(message.starts_with("設定保存エラー: "), "{message}");
+    assert!(!path.exists(), "書けない場所に設定が残った");
+}
