@@ -159,8 +159,10 @@ pub struct Encoder<W: Write> {
     chunk: Vec<u8>,
 }
 
-// SAFETY: 抱える生ポインタは唯一の所有で別名を持たず、libjxl の符号化の経路は
-// スレッド固有の状態を持たない。同時アクセスは Sync を付けないことで防ぐ。
+// SAFETY: 抱える3本の生ポインタ (Raw::enc・Raw::runner・settings) は1つの所有グラフを成し、
+// Encoder と一緒に動く。runner は enc へ登録され、settings は enc が所有する。グラフの外へ
+// 写しは出ない。libjxl の符号化は組み立てたスレッドに紐付いた状態を持たず、どのスレッドから
+// 呼んでも同じに動く。同時アクセスは Sync を付けないことで防ぐ。
 unsafe impl<W: Write + Send> Send for Encoder<W> {}
 
 impl<W: Write> Encoder<W> {
