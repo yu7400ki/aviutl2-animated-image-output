@@ -12,10 +12,9 @@ pub(crate) struct Inputs {
     color: ComboBox,
 }
 
-impl ConfigInputs for Inputs {
-    type Config = Config;
-
-    fn new(default_config: &Config) -> Self {
+impl Inputs {
+    /// 既定の設定を初期値として入力欄を組む
+    pub(crate) fn new(default_config: &Config) -> Self {
         Inputs {
             repeat: repeat_input(Some(u32::from(u16::MAX)), u32::from(default_config.repeat)),
             color: ComboBox::new(vec![
@@ -28,6 +27,10 @@ impl ConfigInputs for Inputs {
             }),
         }
     }
+}
+
+impl ConfigInputs for Inputs {
+    type Config = Config;
 
     fn layout(&self) -> FlexLayout {
         FlexLayout::column()

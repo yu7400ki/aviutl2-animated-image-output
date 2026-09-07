@@ -1,4 +1,4 @@
-//! 設定ダイアログの入力欄
+//! 設定ダイアログの入力欄と、それを並べたダイアログの表示
 
 use crate::ConfigDialog;
 use std::ops::RangeInclusive;
@@ -85,12 +85,9 @@ pub fn repeat_input(max: Option<u32>, value: u32) -> RangedInput {
 }
 
 /// 設定ダイアログへ並べる入力欄の集まり
-pub trait ConfigInputs: Clone {
+pub trait ConfigInputs {
     /// 入力欄が組み上げる設定
     type Config;
-
-    /// 既定の設定を初期値として入力欄を組む
-    fn new(default_config: &Self::Config) -> Self;
 
     /// 設定項目を並べる
     fn layout(&self) -> FlexLayout;
@@ -102,18 +99,16 @@ pub trait ConfigInputs: Clone {
     fn collect(&self) -> Result<Self::Config, String>;
 }
 
-/// 入力欄とOK・キャンセルを並べた設定ダイアログを出す
+/// 入力欄とOK・キャンセルを並べた、`format_name` の出力設定ダイアログを出す
 ///
 /// OKは入力欄がすべて読めるときだけ受け取り、読めない欄があるときは
 /// 文言を出してダイアログを開いたまま残す。
-pub fn show_config_dialog<I: ConfigInputs + 'static>(
+pub fn show_config_dialog<I: ConfigInputs + Clone + 'static>(
     parent_hwnd: HWND,
-    title: &str,
-    default_config: I::Config,
+    format_name: &str,
+    inputs: I,
 ) -> ConfigDialog<I::Config> {
-    let inputs = I::new(&default_config);
-
-    let dialog = Dialog::new(title);
+    let dialog = Dialog::new(&format!("{format_name}出力設定"));
     let handle = dialog.handle();
 
     let ok_button = Button::primary("OK").on_click({

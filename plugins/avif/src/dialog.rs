@@ -29,10 +29,9 @@ pub(crate) struct Inputs {
     threads: RangedInput,
 }
 
-impl ConfigInputs for Inputs {
-    type Config = Config;
-
-    fn new(default_config: &Config) -> Self {
+impl Inputs {
+    /// 既定の設定を初期値として入力欄を組む
+    pub(crate) fn new(default_config: &Config) -> Self {
         Inputs {
             repeat: repeat_input(None, default_config.repeat),
             quality: RangedInput::new("品質", quality_range(), i32::from(default_config.quality)),
@@ -67,6 +66,10 @@ impl ConfigInputs for Inputs {
             ),
         }
     }
+}
+
+impl ConfigInputs for Inputs {
+    type Config = Config;
 
     fn layout(&self) -> FlexLayout {
         FlexLayout::column()

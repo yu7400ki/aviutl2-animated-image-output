@@ -81,11 +81,7 @@ impl OutputPlugin for ApngOutputPlugin {
     }
 
     fn show_config_dialog(hwnd: HWND, config: Config) -> ConfigDialog<Config> {
-        aviutl2::dialog::show_config_dialog::<dialog::Inputs>(
-            hwnd,
-            &format!("{}出力設定", Self::FORMAT_NAME),
-            config,
-        )
+        aviutl2::dialog::show_config_dialog(hwnd, Self::FORMAT_NAME, dialog::Inputs::new(&config))
     }
 }
 
