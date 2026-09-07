@@ -34,25 +34,6 @@ pub(crate) fn exact_profile(previous: &[u8], frame: &[u8], layout: &Layout, rect
     }
 }
 
-/// `value` だけを含む範囲
-fn at(value: u32) -> Span {
-    Span {
-        min: value,
-        max: value,
-    }
-}
-
-/// 両方を含むまで広げた範囲
-fn union(span: Option<Span>, other: Span) -> Span {
-    match span {
-        Some(span) => Span {
-            min: span.min.min(other.min),
-            max: span.max.max(other.max),
-        },
-        None => other,
-    }
-}
-
 fn scan<const BPP: usize>(previous: &[u8], frame: &[u8], layout: &Layout, rect: Rect) -> Profile {
     let mut rows: Vec<Option<Span>> = vec![None; rect.height as usize];
     let mut cols: Vec<Option<Span>> = vec![None; rect.width as usize];
@@ -62,7 +43,7 @@ fn scan<const BPP: usize>(previous: &[u8], frame: &[u8], layout: &Layout, rect: 
         let start = (rect.y as usize + row) * layout.stride + rect.x as usize * BPP;
         let previous = &previous[start..start + row_len];
         let frame = &frame[start..start + row_len];
-        let y = at(row as u32);
+        let y = Span::at(row as u32);
 
         let mut cursor = 0;
         while cursor < row_len {
@@ -71,8 +52,8 @@ fn scan<const BPP: usize>(previous: &[u8], frame: &[u8], layout: &Layout, rect: 
                 break;
             }
             let column = differs / BPP;
-            *span = Some(union(*span, at(column as u32)));
-            cols[column] = Some(union(cols[column], y));
+            *span = Some(Span::union(*span, Span::at(column as u32)));
+            cols[column] = Some(Span::union(cols[column], y));
             cursor = differs + BPP;
         }
     }
@@ -99,11 +80,11 @@ impl Slab {
         };
         Some(match acc {
             Some(acc) => Slab {
-                lane: union(Some(acc.lane), at(lane)),
-                cross: union(Some(acc.cross), cross),
+                lane: Span::union(Some(acc.lane), Span::at(lane)),
+                cross: Span::union(Some(acc.cross), cross),
             },
             None => Slab {
-                lane: at(lane),
+                lane: Span::at(lane),
                 cross,
             },
         })
@@ -181,8 +162,8 @@ fn best_lane_cut(lanes: &[Option<Span>], total: u64) -> Option<LaneCut> {
 /// 行を帯にした `slab` が覆う矩形
 fn rows_rect(rect: Rect, slab: Slab) -> Rect {
     Rect {
-        x: rect.x + slab.cross.min,
-        y: rect.y + slab.lane.min,
+        x: rect.x + slab.cross.min(),
+        y: rect.y + slab.lane.min(),
         width: slab.cross.count(),
         height: slab.lane.count(),
     }
@@ -191,8 +172,8 @@ fn rows_rect(rect: Rect, slab: Slab) -> Rect {
 /// 列を帯にした `slab` が覆う矩形
 fn cols_rect(rect: Rect, slab: Slab) -> Rect {
     Rect {
-        x: rect.x + slab.lane.min,
-        y: rect.y + slab.cross.min,
+        x: rect.x + slab.lane.min(),
+        y: rect.y + slab.cross.min(),
         width: slab.lane.count(),
         height: slab.cross.count(),
     }

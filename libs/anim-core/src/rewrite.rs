@@ -7,30 +7,44 @@ use crate::diff::Rect;
 const WORD_BITS: usize = u64::BITS as usize;
 
 /// 端を含む整数の範囲
+///
+/// 端の並びは構築の時点で決まり、`min` が `max` を超えることはない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
-    pub min: u32,
-    pub max: u32,
+    min: u32,
+    max: u32,
 }
 
 impl Span {
+    /// `value` だけを含む範囲
+    pub fn at(value: u32) -> Self {
+        Span {
+            min: value,
+            max: value,
+        }
+    }
+
+    /// `span` と `other` をどちらも含む範囲
+    ///
+    /// `span` が無ければ `other` そのもの。
+    pub fn union(span: Option<Span>, other: Span) -> Self {
+        match span {
+            Some(span) => Span {
+                min: span.min.min(other.min),
+                max: span.max.max(other.max),
+            },
+            None => other,
+        }
+    }
+
+    /// 含む値のうち最小のもの
+    pub fn min(self) -> u32 {
+        self.min
+    }
+
     /// 含む値の数
     pub fn count(self) -> u32 {
         self.max - self.min + 1
-    }
-}
-
-/// `value` を含むまで広げた範囲
-fn widened(span: Option<Span>, value: u32) -> Span {
-    match span {
-        Some(span) => Span {
-            min: span.min.min(value),
-            max: span.max.max(value),
-        },
-        None => Span {
-            min: value,
-            max: value,
-        },
     }
 }
 
@@ -119,8 +133,8 @@ impl Plane {
                 }
                 while word != 0 {
                     let x = (index * WORD_BITS + word.trailing_zeros() as usize - left) as u32;
-                    *span = Some(widened(*span, x));
-                    cols[x as usize] = Some(widened(cols[x as usize], row as u32));
+                    *span = Some(Span::union(*span, Span::at(x)));
+                    cols[x as usize] = Some(Span::union(cols[x as usize], Span::at(row as u32)));
                     word &= word - 1;
                 }
             }
@@ -315,7 +329,7 @@ mod tests {
     }
 
     fn span(min: u32, max: u32) -> Option<Span> {
-        Some(Span { min, max })
+        Some(Span::union(Some(Span::at(min)), Span::at(max)))
     }
 
     /// 再現できる疑似乱数
