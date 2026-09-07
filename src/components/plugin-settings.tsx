@@ -1,4 +1,5 @@
 import { clsx } from "clsx";
+
 import type { Plugin } from "../libs/types";
 
 const colorMap = {
@@ -31,8 +32,7 @@ const pluginSettings: Record<
       },
       {
         name: "圧縮レベル",
-        description:
-          "圧縮率と速度のトレードオフ（1-9、既定 6、値が大きいほど高圧縮）",
+        description: "圧縮率と速度のトレードオフ（1-9、既定 6、値が大きいほど高圧縮）",
       },
       {
         name: "色数を削減する",
@@ -126,13 +126,11 @@ const pluginSettings: Record<
       },
       {
         name: "均衡",
-        description:
-          "圧縮率と速度のトレードオフ（1-10、既定 7、値が大きいほど時間がかかる）",
+        description: "圧縮率と速度のトレードオフ（1-10、既定 7、値が大きいほど時間がかかる）",
       },
       {
         name: "スレッド数",
-        description:
-          "並列にエンコードする数（1 から論理 CPU 数まで、既定は論理 CPU 数の半分）",
+        description: "並列にエンコードする数（1 から論理 CPU 数まで、既定は論理 CPU 数の半分）",
       },
     ],
   },
@@ -142,29 +140,18 @@ export function PluginSettings() {
   return (
     <section>
       <h2 className="text-2xl font-bold text-gray-900 mb-8">設定項目</h2>
-      <p className="text-gray-600 mb-8">
-        各プラグインには以下の設定項目があります：
-      </p>
+      <p className="text-gray-600 mb-8">各プラグインには以下の設定項目があります：</p>
 
       <div className="space-y-8">
         {Object.entries(pluginSettings).map(([key, setting]) => (
           <div key={key}>
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">
-              {setting.title}
-            </h3>
-            <ul
-              className={clsx(
-                "space-y-3 list-disc pl-4",
-                colorMap[setting.color],
-              )}
-            >
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">{setting.title}</h3>
+            <ul className={clsx("space-y-3 list-disc pl-4", colorMap[setting.color])}>
               {setting.items.map((item, index) => (
                 // oxlint-disable-next-line react/no-array-index-key -- 静的な一覧なので添字を key にする
                 <li key={index} className="space-y-1">
                   <div className="font-medium text-gray-900">{item.name}</div>
-                  <div className="text-sm text-gray-600">
-                    {item.description}
-                  </div>
+                  <div className="text-sm text-gray-600">{item.description}</div>
                 </li>
               ))}
             </ul>

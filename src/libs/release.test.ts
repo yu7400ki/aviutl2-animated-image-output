@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+
 import { type ReleaseData, selectRelease } from "./release.ts";
 
 const BASE_ID = "aviutl2-animated-image-output";
@@ -58,14 +59,9 @@ describe("selectRelease", () => {
   });
 
   test("1 本欠けた版タグは不成立", () => {
-    const names = packageNames("2.0.0").filter(
-      (name) => !name.includes("-jxl-"),
-    );
+    const names = packageNames("2.0.0").filter((name) => !name.includes("-jxl-"));
 
-    assert.equal(
-      selectRelease([release("v2.0.0", "2026-09-01T00:00:00Z", names)]),
-      undefined,
-    );
+    assert.equal(selectRelease([release("v2.0.0", "2026-09-01T00:00:00Z", names)]), undefined);
   });
 
   test("形式ごとのタグの方が新しくても版タグを採る", () => {
@@ -103,9 +99,7 @@ describe("selectRelease", () => {
   test("新しい方が 6 本揃わなければ旧い版へ遡らない", () => {
     const selected = selectRelease([
       release("v2.0.0", "2026-09-01T00:00:00Z", packageNames("2.0.0")),
-      release("v2.1.0", "2026-09-05T00:00:00Z", [
-        `${BASE_ID}-v2.1.0.au2pkg.zip`,
-      ]),
+      release("v2.1.0", "2026-09-05T00:00:00Z", [`${BASE_ID}-v2.1.0.au2pkg.zip`]),
     ]);
 
     assert.equal(selected, undefined);

@@ -6,12 +6,5 @@
   "printWidth": 100,
   "sortImports": true,
   "sortPackageJson": true,
-  "ignorePatterns": [
-    "**/vendor/**",
-    "*.md",
-    "*.toml",
-    "*.hbs",
-    "*.yml",
-    "*.yaml"
-  ]
+  "ignorePatterns": ["**/vendor/**", "*.md", "*.toml", "*.hbs", "*.yml", "*.yaml"]
 }

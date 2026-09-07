@@ -1,4 +1,5 @@
 import type React from "react";
+
 import "./index.css";
 
 export default function Root({ children }: { children: React.ReactNode }) {

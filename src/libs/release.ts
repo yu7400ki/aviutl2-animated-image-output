@@ -1,4 +1,5 @@
 import { Octokit } from "@octokit/rest";
+
 import type { Plugin, Release } from "./types";
 
 interface Config {
@@ -39,11 +40,7 @@ export function getConfig(): Config {
 }
 
 function isPublished(release: ReleaseData): release is PublishedRelease {
-  return (
-    !release.draft &&
-    !release.prerelease &&
-    typeof release.published_at === "string"
-  );
+  return !release.draft && !release.prerelease && typeof release.published_at === "string";
 }
 
 function assetName(version: string, plugin?: Plugin): string {
@@ -53,8 +50,7 @@ function assetName(version: string, plugin?: Plugin): string {
 }
 
 function assetUrl(release: ReleaseData, name: string): string | undefined {
-  return release.assets.find((asset) => asset.name === name)
-    ?.browser_download_url;
+  return release.assets.find((asset) => asset.name === name)?.browser_download_url;
 }
 
 /** 版タグの最新の公開リリースから 6 本揃ったパッケージを引く。 */

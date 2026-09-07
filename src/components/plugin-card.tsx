@@ -1,4 +1,5 @@
 import { clsx } from "clsx";
+
 import type { Plugin } from "../libs/types";
 
 interface PluginCardProps {
@@ -68,9 +69,7 @@ export function PluginCard({ plugin, url }: PluginCardProps) {
 
   return (
     <article className={clsx("rounded-lg border-2 p-6", info.color)}>
-      <h3 className={clsx("text-xl font-bold mb-2", info.textColor)}>
-        {info.title}
-      </h3>
+      <h3 className={clsx("text-xl font-bold mb-2", info.textColor)}>{info.title}</h3>
       <p className={clsx("mb-4", info.textColor)}>{info.description}</p>
 
       <div className="mb-4">

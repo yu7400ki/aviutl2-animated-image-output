@@ -22,8 +22,7 @@ export function DistributionSite({ release }: DistributionSiteProps) {
               AviUtl2 アニメーション画像出力プラグイン
             </h1>
             <p className="text-lg text-gray-600 max-w-2xl mx-auto leading-relaxed">
-              AviUtl
-              ExEdit2で動画をアニメーション画像として出力するプラグインセット
+              AviUtl ExEdit2で動画をアニメーション画像として出力するプラグインセット
             </p>
           </header>
           <PluginGrid release={release} />

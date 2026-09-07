@@ -7,12 +7,7 @@ export interface StepProps {
   className?: string;
 }
 
-export function Step({
-  number,
-  title,
-  description,
-  className = "",
-}: StepProps) {
+export function Step({ number, title, description, className = "" }: StepProps) {
   return (
     <li className={clsx("flex items-start", className)}>
       <span className="bg-blue-500 text-white rounded-full w-8 h-8 flex items-center justify-center text-sm font-bold mr-4 mt-0.5 shrink-0">

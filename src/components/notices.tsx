@@ -4,8 +4,7 @@ const notices = [
   {
     type: "warning" as const,
     title: "処理時間について",
-    description:
-      "圧縮設定や動画サイズによっては処理時間が極端に長くなる場合があります",
+    description: "圧縮設定や動画サイズによっては処理時間が極端に長くなる場合があります",
   },
   {
     type: "warning" as const,

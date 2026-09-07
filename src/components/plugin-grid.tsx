@@ -9,14 +9,10 @@ export function PluginGrid({ release }: PluginGridProps) {
   return (
     <section className="w-[100cqw] mx-[calc(50%-50cqw)]">
       <div className="px-4">
-        <h2 className="text-2xl font-bold text-gray-900 mb-8 text-center">
-          対応フォーマット
-        </h2>
+        <h2 className="text-2xl font-bold text-gray-900 mb-8 text-center">対応フォーマット</h2>
         <div className="max-w-2xl mx-auto mb-8 rounded-lg border-2 border-gray-300 bg-gray-50 p-6">
           <div className="flex justify-between items-center mb-2">
-            <h3 className="text-lg font-bold text-gray-900">
-              全部入りパッケージ
-            </h3>
+            <h3 className="text-lg font-bold text-gray-900">全部入りパッケージ</h3>
             {release ? (
               <span className="text-sm text-gray-600">
                 バージョン {release.version} /{" "}
@@ -31,8 +27,7 @@ export function PluginGrid({ release }: PluginGridProps) {
             )}
           </div>
           <p className="text-sm text-gray-600 mb-4">
-            5 形式をまとめて入れる zip です。形式ごとの zip
-            と混ぜずに、どちらか一方を入れてください
+            5 形式をまとめて入れる zip です。形式ごとの zip と混ぜずに、どちらか一方を入れてください
           </p>
           {release ? (
             <a
@@ -51,11 +46,7 @@ export function PluginGrid({ release }: PluginGridProps) {
         </div>
         <div className="grid gap-6 grid-cols-[repeat(auto-fit,minmax(18rem,1fr))]">
           {PLUGINS.map((plugin) => (
-            <PluginCard
-              key={plugin}
-              plugin={plugin}
-              url={release?.assets[plugin]}
-            />
+            <PluginCard key={plugin} plugin={plugin} url={release?.assets[plugin]} />
           ))}
         </div>
       </div>

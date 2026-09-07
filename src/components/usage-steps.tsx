@@ -34,12 +34,7 @@ export function UsageSteps() {
       <h2 className="text-2xl font-bold text-gray-900 mb-8">使い方</h2>
       <ol className="space-y-6">
         {usageSteps.map((step) => (
-          <Step
-            key={step.id}
-            number={step.id}
-            title={step.title}
-            description={step.description}
-          />
+          <Step key={step.id} number={step.id} title={step.title} description={step.description} />
         ))}
       </ol>
     </section>
