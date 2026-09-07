@@ -15,24 +15,25 @@
     "format:check": "oxfmt --check"
   },
   "dependencies": {
-    "@funstack/static": "^1.2.0",
+    "@funstack/router": "^1.4.0",
+    "@funstack/static": "^1.3.2",
     "@tailwindcss/vite": "^4.3.3",
     "clsx": "^2.1.1",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "tailwindcss": "^4.3.3"
   },
   "devDependencies": {
     "@octokit/rest": "^22.0.1",
     "@types/node": "^24.13.3",
-    "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "latest",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.1.1",
     "oxfmt": "^0.66.0",
     "oxlint": "^1.81.0",
     "typescript": "^7.0.2",
-    "vite": "^8.1.5",
-    "wrangler": "^4.112.0"
+    "vite": "^8.2.2",
+    "wrangler": "^4.129.0"
   },
   "devEngines": {
     "packageManager": {
