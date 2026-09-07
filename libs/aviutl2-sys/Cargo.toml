@@ -5,3 +5,6 @@ edition = "2024"
 
 [dependencies]
 windows = { workspace = true, features = ["Win32_Foundation"] }
+
+[build-dependencies]
+cc = "1"

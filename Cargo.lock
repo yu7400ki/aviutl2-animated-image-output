@@ -82,6 +82,7 @@ dependencies = [
 name = "aviutl2-sys"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "windows",
 ]
 

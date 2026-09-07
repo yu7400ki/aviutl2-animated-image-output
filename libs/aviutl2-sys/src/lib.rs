@@ -52,3 +52,122 @@ pub mod logger2;
 pub mod output2;
 pub use logger2::*;
 pub use output2::*;
+
+#[cfg(test)]
+mod layout {
+    use super::*;
+    use std::mem::{offset_of, size_of};
+    use std::os::raw::c_int;
+
+    unsafe extern "C" {
+        fn aviutl2_sys_sizeof_output_info() -> usize;
+        fn aviutl2_sys_sizeof_output_plugin_table() -> usize;
+        fn aviutl2_sys_sizeof_log_handle() -> usize;
+        fn aviutl2_sys_output_info_offsets(out: *mut usize);
+        fn aviutl2_sys_output_plugin_table_offsets(out: *mut usize);
+        fn aviutl2_sys_log_handle_offsets(out: *mut usize);
+        fn aviutl2_sys_output_info_flags(out: *mut c_int);
+        fn aviutl2_sys_output_plugin_table_flags(out: *mut c_int);
+    }
+
+    /// 並べた順に項目の位置を取る
+    macro_rules! offsets {
+        ($ty:ty, $($field:ident),+ $(,)?) => {
+            [$(offset_of!($ty, $field)),+]
+        };
+    }
+
+    /// C 側の出口が同じ順で並べた値
+    fn from_header<T: Copy + Default, const N: usize>(
+        fill: unsafe extern "C" fn(*mut T),
+    ) -> [T; N] {
+        let mut values = [T::default(); N];
+        unsafe { fill(values.as_mut_ptr()) };
+        values
+    }
+
+    /// 写した構造体は同梱ヘッダと同じ大きさになる
+    ///
+    /// 位置の突き合わせは末尾の詰め物を見ないため、大きさを別に検める。
+    #[test]
+    fn struct_sizes_match_the_vendored_header() {
+        assert_eq!(size_of::<OUTPUT_INFO>(), unsafe {
+            aviutl2_sys_sizeof_output_info()
+        });
+        assert_eq!(size_of::<OUTPUT_PLUGIN_TABLE>(), unsafe {
+            aviutl2_sys_sizeof_output_plugin_table()
+        });
+        assert_eq!(size_of::<LOG_HANDLE>(), unsafe {
+            aviutl2_sys_sizeof_log_handle()
+        });
+    }
+
+    #[test]
+    fn output_info_field_offsets_match_the_vendored_header() {
+        assert_eq!(
+            from_header(aviutl2_sys_output_info_offsets),
+            offsets!(
+                OUTPUT_INFO,
+                flag,
+                w,
+                h,
+                rate,
+                scale,
+                n,
+                audio_rate,
+                audio_ch,
+                audio_n,
+                savefile,
+                func_get_video,
+                func_get_audio,
+                func_is_abort,
+                func_rest_time_disp,
+                func_set_buffer_size,
+            )
+        );
+    }
+
+    #[test]
+    fn output_plugin_table_field_offsets_match_the_vendored_header() {
+        assert_eq!(
+            from_header(aviutl2_sys_output_plugin_table_offsets),
+            offsets!(
+                OUTPUT_PLUGIN_TABLE,
+                flag,
+                name,
+                filefilter,
+                information,
+                func_output,
+                func_config,
+                func_get_config_text,
+                func_load_project_config,
+                func_save_project_config,
+            )
+        );
+    }
+
+    #[test]
+    fn log_handle_field_offsets_match_the_vendored_header() {
+        assert_eq!(
+            from_header(aviutl2_sys_log_handle_offsets),
+            offsets!(LOG_HANDLE, log, info, warn, error, verbose)
+        );
+    }
+
+    #[test]
+    fn flag_constants_match_the_vendored_header() {
+        assert_eq!(
+            from_header(aviutl2_sys_output_info_flags),
+            [OUTPUT_INFO::FLAG_VIDEO, OUTPUT_INFO::FLAG_AUDIO]
+        );
+        assert_eq!(
+            from_header(aviutl2_sys_output_plugin_table_flags),
+            [
+                OUTPUT_PLUGIN_TABLE::FLAG_VIDEO,
+                OUTPUT_PLUGIN_TABLE::FLAG_AUDIO,
+                OUTPUT_PLUGIN_TABLE::FLAG_IMAGE,
+                OUTPUT_PLUGIN_TABLE::FLAG_PROJECT_CONFIG,
+            ]
+        );
+    }
+}
