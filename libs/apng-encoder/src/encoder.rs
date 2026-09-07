@@ -831,13 +831,13 @@ mod tests {
         [(rgb_config(), rgb), (rgba_config(), rgba)]
     }
 
-    /// [`resting_frames`] が一様な面とまだらな半透明の面を往復する回数
+    /// [`turning_frames`] が一様な面とまだらな半透明の面を往復する回数
     const LOSING_ROUNDS: usize = 6;
 
-    /// [`resting_frames`] が画素ごとに違う面へ切り替わるフレームの位置
+    /// [`turning_frames`] が画素ごとに違う面へ切り替わるフレームの位置
     const DENSE_STARTS_AT: usize = 1 + 2 * LOSING_ROUNDS;
 
-    /// [`resting_frames`] で潰した候補が採られるフレーム数
+    /// [`turning_frames`] で潰した候補が採られるフレーム数
     const WINNING_FRAMES: usize = 5;
 
     /// RGBA8の1画素を、色を反転した不透明な値へ書き換える
@@ -849,16 +849,17 @@ mod tests {
         frame[at + 3] = 0xFF;
     }
 
-    /// 潰した候補が負け続けてから勝ちに変わるRGBA8の列
+    /// 潰した候補が同点から勝ちへ変わるRGBA8の列
     ///
     /// 前半は一様な面とまだらな半透明の面を交互に置く。まだらへ変わるフレームは
     /// 変化した画素が不透明でないため詰め直せず、一様へ戻るフレームは1画素の矩形を
-    /// 詰め直して必ず負ける。
+    /// 詰め直して `source` と同点になる。
     ///
     /// 後半は画素ごとに違う不透明な色を敷き、そこへ離れた2画素ずつ印を書き足す。
-    /// 矩形は2つの印を囲んで広がり、その中のほとんどが変化しないため、潰した候補が
-    /// 必ず勝つ。印は消さずに足すので、捨てた場合の矩形は捨てない場合より広くなる。
-    fn resting_frames() -> Vec<Vec<u8>> {
+    /// 矩形は2つの印を囲んで広がり、その中のほとんどが変化しないため、印を書き足す
+    /// フレームでは潰した候補が必ず勝つ。印は消さずに足すので、捨てた場合の矩形は
+    /// 捨てない場合より広くなる。
+    fn turning_frames() -> Vec<Vec<u8>> {
         const PIXELS: usize = (WIDTH * HEIGHT) as usize;
         /// まだらに置き換える画素の間隔
         const STEP: usize = 7;
@@ -886,9 +887,9 @@ mod tests {
         frames
     }
 
-    /// [`resting_frames`] を色種別と揃えた素材
-    fn resting_material() -> (Config, Vec<Vec<u8>>) {
-        (rgba_config(), resting_frames())
+    /// [`turning_frames`] を色種別と揃えた素材
+    fn turning_material() -> (Config, Vec<Vec<u8>>) {
+        (rgba_config(), turning_frames())
     }
 
     /// 捨てる候補が圧縮した上で退けられるRGBA8の列
@@ -989,7 +990,7 @@ mod tests {
 
     #[test]
     fn the_output_does_not_depend_on_the_number_of_workers() {
-        let materials = jumping_material().into_iter().chain([resting_material()]);
+        let materials = jumping_material().into_iter().chain([turning_material()]);
         for (config, input) in materials {
             let color = config.color_type;
             let expected = encode_with_workers(&input, config, 1);
@@ -1028,11 +1029,12 @@ mod tests {
 
     /// 潰した候補は、短ければどのフレームでも採られる
     ///
-    /// 前半のフレームは詰め直せないか、詰め直しても負ける。後半は潰した候補が必ず
-    /// 勝つので、blend_op=OVERで書かれるのは後半の全フレームになる。
+    /// 交互の列に並ぶのは、詰め直せないフレームと、詰め直しても同点になるフレーム。
+    /// 潰した候補が短くなるのは印を書き足すフレームだけで、そこがblend_op=OVERで
+    /// 書かれる。
     #[test]
     fn the_shorter_over_candidate_is_always_taken() {
-        let (config, input) = resting_material();
+        let (config, input) = turning_material();
         assert_eq!(
             over_frames(&encode_with_workers(&input, config, 1)),
             (DENSE_STARTS_AT + 1..input.len()).collect::<Vec<_>>(),
@@ -1081,7 +1083,7 @@ mod tests {
 
         let materials = jumping_material()
             .into_iter()
-            .chain([resting_material(), rejected_restore_material()]);
+            .chain([turning_material(), rejected_restore_material()]);
         for (config, input) in materials {
             let color = config.color_type;
             let delay = FrameDelay::new(1, 30).unwrap();
