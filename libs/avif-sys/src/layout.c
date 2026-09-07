@@ -5,6 +5,10 @@
 
 #include "avif/avif.h"
 
+size_t avif_sys_sizeof_encoder(void) { return sizeof(avifEncoder); }
+
+size_t avif_sys_sizeof_image(void) { return sizeof(avifImage); }
+
 size_t avif_sys_sizeof_rgb_image(void) { return sizeof(avifRGBImage); }
 
 size_t avif_sys_sizeof_rw_data(void) { return sizeof(avifRWData); }

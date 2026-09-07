@@ -4,8 +4,8 @@
 //! 符号化に要る関数と、その受け渡しに現れる構造体だけを写す。
 //!
 //! `avifEncoder` と `avifImage` は libavif が確保するため、読み書きする項目だけを名前で持ち、
-//! 残りは間隔を合わせる詰め物にしてある。`avifRGBImage` と `avifRWData` は呼び側が確保するので
-//! 大きさまで一致する。
+//! 残りは間隔を合わせる詰め物にしてある。どれも Rust から参照を作るので、項目の位置に加えて
+//! 大きさも同梱ヘッダと一致させ、テストで検める。
 
 #![allow(non_snake_case)]
 
@@ -219,6 +219,8 @@ mod tests {
     use std::mem::{MaybeUninit, offset_of, size_of};
 
     unsafe extern "C" {
+        fn avif_sys_sizeof_encoder() -> usize;
+        fn avif_sys_sizeof_image() -> usize;
         fn avif_sys_sizeof_rgb_image() -> usize;
         fn avif_sys_sizeof_rw_data() -> usize;
         fn avif_sys_sizeof_diagnostics() -> usize;
@@ -249,8 +251,16 @@ mod tests {
         assert_eq!(version.to_str(), Ok("1.3.0"));
     }
 
+    /// 写した構造体は同梱ヘッダと同じ大きさになる
+    ///
+    /// 位置の突き合わせは末尾の詰め物を見ないため、大きさを別に検める。libavif が
+    /// 確保する構造体でも `&mut` を作る以上、確保された領域はこの大きさだけ要る。
     #[test]
     fn struct_sizes_match_the_vendored_header() {
+        assert_eq!(size_of::<avifEncoder>(), unsafe {
+            avif_sys_sizeof_encoder()
+        });
+        assert_eq!(size_of::<avifImage>(), unsafe { avif_sys_sizeof_image() });
         assert_eq!(size_of::<avifRGBImage>(), unsafe {
             avif_sys_sizeof_rgb_image()
         });
