@@ -276,10 +276,11 @@ impl std::ops::BitOr for PluginFlags {
 
 /// `"説明\0パターン\0...\0\0"` 形式のファイルフィルタを構築するビルダー
 ///
-/// ```ignore
-/// FileFilter::new()
+/// ```
+/// # use aviutl2::FileFilter;
+/// let filter = FileFilter::new()
 ///     .add("GIF Files (*.gif)", "*.gif")
-///     .add("All Files (*)", "*")
+///     .add("All Files (*)", "*");
 /// ```
 #[derive(Clone, Default)]
 pub struct FileFilter(Vec<(String, String)>);
