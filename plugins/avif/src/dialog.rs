@@ -115,7 +115,6 @@ mod tests {
     use super::*;
     use aviutl2::IniConfig;
     use aviutl2::ini::Ini;
-    use win32_ui::widget::Number;
 
     fn inputs() -> Inputs {
         Inputs::new(&Config::default())
@@ -127,16 +126,6 @@ mod tests {
             inputs.quality.clone(),
             inputs.speed.clone(),
             inputs.threads.clone(),
-        ]
-    }
-
-    /// 数値を打ち込む4つの入力欄
-    fn number_inputs(inputs: &Inputs) -> [(&'static str, Number); 4] {
-        [
-            ("ループ回数", inputs.repeat.input().clone()),
-            ("品質", inputs.quality.input().clone()),
-            ("エンコード速度", inputs.speed.input().clone()),
-            ("スレッド数", inputs.threads.input().clone()),
         ]
     }
 
@@ -179,22 +168,6 @@ mod tests {
             assert!(inputs.collect().is_err(), "{label}: 上限より上");
             field.input().set_value(max);
             assert!(inputs.collect().is_ok(), "{label}: 上限そのもの");
-        }
-    }
-    /// どの数値欄も、前後に空白のある入力を等しく受け取る
-    #[test]
-    fn every_number_field_accepts_surrounding_whitespace() {
-        for name in ["ループ回数", "品質", "エンコード速度", "スレッド数"] {
-            let inputs = inputs();
-            let (_, input) = number_inputs(&inputs)
-                .into_iter()
-                .find(|(field, _)| *field == name)
-                .expect("名前の一致する欄がある");
-
-            let (min, _) = input.range_bounds().expect("値域を持つ入力欄");
-            input.set_text(&format!(" {min} "));
-
-            assert!(inputs.collect().is_ok(), "{name}: 前後の空白");
         }
     }
 

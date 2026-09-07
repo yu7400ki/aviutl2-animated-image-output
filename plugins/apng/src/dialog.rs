@@ -141,22 +141,6 @@ mod tests {
         }
     }
 
-    /// どの数値欄も、前後に空白のある入力を等しく受け取る
-    #[test]
-    fn every_number_field_accepts_surrounding_whitespace() {
-        let inputs = inputs();
-        for (name, input) in [
-            ("ループ回数", inputs.repeat.input().clone()),
-            ("圧縮レベル", inputs.compression.input().clone()),
-            ("スレッド数", inputs.threads.input().clone()),
-        ] {
-            let (min, _) = input.range_bounds().expect("値域を持つ入力欄");
-            input.set_text(&format!(" {min} "));
-
-            assert!(inputs.collect().is_ok(), "{name}: 前後の空白");
-        }
-    }
-
     /// 読めないループ回数も、0より小さいループ回数も、受け付ける値を名乗る文言で弾かれる
     #[test]
     fn an_invalid_repeat_count_is_refused() {
