@@ -364,7 +364,7 @@ pub trait OutputPlugin {
     /// iniへ永続化する設定
     type Config: IniConfig;
 
-    /// エラー文言に載せる形式名 (「GIF出力エラー」の「GIF」)
+    /// 設定ダイアログの見出しに載せる形式名 (「GIF出力設定」の「GIF」)
     const FORMAT_NAME: &'static str;
 
     /// 設定ダイアログを持つ場合 `true` (falseなら `func_config` は登録されない)
@@ -389,7 +389,7 @@ pub trait OutputPlugin {
     /// `Err` はマクロ側がメッセージボックス表示してホストへ `false` を返す。
     fn output(info: &OutputInfo) -> Result<(), String> {
         let config = Self::Config::load();
-        Self::encode(info, &config).map_err(|e| format!("{}出力エラー: {}", Self::FORMAT_NAME, e))
+        Self::encode(info, &config)
     }
 
     /// 設定ダイアログを表示して、決まった設定を保存する

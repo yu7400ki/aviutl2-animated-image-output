@@ -2,7 +2,7 @@
 //!
 //! このモジュールの内容は公開APIではない。
 
-use crate::output::{ConfigOutcome, OutputInfo, OutputPlugin, PluginInfo};
+use crate::output::{ConfigOutcome, OutputInfo, OutputPlugin};
 use crate::{logger, metrics, sys};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
@@ -15,16 +15,6 @@ pub use std::ffi::c_void;
 pub use windows::core::BOOL;
 
 pub const TRUE: BOOL = BOOL(1);
-
-/// `T::info()` を初回だけ評価して持ち続ける
-///
-/// テーブルの構築とシムの両方が引く。
-fn info<T: OutputPlugin>() -> &'static PluginInfo {
-    // ジェネリック関数内のstaticは全単相化で共有され、ここは最初に呼ばれた `T` の
-    // 情報を抱え続ける。マクロ契約(1つのcdylibに1プラグイン)により実質1つ。
-    static INFO: OnceLock<PluginInfo> = OnceLock::new();
-    INFO.get_or_init(T::info)
-}
 
 struct TableRepr {
     // OUTPUT_PLUGIN_TABLE内のポインタが指すUTF-16バッファ(NUL終端済み)。
@@ -57,7 +47,7 @@ impl TableStorage {
     /// `T::info()` からテーブルを構築(初回のみ)してポインタを返す
     pub fn get_or_init<T: OutputPlugin>(&'static self) -> *mut sys::OUTPUT_PLUGIN_TABLE {
         let repr = self.cell.get_or_init(|| {
-            let info = info::<T>();
+            let info = T::info();
 
             let name: Vec<u16> = encode_nul_terminated(&info.name);
             let filefilter: Vec<u16> = info.file_filter.to_wide();
@@ -124,18 +114,17 @@ fn output_size(path: &Path) -> String {
 // devビルドでFFI境界を越えるunwindを防ぐ。
 
 extern "C" fn output_shim<T: OutputPlugin>(oip: *mut sys::OUTPUT_INFO) -> bool {
-    let name = &info::<T>().name;
     let result = catch_unwind(AssertUnwindSafe(|| {
         let Some(info) = (unsafe { OutputInfo::from_raw(oip) }) else {
-            logger::error(&format!("{name}: 出力情報の取得に失敗しました"));
+            logger::error("出力情報の取得に失敗しました");
             return false;
         };
-        logger::info(&format!("{name}: 出力を開始します"));
+        logger::info("出力を開始します");
         let start = Instant::now();
         match T::output(&info) {
             Ok(()) => {
                 logger::info(&format!(
-                    "{name}: 出力完了 {}フレーム, {}, {:.2}秒",
+                    "出力完了 {}フレーム, {}, {:.2}秒",
                     info.raw_num_frames(),
                     output_size(&info.savefile()),
                     start.elapsed().as_secs_f64()
@@ -143,7 +132,7 @@ extern "C" fn output_shim<T: OutputPlugin>(oip: *mut sys::OUTPUT_INFO) -> bool {
                 true
             }
             Err(message) => {
-                logger::error(&format!("{name}: {message}"));
+                logger::error(&message);
                 MessageBox::error(None, &message, "エラー");
                 false
             }
@@ -151,7 +140,7 @@ extern "C" fn output_shim<T: OutputPlugin>(oip: *mut sys::OUTPUT_INFO) -> bool {
     }));
 
     result.unwrap_or_else(|payload| {
-        logger::error(&format!("{name}: {}", panic_message(&*payload)));
+        logger::error(panic_message(&*payload));
         false
     })
 }
@@ -232,14 +221,13 @@ mod tests {
         }
     }
 
-    /// テーブルの構築と出力の呼び出しを通して、`info()` の評価は1回
+    /// テーブルは初回だけ構築し、`info()` を評価し直さない
     #[test]
     fn info_is_evaluated_once() {
         static TABLE: TableStorage = TableStorage::new();
 
         assert!(!TABLE.get_or_init::<CountingPlugin>().is_null());
-        assert!(!output_shim::<CountingPlugin>(std::ptr::null_mut()));
-        assert!(!output_shim::<CountingPlugin>(std::ptr::null_mut()));
+        assert!(!TABLE.get_or_init::<CountingPlugin>().is_null());
 
         assert_eq!(INFO_CALLS.load(Ordering::Relaxed), 1);
     }

@@ -366,17 +366,14 @@ fn the_encoding_receives_the_material_the_script_names() {
     std::fs::remove_file(&path).expect("保存先の後始末");
 }
 
-/// 出力は保存された設定で符号化し、失敗に形式名を添えて返す
+/// 出力は保存された設定で符号化する
 #[test]
-fn the_saved_config_reaches_the_encoder_and_its_failure_wears_the_format_name() {
+fn the_saved_config_reaches_the_encoder() {
     let _config = ConfigSession::new(7);
 
     let host = Host::open(Script::new().frames(1));
 
-    assert_eq!(
-        TestPlugin::output(&host.info()),
-        Err("テスト出力エラー: 7".to_string())
-    );
+    assert_eq!(TestPlugin::output(&host.info()), Err("7".to_string()));
 }
 
 /// 設定ダイアログが返した設定は保存される
