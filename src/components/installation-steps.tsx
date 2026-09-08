@@ -3,17 +3,14 @@ import { Step } from "./ui/step";
 const installationSteps = [
   {
     id: 1,
-    title: "プラグインファイルをダウンロード",
-    description:
-      "上記のダウンロードボタンから最新版のプラグインファイルを取得してください",
+    title: "パッケージをダウンロード",
+    description: "上のダウンロードボタンから、全部入りか使いたい形式の zip を取得してください",
   },
   {
     id: 2,
-    title: "プラグインフォルダにコピー",
+    title: "プレビュー画面にドラッグ&ドロップ",
     description:
-      "ダウンロードした auo2 ファイルを以下のフォルダにコピーしてください",
-    code: "%ProgramData%\\aviutl2\\Plugin",
-    example: "例: C:\\ProgramData\\aviutl2\\Plugin\\apng_output.auo2",
+      "ダウンロードした zip を AviUtl2 のプレビュー画面にドラッグ&ドロップするとインストールされます",
   },
   {
     id: 3,
@@ -25,28 +22,15 @@ const installationSteps = [
 export function InstallationSteps() {
   return (
     <section>
-      <h2 className="text-2xl font-bold text-gray-900 mb-8">
-        インストール方法
-      </h2>
+      <h2 className="text-2xl font-bold text-gray-900 mb-8">インストール方法</h2>
       <ol className="space-y-6">
         {installationSteps.map((step) => (
-          <Step
-            key={step.id}
-            number={step.id}
-            title={step.title}
-            description={step.description}
-          >
-            {step.code && (
-              <code className="block bg-gray-100 px-3 py-2 rounded text-sm font-mono mt-2">
-                {step.code}
-              </code>
-            )}
-            {step.example && (
-              <p className="text-gray-500 text-sm mt-2">{step.example}</p>
-            )}
-          </Step>
+          <Step key={step.id} number={step.id} title={step.title} description={step.description} />
         ))}
       </ol>
+      <p className="text-gray-600 text-sm mt-6">
+        インストールしたパッケージは、AviUtl2 のパッケージ情報からアンインストールできます。
+      </p>
     </section>
   );
 }

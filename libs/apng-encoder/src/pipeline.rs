@@ -1,0 +1,1018 @@
+//! ワーカープールと、引換券で受け取る圧縮の結果
+
+use crate::codec::{BufferPool, Candidate, Codec};
+use crate::error::Error;
+use crate::layout::Layout;
+use anim_core::{Rect, crop};
+use std::any::Any;
+use std::collections::{HashMap, VecDeque};
+use std::marker::PhantomData;
+use std::num::NonZeroUsize;
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread::{self, JoinHandle};
+
+/// ワーカーに付ける名前
+const WORKER_NAME: &str = "apng-compress";
+
+/// 圧縮を待つ仕事1つ
+struct Job {
+    /// 隙間なく並んだ矩形の中の画素を置くバッファ
+    region: Vec<u8>,
+    /// 圧縮した本体を組み立てるバッファ
+    body: Vec<u8>,
+    /// 領域の埋め方
+    source: Source,
+}
+
+/// ジョブの領域を何から埋めるか
+enum Source {
+    /// 切り出し済み
+    ///
+    /// 領域は投入の時点でフレームから独立していて、圧縮はそのバッファだけを読む。
+    Ready {
+        /// 領域の1行のバイト数
+        region_stride: usize,
+    },
+    /// フレームから `rect` を切り出して埋める
+    Crop {
+        /// 切り出す元のフレーム
+        data: Arc<Vec<u8>>,
+        /// 切り出す矩形
+        rect: Rect,
+    },
+    /// 2つのフレームの差分の外接矩形を求め、そこを切り出して埋める
+    Diff {
+        /// 差分を採る相手のフレーム
+        previous: Arc<Vec<u8>>,
+        /// 切り出す元のフレーム
+        data: Arc<Vec<u8>>,
+    },
+    /// キャンバスとフレームの差分の外接矩形を求め、そこを切り出して埋める
+    ///
+    /// 矩形の面積が `kept_area` に満たないときだけ切り出して圧縮する。それ以外は
+    /// 候補にしない — 圧縮すれば小さくなることはあるが、それを測る圧縮の方が高くつく。
+    Restored {
+        /// 差分を採るキャンバス
+        canvas: Arc<Vec<u8>>,
+        /// 切り出す元のフレーム
+        data: Arc<Vec<u8>>,
+        /// 比べる相手の矩形の面積
+        kept_area: u64,
+    },
+    /// `message` を payload として巻き戻すジョブ
+    #[cfg(test)]
+    Panicking { message: &'static str },
+}
+
+/// ジョブ1つの結末
+///
+/// 巻き戻し以外の変種は、引換券の種類と1対1で対応する。
+enum Outcome {
+    Compressed(Candidate),
+    /// 切り出した矩形と、そこを圧縮した候補
+    Cut {
+        rect: Rect,
+        candidate: Candidate,
+    },
+    Restored(Restoration),
+    /// ワーカーが巻き戻した。駆動側で投げ直す
+    Panicked(Box<dyn Any + Send>),
+}
+
+/// [`Source::Restored`] のジョブ1つの結末
+enum Restoration {
+    /// 走査した矩形と、そこを圧縮した候補
+    Cut { rect: Rect, candidate: Candidate },
+    /// 走査した矩形が広く、候補にしなかった。本体のバッファは使っていない
+    Rejected { body: Vec<u8> },
+}
+
+/// ワーカーが返す、ジョブ1つの結末と領域のバッファ
+struct Done {
+    /// 投入したジョブの番号
+    index: usize,
+    outcome: Outcome,
+    region: Vec<u8>,
+}
+
+/// 取り出しを待つジョブ
+///
+/// [`Source::Restored`] のジョブは `ahead` へ入り、`behind` に溜まっているジョブを
+/// 追い越して取られる。どちらの列も投入の順に取る。
+#[derive(Default)]
+struct Queue {
+    /// 追い越して取るジョブ
+    ahead: VecDeque<(usize, Job)>,
+    /// 投入の順に取るジョブ
+    behind: VecDeque<(usize, Job)>,
+    /// 投入口を閉じたか
+    closed: bool,
+}
+
+/// ジョブの投入口と、ワーカーの取り出し口
+#[derive(Default)]
+struct Jobs {
+    queue: Mutex<Queue>,
+    /// 取れるジョブが増えたことと、投入口が閉じたことを知らせる
+    available: Condvar,
+}
+
+impl Jobs {
+    /// 毒された錠も通して列を開く
+    fn lock(&self) -> MutexGuard<'_, Queue> {
+        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// ジョブを1つ投入する
+    fn push(&self, index: usize, job: Job) {
+        let mut queue = self.lock();
+        let lane = match job.source {
+            Source::Restored { .. } => &mut queue.ahead,
+            Source::Ready { .. } | Source::Crop { .. } | Source::Diff { .. } => &mut queue.behind,
+            #[cfg(test)]
+            Source::Panicking { .. } => &mut queue.behind,
+        };
+        lane.push_back((index, job));
+        drop(queue);
+        self.available.notify_one();
+    }
+
+    /// ジョブを1つ取り出す
+    ///
+    /// 取れるジョブが無ければ待ち、投入口が閉じて列が尽きたとき `None` を返す。
+    fn pop(&self) -> Option<(usize, Job)> {
+        let mut queue = self.lock();
+        loop {
+            if let Some(job) = queue.ahead.pop_front().or_else(|| queue.behind.pop_front()) {
+                return Some(job);
+            }
+            if queue.closed {
+                return None;
+            }
+            queue = self
+                .available
+                .wait(queue)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// 投入口を閉じ、待っているワーカーを全て起こす
+    fn close(&self) {
+        self.lock().closed = true;
+        self.available.notify_all();
+    }
+}
+
+/// 圧縮を回すワーカーの群れ
+struct Pool {
+    /// ジョブの列。投入口を閉じるとワーカーが順に抜ける
+    jobs: Arc<Jobs>,
+    /// 投入済みのジョブを圧縮せずに捨てるか
+    abandoned: Arc<AtomicBool>,
+    results: Receiver<Done>,
+    workers: Vec<JoinHandle<()>>,
+}
+
+/// 群れを畳む
+///
+/// 結末を待つ相手はもういないので、投入済みのジョブは圧縮せずに捨てる。
+/// 待つのは圧縮に入っているぶんだけで、仕掛かりの上限まで溜まったジョブを
+/// 端から焼き切ることはない。
+impl Drop for Pool {
+    fn drop(&mut self) {
+        self.abandoned.store(true, Ordering::Relaxed);
+        self.jobs.close();
+        for worker in self.workers.drain(..) {
+            drop(worker.join());
+        }
+    }
+}
+
+/// `data` から `rect` を切り出して圧縮する
+fn cut(
+    codec: &mut Codec,
+    layout: &Layout,
+    region: &mut Vec<u8>,
+    data: &[u8],
+    rect: Rect,
+    body: Vec<u8>,
+) -> (Rect, Candidate) {
+    let bpp = layout.bytes_per_pixel;
+    crop(data, rect, layout.stride, bpp, bpp, region);
+
+    (
+        rect,
+        codec.compress(region, rect.width as usize * bpp, bpp, body),
+    )
+}
+
+/// ジョブ1つを片付け、結末と領域のバッファを返す
+///
+/// フレームから埋めるジョブは走査と切り出しを済ませてから圧縮する。そこまでの
+/// 巻き戻しは結末として持ち帰るので、領域のバッファは巻き戻しても返る。持ち帰りが
+/// 効くのはテストのプロファイルだけで、リリースは `panic = "abort"` で落ちる。
+///
+/// 返る時点でフレームを手放している。
+fn run(codec: &mut Codec, layout: &Layout, job: Job) -> (Outcome, Vec<u8>) {
+    let Job {
+        mut region,
+        body,
+        source,
+    } = job;
+    let bpp = layout.bytes_per_pixel;
+
+    let compress = || match source {
+        Source::Ready { region_stride } => {
+            Outcome::Compressed(codec.compress(&region, region_stride, bpp, body))
+        }
+        Source::Crop { data, rect } => {
+            let (rect, candidate) = cut(codec, layout, &mut region, &data, rect, body);
+            Outcome::Cut { rect, candidate }
+        }
+        Source::Diff { previous, data } => {
+            let rect = layout.bounding_rect(&previous, &data);
+            let (rect, candidate) = cut(codec, layout, &mut region, &data, rect, body);
+            Outcome::Cut { rect, candidate }
+        }
+        Source::Restored {
+            canvas,
+            data,
+            kept_area,
+        } => {
+            let rect = layout.bounding_rect(&canvas, &data);
+            if rect.area() >= kept_area {
+                return Outcome::Restored(Restoration::Rejected { body });
+            }
+
+            let (rect, candidate) = cut(codec, layout, &mut region, &data, rect, body);
+            Outcome::Restored(Restoration::Cut { rect, candidate })
+        }
+        #[cfg(test)]
+        Source::Panicking { message } => panic::panic_any(message),
+    };
+    let outcome = match panic::catch_unwind(AssertUnwindSafe(compress)) {
+        Ok(outcome) => outcome,
+        Err(payload) => Outcome::Panicked(payload),
+    };
+    (outcome, region)
+}
+
+/// ジョブを1つずつ取り、圧縮して結末を返す
+///
+/// 巻き戻しで抜けたワーカーは抱えていたジョブの結末を返さず、駆動はその番号を
+/// 待ち続ける。ジョブの巻き戻しは結末として持ち帰り、列の毒も取り出しだけは
+/// 通して、この関数から巻き戻しの出口を無くす。
+///
+/// `abandoned` が立った後に取り出したジョブは捨てて抜ける。立てるのは群れを
+/// 畳むときだけで、そこから先は結末を指す相手がいない。
+fn work(
+    codec: &mut Codec,
+    layout: &Layout,
+    jobs: &Jobs,
+    results: &Sender<Done>,
+    abandoned: &AtomicBool,
+) {
+    loop {
+        let Some((index, job)) = jobs.pop() else {
+            return;
+        };
+        if abandoned.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let (outcome, region) = run(codec, layout, job);
+        let done = Done {
+            index,
+            outcome,
+            region,
+        };
+        if results.send(done).is_err() {
+            return;
+        }
+    }
+}
+
+/// ワーカーを起こす
+///
+/// 圧縮器はワーカーの中で作る。
+///
+/// # Errors
+/// スレッドを起こせないとき [`Error::Io`]。
+fn spawn(level: u32, workers: NonZeroUsize, layout: Layout) -> Result<Pool, Error> {
+    let (results, done) = channel();
+
+    let mut pool = Pool {
+        jobs: Arc::new(Jobs::default()),
+        abandoned: Arc::new(AtomicBool::new(false)),
+        results: done,
+        workers: Vec::with_capacity(workers.get()),
+    };
+    for _ in 0..workers.get() {
+        let jobs = Arc::clone(&pool.jobs);
+        let results = results.clone();
+        let abandoned = Arc::clone(&pool.abandoned);
+        let worker = thread::Builder::new()
+            .name(WORKER_NAME.to_owned())
+            .spawn(move || work(&mut Codec::new(level), &layout, &jobs, &results, &abandoned))?;
+        pool.workers.push(worker);
+    }
+    Ok(pool)
+}
+
+/// 切り出し済みの領域を圧縮するジョブ
+pub(crate) enum Region {}
+
+/// フレームから切り出して圧縮するジョブ
+pub(crate) enum Cut {}
+
+/// キャンバスとの差分を走査して切り出すジョブ
+pub(crate) enum Restored {}
+
+/// 投入したジョブの結果を受け取る引換券
+///
+/// 投入が1枚配り、受け取りが1枚使う。`K` が受け取り口を決める。
+#[must_use = "受け取らない引換券は結末と本体のバッファを列に残す"]
+pub(crate) struct Ticket<K> {
+    index: usize,
+    kind: PhantomData<fn() -> K>,
+}
+
+/// 引換券を使われるのを待っている結末
+#[derive(Default)]
+struct Ready {
+    region: HashMap<usize, Candidate>,
+    cut: HashMap<usize, (Rect, Candidate)>,
+    restored: HashMap<usize, Restoration>,
+}
+
+impl Ready {
+    /// 溜まっている結末の数
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.region.len() + self.cut.len() + self.restored.len()
+    }
+}
+
+/// 圧縮を回し、引換券で結果を受け取るパイプライン
+///
+/// ワーカーが2つ以上あるときだけ群れを起こす。1つなら投入した場で圧縮する。
+/// 結末は届いた順に溜め、引換券の指すものを返すので、受け取りの順は投入の順から
+/// 独立している。
+///
+/// 領域と本体に使うバッファはここが配り、結果と一緒に受け取って配り直す。
+pub(crate) struct Pipeline {
+    /// ワーカーが1つのときに、投入した場で回す圧縮器
+    codec: Codec,
+    pool: Option<Pool>,
+    /// 次に投入するジョブの番号
+    submitted: usize,
+    ready: Ready,
+    /// 配り直すバッファ
+    buffers: BufferPool,
+    /// 圧縮を回すワーカー数
+    workers: NonZeroUsize,
+    /// キャンバスの大きさと入力フレームのバイト並び
+    layout: Layout,
+}
+
+impl Pipeline {
+    /// `layout` に並ぶフレームを、圧縮レベル `level` (1..=9) で圧縮する
+    /// `workers` 個のワーカーを持つパイプラインを作る
+    ///
+    /// # Errors
+    /// スレッドを起こせないとき [`Error::Io`]。
+    pub(crate) fn new(level: u32, workers: NonZeroUsize, layout: Layout) -> Result<Self, Error> {
+        let pool = match workers.get() {
+            1 => None,
+            _ => Some(spawn(level, workers, layout)?),
+        };
+
+        Ok(Pipeline {
+            codec: Codec::new(level),
+            pool,
+            submitted: 0,
+            ready: Ready::default(),
+            buffers: BufferPool::new(),
+            workers,
+            layout,
+        })
+    }
+
+    /// 圧縮を回すワーカー数
+    pub(crate) fn workers(&self) -> NonZeroUsize {
+        self.workers
+    }
+
+    /// 空のバッファを1つ借りる
+    pub(crate) fn buffer(&mut self) -> Vec<u8> {
+        self.buffers.take()
+    }
+
+    /// 借りたバッファを返す
+    pub(crate) fn recycle(&mut self, buffer: Vec<u8>) {
+        self.buffers.give(buffer);
+    }
+
+    /// 配り直せるバッファの数
+    #[cfg(test)]
+    pub(crate) fn pooled(&self) -> usize {
+        self.buffers.len()
+    }
+
+    /// 切り出し済みの領域の圧縮を投入し、結果の引換券を返す
+    ///
+    /// `region` はパイプラインが引き取り、[`Pipeline::buffer`] から配り直す。
+    pub(crate) fn submit_region(
+        &mut self,
+        region: Vec<u8>,
+        region_stride: usize,
+    ) -> Ticket<Region> {
+        let body = self.buffer();
+        self.submit(Job {
+            region,
+            body,
+            source: Source::Ready { region_stride },
+        })
+    }
+
+    /// フレームから `rect` を切り出す圧縮を投入し、結果の引換券を返す
+    ///
+    /// 切り出し先は [`Pipeline::buffer`] から借り、結果と一緒に配り直す。
+    pub(crate) fn submit_crop(&mut self, data: Arc<Vec<u8>>, rect: Rect) -> Ticket<Cut> {
+        let region = self.buffer();
+        let body = self.buffer();
+        self.submit(Job {
+            region,
+            body,
+            source: Source::Crop { data, rect },
+        })
+    }
+
+    /// `previous` と `data` の差分の外接矩形を切り出す圧縮を投入し、結果の引換券を返す
+    ///
+    /// 走査も切り出しも圧縮を回す側で行う。切り出し先は [`Pipeline::buffer`] から借り、
+    /// 結果と一緒に配り直す。
+    pub(crate) fn submit_diff(
+        &mut self,
+        previous: Arc<Vec<u8>>,
+        data: Arc<Vec<u8>>,
+    ) -> Ticket<Cut> {
+        let region = self.buffer();
+        let body = self.buffer();
+        self.submit(Job {
+            region,
+            body,
+            source: Source::Diff { previous, data },
+        })
+    }
+
+    /// [`Source::Restored`] の圧縮を投入し、結果の引換券を返す
+    ///
+    /// 領域と本体は [`Pipeline::buffer`] から借り、どちらの結末でも配り直す。
+    pub(crate) fn submit_restored(
+        &mut self,
+        canvas: Arc<Vec<u8>>,
+        data: Arc<Vec<u8>>,
+        kept_area: u64,
+    ) -> Ticket<Restored> {
+        let region = self.buffer();
+        let body = self.buffer();
+        self.submit(Job {
+            region,
+            body,
+            source: Source::Restored {
+                canvas,
+                data,
+                kept_area,
+            },
+        })
+    }
+
+    /// ジョブを投入し、結果の引換券を返す
+    ///
+    /// ワーカーが1つなら、投入した場で片付けて結末を溜める。
+    fn submit<K>(&mut self, job: Job) -> Ticket<K> {
+        let index = self.submitted;
+        self.submitted += 1;
+
+        match &self.pool {
+            Some(pool) => pool.jobs.push(index, job),
+            None => {
+                let (outcome, region) = run(&mut self.codec, &self.layout, job);
+                self.buffers.give(region);
+                self.deliver(index, outcome);
+            }
+        }
+        Ticket {
+            index,
+            kind: PhantomData,
+        }
+    }
+
+    /// 領域を圧縮するジョブの結果を受け取る
+    pub(crate) fn take(&mut self, ticket: Ticket<Region>) -> Candidate {
+        self.wait(ticket.index, |ready| &mut ready.region)
+    }
+
+    /// [`Source::Crop`] か [`Source::Diff`] のジョブの結果を、切り出した矩形とともに
+    /// 受け取る
+    pub(crate) fn take_cut(&mut self, ticket: Ticket<Cut>) -> (Rect, Candidate) {
+        self.wait(ticket.index, |ready| &mut ready.cut)
+    }
+
+    /// [`Source::Restored`] のジョブの結果を受け取る
+    ///
+    /// 候補にしなかったときは本体のバッファを配り直して `None` を返す。
+    pub(crate) fn take_restored(&mut self, ticket: Ticket<Restored>) -> Option<(Rect, Candidate)> {
+        match self.wait(ticket.index, |ready| &mut ready.restored) {
+            Restoration::Cut { rect, candidate } => Some((rect, candidate)),
+            Restoration::Rejected { body } => {
+                self.buffers.give(body);
+                None
+            }
+        }
+    }
+
+    /// `index` のジョブの結末を `pick` の溜め先から受け取る
+    ///
+    /// 届いていなければ届くまで待つ。先に届いた別の番号の結末は溜めておく。
+    fn wait<T>(&mut self, index: usize, pick: fn(&mut Ready) -> &mut HashMap<usize, T>) -> T {
+        loop {
+            if let Some(outcome) = pick(&mut self.ready).remove(&index) {
+                return outcome;
+            }
+
+            let pool = self.pool.as_ref().expect("投入した場で圧縮が済んでいる");
+            let done = pool
+                .results
+                .recv()
+                .expect("ワーカーは結末を返してから抜ける");
+            self.buffers.give(done.region);
+            self.deliver(done.index, done.outcome);
+        }
+    }
+
+    /// 結末を、引換券が指されるまで溜める
+    ///
+    /// ワーカーの巻き戻しは受け取った場で駆動側へ投げ直す。
+    fn deliver(&mut self, index: usize, outcome: Outcome) {
+        match outcome {
+            Outcome::Compressed(candidate) => {
+                self.ready.region.insert(index, candidate);
+            }
+            Outcome::Cut { rect, candidate } => {
+                self.ready.cut.insert(index, (rect, candidate));
+            }
+            Outcome::Restored(restoration) => {
+                self.ready.restored.insert(index, restoration);
+            }
+            Outcome::Panicked(payload) => panic::resume_unwind(payload),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::noise;
+    use anim_core::ColorType;
+
+    const LEVEL: u32 = 6;
+    const BPP: usize = 4;
+    const WIDTH: usize = 16;
+    const HEIGHT: usize = 12;
+    const STRIDE: usize = WIDTH * BPP;
+
+    fn layout() -> Layout {
+        Layout::new(WIDTH as u32, HEIGHT as u32, ColorType::Rgba8).unwrap()
+    }
+
+    fn pipeline(workers: usize) -> Pipeline {
+        Pipeline::new(LEVEL, NonZeroUsize::new(workers).unwrap(), layout()).unwrap()
+    }
+
+    fn region(seed: u32) -> Vec<u8> {
+        noise(STRIDE * HEIGHT, seed)
+    }
+
+    /// 投入した順と違う順で引換券を使っても、その引換券の結果が返る
+    #[test]
+    fn a_result_is_taken_by_the_number_it_was_submitted_with() {
+        let regions: Vec<Vec<u8>> = (0..8).map(region).collect();
+
+        let mut sequential = pipeline(1);
+        let expected: Vec<Vec<u8>> = regions
+            .iter()
+            .map(|region| {
+                let index = sequential.submit_region(region.clone(), STRIDE);
+                sequential.take(index).into_body()
+            })
+            .collect();
+
+        let mut parallel = pipeline(4);
+        let tickets: Vec<Ticket<Region>> = regions
+            .iter()
+            .map(|region| parallel.submit_region(region.clone(), STRIDE))
+            .collect();
+        for (ticket, expected) in tickets.into_iter().zip(&expected).rev() {
+            assert_eq!(&parallel.take(ticket).into_body(), expected);
+        }
+    }
+
+    /// 切り出しのジョブは、渡した矩形と、同じ矩形を切り出した領域のジョブと同じ候補を返す
+    #[test]
+    fn a_crop_job_compresses_what_the_rect_cuts_out() {
+        const RECT: Rect = Rect {
+            x: 3,
+            y: 2,
+            width: 9,
+            height: 7,
+        };
+
+        let frame = Arc::new(region(5));
+        let mut cut = Vec::new();
+        crop(&frame, RECT, STRIDE, BPP, BPP, &mut cut);
+
+        for workers in [1, 2] {
+            let mut pipeline = pipeline(workers);
+            let index = pipeline.submit_region(cut.clone(), RECT.width as usize * BPP);
+            let expected = pipeline.take(index).into_body();
+
+            let index = pipeline.submit_crop(Arc::clone(&frame), RECT);
+            let (rect, candidate) = pipeline.take_cut(index);
+            assert_eq!(rect, RECT, "ワーカー{workers}個: 切り出した矩形");
+            assert_eq!(candidate.into_body(), expected, "ワーカー{workers}個");
+        }
+    }
+
+    /// 差分のジョブは、走査した外接矩形と、同じ矩形を切り出したジョブと同じ候補を返す
+    ///
+    /// 差分の無い列では1画素の矩形になる。どちらのフレームも結末を返す前に手放す。
+    #[test]
+    fn a_diff_job_compresses_what_the_bounding_rect_cuts_out() {
+        const RECT: Rect = Rect {
+            x: 2,
+            y: 5,
+            width: 7,
+            height: 4,
+        };
+        /// 差分が無いときの矩形
+        const UNCHANGED: Rect = Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        };
+
+        let previous = Arc::new(region(13));
+        let mut changed = previous.as_ref().clone();
+        for y in RECT.y as usize..(RECT.y + RECT.height) as usize {
+            for x in RECT.x as usize..(RECT.x + RECT.width) as usize {
+                for byte in &mut changed[(y * WIDTH + x) * BPP..(y * WIDTH + x + 1) * BPP] {
+                    *byte ^= 0xFF;
+                }
+            }
+        }
+        let changed = Arc::new(changed);
+
+        for workers in [1, 2] {
+            for (data, expected_rect) in [(&changed, RECT), (&previous, UNCHANGED)] {
+                let mut pipeline = pipeline(workers);
+                let index = pipeline.submit_crop(Arc::clone(data), expected_rect);
+                let expected = pipeline.take_cut(index).1.into_body();
+
+                let index = pipeline.submit_diff(Arc::clone(&previous), Arc::clone(data));
+                let (rect, candidate) = pipeline.take_cut(index);
+                assert_eq!(rect, expected_rect, "ワーカー{workers}個: 走査した矩形");
+                assert_eq!(
+                    candidate.into_body(),
+                    expected,
+                    "ワーカー{workers}個: 圧縮した本体"
+                );
+                assert_eq!(
+                    Arc::strong_count(&previous),
+                    1,
+                    "ワーカー{workers}個: 差分を採る相手を指している数"
+                );
+                assert_eq!(
+                    Arc::strong_count(&changed),
+                    1,
+                    "ワーカー{workers}個: フレームを指している数"
+                );
+            }
+        }
+    }
+
+    /// 復元のジョブは、走査した矩形が比べる相手の面積に満たないときだけ候補になる
+    ///
+    /// 面積が並ぶ相手には候補を立てず、領域と本体のバッファをそのまま返す。1つ広い
+    /// 相手には切り出して圧縮し、走査した矩形と、同じ矩形を切り出したジョブと同じ
+    /// 本体を返す。
+    #[test]
+    fn a_restored_job_is_a_candidate_only_below_the_area_it_is_compared_with() {
+        const RECT: Rect = Rect {
+            x: 4,
+            y: 3,
+            width: 6,
+            height: 5,
+        };
+
+        let canvas = Arc::new(region(11));
+        let mut frame = canvas.as_ref().clone();
+        for y in RECT.y as usize..(RECT.y + RECT.height) as usize {
+            for x in RECT.x as usize..(RECT.x + RECT.width) as usize {
+                for byte in &mut frame[(y * WIDTH + x) * BPP..(y * WIDTH + x + 1) * BPP] {
+                    *byte ^= 0xFF;
+                }
+            }
+        }
+        let frame = Arc::new(frame);
+
+        for workers in [1, 2] {
+            let mut pipeline = pipeline(workers);
+            let index =
+                pipeline.submit_restored(Arc::clone(&canvas), Arc::clone(&frame), RECT.area());
+            assert!(
+                pipeline.take_restored(index).is_none(),
+                "ワーカー{workers}個: 面積が並ぶ矩形の候補"
+            );
+            assert_eq!(
+                pipeline.pooled(),
+                2,
+                "ワーカー{workers}個: 領域と本体の戻り"
+            );
+
+            let index = pipeline.submit_crop(Arc::clone(&frame), RECT);
+            let expected = pipeline.take_cut(index).1.into_body();
+
+            let index =
+                pipeline.submit_restored(Arc::clone(&canvas), Arc::clone(&frame), RECT.area() + 1);
+            let (rect, candidate) = pipeline
+                .take_restored(index)
+                .expect("面積で落ちない矩形の候補");
+            assert_eq!(rect, RECT, "ワーカー{workers}個: 走査した矩形");
+            assert_eq!(
+                candidate.into_body(),
+                expected,
+                "ワーカー{workers}個: 圧縮した本体"
+            );
+        }
+    }
+
+    /// 列は復元のジョブを先に返し、残りは投入の順に返す
+    #[test]
+    fn the_queue_hands_out_restored_jobs_first() {
+        let jobs = Jobs::default();
+        let ready = |seed: u32| Job {
+            region: region(seed),
+            body: Vec::new(),
+            source: Source::Ready {
+                region_stride: STRIDE,
+            },
+        };
+        let restored = Job {
+            region: Vec::new(),
+            body: Vec::new(),
+            source: Source::Restored {
+                canvas: Arc::new(region(31)),
+                data: Arc::new(region(32)),
+                kept_area: u64::MAX,
+            },
+        };
+        let diff = Job {
+            region: Vec::new(),
+            body: Vec::new(),
+            source: Source::Diff {
+                previous: Arc::new(region(33)),
+                data: Arc::new(region(34)),
+            },
+        };
+
+        jobs.push(0, ready(1));
+        jobs.push(1, diff);
+        jobs.push(2, restored);
+        jobs.push(3, ready(3));
+        jobs.close();
+
+        let order: Vec<usize> = std::iter::from_fn(|| jobs.pop().map(|(index, _)| index)).collect();
+        assert_eq!(order, [2, 0, 1, 3]);
+    }
+
+    /// 復元のジョブは、溜まっているジョブを追い越して取られる
+    ///
+    /// 復元より先に届くのは、投入の時点で走っていたぶんだけになる。
+    #[test]
+    fn a_restored_job_overtakes_the_queued_jobs() {
+        const WORKERS: usize = 2;
+        const QUEUED: usize = 8;
+        /// 投入の間にワーカーが汲み尽くさない大きさ
+        const HEAVY: usize = 256 * 1024;
+
+        let heavy: Vec<Vec<u8>> = (0..QUEUED as u32).map(|seed| noise(HEAVY, seed)).collect();
+        let canvas = Arc::new(region(21));
+        let mut frame = canvas.as_ref().clone();
+        frame[0] ^= 0xFF;
+        let frame = Arc::new(frame);
+
+        let mut pipeline = pipeline(WORKERS);
+        for region in heavy {
+            let _ = pipeline.submit_region(region, STRIDE);
+        }
+        let restored = pipeline.submit_restored(canvas, frame, u64::MAX);
+
+        drop(pipeline.take_restored(restored).expect("復元の候補"));
+        assert!(
+            pipeline.ready.len() <= WORKERS,
+            "復元より先に届いた結末が{}件",
+            pipeline.ready.len()
+        );
+    }
+
+    /// 結果を受け取ったジョブの領域と、返した本体は配り直す先へ戻る
+    #[test]
+    fn the_buffer_of_a_taken_job_comes_back() {
+        let region = region(0);
+        let mut pipeline = pipeline(2);
+        assert_eq!(pipeline.pooled(), 0, "配る前から抱えている");
+
+        let index = pipeline.submit_region(region.clone(), STRIDE);
+        let body = pipeline.take(index).into_body();
+        assert_eq!(pipeline.pooled(), 1, "領域のバッファが戻っていない");
+
+        pipeline.recycle(body);
+        assert_eq!(pipeline.pooled(), 2, "返したバッファが戻っていない");
+
+        let buffer = pipeline.buffer();
+        assert_eq!(pipeline.pooled(), 1, "配ったバッファが残っている");
+        assert!(buffer.is_empty(), "配ったバッファに中身がある");
+    }
+
+    /// 切り出しのジョブを受け取ると、切り出し先が戻り、フレームを手放している
+    ///
+    /// ワーカーは結末を返す前にフレームを手放すので、受け取った時点でフレームを
+    /// 指すのは投入した側だけになる。
+    #[test]
+    fn a_taken_crop_job_gives_back_its_region_and_frame() {
+        const RECT: Rect = Rect {
+            x: 1,
+            y: 1,
+            width: 8,
+            height: 6,
+        };
+
+        for workers in [2, 4] {
+            let mut pipeline = pipeline(workers);
+            let frame = Arc::new(region(9));
+
+            let index = pipeline.submit_crop(Arc::clone(&frame), RECT);
+            drop(pipeline.take_cut(index));
+
+            assert_eq!(
+                pipeline.pooled(),
+                1,
+                "ワーカー{workers}個: 切り出し先の戻り"
+            );
+            assert_eq!(
+                Arc::strong_count(&frame),
+                1,
+                "ワーカー{workers}個: フレームを指している数"
+            );
+        }
+    }
+
+    /// 群れを畳むと、抜ける前に旗が立つ
+    ///
+    /// 旗を読む側と立てる側を別々に問う。立てるのは畳むときだけなので、
+    /// 起こした直後は倒れている。
+    #[test]
+    fn dropping_the_pool_raises_the_flag() {
+        let pool = spawn(LEVEL, NonZeroUsize::new(2).unwrap(), layout()).unwrap();
+        let abandoned = Arc::clone(&pool.abandoned);
+
+        assert!(
+            !abandoned.load(Ordering::Relaxed),
+            "起こした直後に立っている"
+        );
+        drop(pool);
+        assert!(abandoned.load(Ordering::Relaxed), "畳んでも立っていない");
+    }
+
+    /// ワーカーは巻き戻したジョブの結末を持ち帰り、次のジョブへ進む
+    ///
+    /// 捨てる旗は倒したままなので、巻き戻しの経路が畳むときの経路と混ざらない。
+    #[test]
+    fn a_panicking_job_is_carried_back_and_the_worker_takes_the_next_one() {
+        const MESSAGE: &str = "圧縮の中で巻き戻す";
+
+        let (results, done) = channel();
+        let jobs = Jobs::default();
+        jobs.push(
+            0,
+            Job {
+                region: Vec::new(),
+                body: Vec::new(),
+                source: Source::Panicking { message: MESSAGE },
+            },
+        );
+        jobs.push(
+            1,
+            Job {
+                region: region(0),
+                body: Vec::new(),
+                source: Source::Ready {
+                    region_stride: STRIDE,
+                },
+            },
+        );
+        jobs.close();
+
+        work(
+            &mut Codec::new(LEVEL),
+            &layout(),
+            &jobs,
+            &results,
+            &AtomicBool::new(false),
+        );
+        drop(results);
+
+        let carried = done.recv().expect("巻き戻したジョブの結末");
+        assert_eq!(carried.index, 0, "巻き戻したジョブの番号");
+        let Outcome::Panicked(payload) = carried.outcome else {
+            panic!("巻き戻しを持ち帰っていない")
+        };
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&MESSAGE), "payload");
+
+        let next = done.recv().expect("次のジョブの結末");
+        assert_eq!(next.index, 1, "次のジョブの番号");
+        assert!(
+            matches!(next.outcome, Outcome::Compressed(_)),
+            "次のジョブを圧縮していない"
+        );
+    }
+
+    /// 持ち帰った巻き戻しは、受け取る側で同じ payload のまま投げ直される
+    ///
+    /// 投げ直した後もワーカーは回っていて、続くジョブは逐次と同じ本体を返す。
+    #[test]
+    fn a_panicked_job_is_thrown_again_at_the_taker() {
+        const MESSAGE: &str = "ワーカーの中で巻き戻す";
+
+        let mut parallel = pipeline(2);
+        let ticket: Ticket<Region> = parallel.submit(Job {
+            region: Vec::new(),
+            body: Vec::new(),
+            source: Source::Panicking { message: MESSAGE },
+        });
+        let thrown = panic::catch_unwind(AssertUnwindSafe(|| parallel.take(ticket)))
+            .err()
+            .expect("巻き戻しが届いていない");
+        assert_eq!(thrown.downcast_ref::<&str>(), Some(&MESSAGE), "payload");
+
+        let ticket = parallel.submit_region(region(1), STRIDE);
+        let body = parallel.take(ticket).into_body();
+
+        let mut sequential = pipeline(1);
+        let ticket = sequential.submit_region(region(1), STRIDE);
+        assert_eq!(
+            body,
+            sequential.take(ticket).into_body(),
+            "投げ直した後のジョブの本体"
+        );
+    }
+
+    /// 畳んだ後に取り出したジョブは、圧縮せずに捨てる
+    ///
+    /// 結末を返さないので、捨てたぶんの番号は誰にも指されない。
+    #[test]
+    fn a_job_taken_from_an_abandoned_pool_is_discarded() {
+        for abandoned in [false, true] {
+            let (results, done) = channel();
+            let jobs = Jobs::default();
+            jobs.push(
+                0,
+                Job {
+                    region: region(0),
+                    body: Vec::new(),
+                    source: Source::Ready {
+                        region_stride: STRIDE,
+                    },
+                },
+            );
+            jobs.close();
+
+            work(
+                &mut Codec::new(LEVEL),
+                &layout(),
+                &jobs,
+                &results,
+                &AtomicBool::new(abandoned),
+            );
+            drop(results);
+
+            assert_eq!(done.try_recv().is_ok(), !abandoned, "捨てる={abandoned}");
+        }
+    }
+}

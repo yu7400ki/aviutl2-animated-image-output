@@ -1,0 +1,18 @@
+[submodule "libs/webp-sys/vendor/libwebp"]
+	path = libs/webp-sys/vendor/libwebp
+	url = https://github.com/webmproject/libwebp.git
+[submodule "libs/avif-sys/vendor/libavif"]
+	path = libs/avif-sys/vendor/libavif
+	url = https://github.com/AOMediaCodec/libavif.git
+[submodule "libs/avif-sys/vendor/aom"]
+	path = libs/avif-sys/vendor/aom
+	url = https://aomedia.googlesource.com/aom
+[submodule "libs/avif-sys/vendor/libyuv"]
+	path = libs/avif-sys/vendor/libyuv
+	url = https://chromium.googlesource.com/libyuv/libyuv
+[submodule "libs/jxl-sys/vendor/libjxl"]
+	path = libs/jxl-sys/vendor/libjxl
+	url = https://github.com/libjxl/libjxl.git
+[submodule "libs/aviutl2-sys/vendor/aviutl2_sdk"]
+	path = libs/aviutl2-sys/vendor/aviutl2_sdk
+	url = https://github.com/aviutl2/aviutl2_sdk_mirror.git

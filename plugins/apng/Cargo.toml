@@ -1,6 +1,6 @@
 [package]
 name = "png_output"
-version = "1.1.2"
+version.workspace = true
 edition = "2024"
 
 [lib]
@@ -8,12 +8,14 @@ name = "png_output"
 crate-type = ["cdylib"]
 
 [dependencies]
-aviutl = { path = "../../libs/aviutl" }
-win32_dialog = { path = "../../libs/dialog" }
-png = { version = "0.17" }
-rust-ini = { workspace = true }
-widestring = { workspace = true }
+apng_encoder = { path = "../../libs/apng-encoder" }
+aviutl2 = { path = "../../libs/aviutl2" }
+win32-ui = { workspace = true }
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[dev-dependencies]
+aviutl2_host = { path = "../../libs/aviutl2-host" }
+png = "0.18"

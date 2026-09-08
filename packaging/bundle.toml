@@ -1,0 +1,13 @@
+[release]
+include = [
+    "png_output",
+    "gif_output",
+    "webp_output",
+    "avif_output",
+    "jxl_output",
+    "third_party_licences",
+]
+
+[artifacts.third_party_licences]
+destination = "THIRD-PARTY-LICENCES.txt"
+source = "target/third-party/THIRD-PARTY-LICENCES.txt"

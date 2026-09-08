@@ -1,0 +1,10 @@
+[package]
+name = "gif_encoder"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anim_core = { path = "../anim-core" }
+
+[dev-dependencies]
+gif = "0.13"

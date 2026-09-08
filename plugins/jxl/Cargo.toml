@@ -1,0 +1,21 @@
+[package]
+name = "jxl_output"
+version.workspace = true
+edition = "2024"
+
+[lib]
+name = "jxl_output"
+crate-type = ["cdylib"]
+
+[dependencies]
+aviutl2 = { path = "../../libs/aviutl2" }
+jxl_encoder = { path = "../../libs/jxl-encoder" }
+win32-ui = { workspace = true }
+windows = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+aviutl2_host = { path = "../../libs/aviutl2-host" }
+jxl = "=0.6.0"

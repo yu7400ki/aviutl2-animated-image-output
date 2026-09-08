@@ -1,0 +1,15 @@
+[package]
+name = "aviutl2"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anim_core = { path = "../anim-core" }
+aviutl2-sys = { path = "../aviutl2-sys" }
+widestring = { workspace = true }
+rust-ini = { workspace = true }
+win32-ui = { workspace = true }
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+] }

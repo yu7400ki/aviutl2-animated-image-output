@@ -1,0 +1,5 @@
+targets = ["x86_64-pc-windows-msvc"]
+max-depth = 1
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+accepted = ["MIT", "Zlib", "CC0-1.0", "Unicode-3.0"]

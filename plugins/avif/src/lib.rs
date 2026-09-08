@@ -1,143 +1,366 @@
 mod config;
 mod dialog;
+#[cfg(test)]
+mod encode_tests;
 
-use aviutl::output2::{OutputInfo, OutputPluginTable};
-use rustavif::{BitDepth, Encoder, RgbFormat, RgbImage};
-use std::ffi::c_void;
-use widestring::{U16CStr, Utf16Str, utf16str};
-use win32_dialog::MessageBox;
-use windows::{Win32::Foundation::*, core::*};
-
+use avif_encoder::{ColorType, Config as EncoderConfig, Encoder, Usage};
+use aviutl2::{
+    ConfigDialog, FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, logger,
+    register_logger, register_output_plugin, write_or_discard,
+};
 use config::{ColorFormat, Config};
-use dialog::show_config_dialog;
+use std::fs::File;
+use std::io::BufWriter;
+use std::path::Path;
+use windows::Win32::Foundation::HWND;
 
-fn create_avif_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
-    let output_path = unsafe { U16CStr::from_ptr_str(info.savefile).to_string_lossy() };
+/// プラグイン設定をエンコーダの設定へ対応付ける
+fn encoder_config(config: &Config, timescale: u32) -> EncoderConfig {
+    EncoderConfig {
+        color_type: match config.color_format {
+            ColorFormat::Rgb24 => ColorType::Rgb8,
+            ColorFormat::Rgba32 => ColorType::Rgba8,
+        },
+        quality: config.quality,
+        speed: config.speed,
+        yuv_format: config.yuv_format.into(),
+        num_plays: config.repeat,
+        timescale,
+        max_threads: u32::try_from(config.threads.get()).unwrap_or(u32::MAX),
+    }
+}
 
-    let mut encoder = Encoder::new().map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
-    encoder.set_repetition_count(config.repeat);
-    encoder.set_timescale(info.rate as u64);
-    encoder.set_quality(config.quality);
-    encoder.set_speed(config.speed);
-    encoder.set_max_threads(config.threads as u32);
+/// 符号化器へ渡す、素材の枚数と時間の刻み
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Sequence {
+    num_frames: u32,
+    /// 1秒あたりの刻み数
+    timescale: u32,
+    /// 1フレームが占める刻み数
+    duration: u32,
+}
 
-    let width = info.w as u32;
-    let height = info.h as u32;
-    let num_frames = info.n as u32;
-
-    for frame in 0..num_frames {
-        if info.is_abort() {
-            return Err("処理が中断されました".into());
+impl Sequence {
+    /// 1フレームが `scale` / `rate` 秒の素材が `num_frames` 枚
+    ///
+    /// 刻みを `rate` に据えると、1フレームは `scale` 刻みになる。
+    fn new(num_frames: u32, scale: u32, rate: u32) -> Self {
+        Self {
+            num_frames,
+            timescale: rate,
+            duration: scale,
         }
+    }
 
-        let image_data = match config.color_format {
-            ColorFormat::Rgb24 => info.get_video_rgb(frame as i32),
-            ColorFormat::Rgba32 => info.get_video_rgba(frame as i32),
+    /// 動きを持たない1枚の素材か
+    fn single(&self) -> bool {
+        self.num_frames == 1
+    }
+}
+
+/// aomの動作の用途の説明
+fn usage_label(usage: Usage) -> &'static str {
+    match usage {
+        Usage::AllIntra => "all-intra",
+        Usage::GoodQuality => "good-quality",
+        Usage::Realtime => "realtime",
+    }
+}
+
+/// speedから解決された動作点を、利用者が読める形にする
+fn operating_point_message(config: &EncoderConfig, sequence: &Sequence) -> String {
+    let point = config.operating_point(sequence.single());
+    format!(
+        "speed {} → {} (cpu_used={})",
+        config.speed,
+        usage_label(point.usage),
+        point.cpu_used
+    )
+}
+
+/// `path` へ書き出し、`frames` が投入したフレームを閉じる
+///
+/// 途中で失敗したときは書きかけのファイルを残さない。
+fn write_frames<F>(
+    path: &Path,
+    width: u32,
+    height: u32,
+    num_frames: u32,
+    config: EncoderConfig,
+    frames: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&mut Encoder<BufWriter<File>>) -> Result<(), String>,
+{
+    write_or_discard(path, |output_file| {
+        let mut encoder = Encoder::new(
+            BufWriter::new(output_file),
+            width,
+            height,
+            num_frames,
+            config,
+        )
+        .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
+
+        frames(&mut encoder)?;
+
+        encoder
+            .finish()
+            .map_err(|e| format!("エンコーダー終了エラー: {}", e))?
+            .into_inner()
+            .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
+
+        Ok(())
+    })
+}
+
+struct AvifOutputPlugin;
+
+impl OutputPlugin for AvifOutputPlugin {
+    type Config = Config;
+
+    const FORMAT_NAME: &'static str = "AVIF";
+
+    const HAS_CONFIG_DIALOG: bool = true;
+
+    fn info() -> PluginInfo {
+        PluginInfo {
+            flags: PluginFlags::VIDEO,
+            name: "AVIF出力プラグイン".into(),
+            file_filter: FileFilter::new()
+                .add("AVIF Files (*.avif)", "*.avif")
+                .add("All Files (*)", "*"),
+            information: format!(
+                "AVIF出力プラグイン v{} by yu7400ki",
+                env!("CARGO_PKG_VERSION")
+            ),
+        }
+    }
+
+    fn encode(info: &OutputInfo, config: &Config) -> Result<(), String> {
+        let video = info.video()?;
+        let (width, height) = (video.width(), video.height());
+        let sequence = Sequence::new(info.num_frames()?, info.scale()?, info.rate()?);
+        let encoder_config = encoder_config(config, sequence.timescale);
+
+        write_frames(
+            &info.savefile(),
+            width,
+            height,
+            sequence.num_frames,
+            encoder_config,
+            |encoder| {
+                logger::info(&operating_point_message(&encoder_config, &sequence));
+
+                video
+                    .encode_frames(config.color_format, |frame_data| {
+                        encoder.add_frame(&frame_data, sequence.duration)
+                    })
+                    .map_err(|e| e.to_string())
+            },
+        )
+    }
+
+    fn show_config_dialog(hwnd: HWND, config: Config) -> ConfigDialog<Config> {
+        aviutl2::dialog::show_config_dialog(hwnd, Self::FORMAT_NAME, dialog::Inputs::new(&config))
+    }
+}
+
+register_output_plugin!(AvifOutputPlugin);
+register_logger!();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use avif_encoder::YuvFormat;
+    use aviutl2_host::temp_path;
+    use std::num::NonZeroUsize;
+
+    #[test]
+    fn color_format_maps_to_the_matching_color_type() {
+        let rgb = encoder_config(
+            &Config {
+                color_format: ColorFormat::Rgb24,
+                ..Config::default()
+            },
+            30,
+        );
+        assert_eq!(rgb.color_type, ColorType::Rgb8);
+
+        let rgba = encoder_config(
+            &Config {
+                color_format: ColorFormat::Rgba32,
+                ..Config::default()
+            },
+            30,
+        );
+        assert_eq!(rgba.color_type, ColorType::Rgba8);
+    }
+
+    #[test]
+    fn yuv_format_maps_to_the_matching_encoder_format() {
+        let config = |yuv_format| Config {
+            yuv_format,
+            ..Config::default()
         };
 
-        if let Some(mut pixel_data) = image_data {
-            let rgb_pixels = RgbImage::from_pixels(
-                width,
-                height,
-                BitDepth::Eight,
-                RgbFormat::Rgba,
-                &mut pixel_data,
+        assert_eq!(
+            encoder_config(&config(config::YuvFormat::Yuv420), 30).yuv_format,
+            YuvFormat::Yuv420
+        );
+        assert_eq!(
+            encoder_config(&config(config::YuvFormat::Yuv422), 30).yuv_format,
+            YuvFormat::Yuv422
+        );
+        assert_eq!(
+            encoder_config(&config(config::YuvFormat::Yuv444), 30).yuv_format,
+            YuvFormat::Yuv444
+        );
+    }
+
+    #[test]
+    fn repeat_is_passed_through_as_the_number_of_plays() {
+        assert_eq!(
+            encoder_config(
+                &Config {
+                    repeat: 5,
+                    ..Config::default()
+                },
+                30
             )
-            .map_err(|e| format!("RGBピクセル作成エラー: {}", e))?;
-
-            let image = rgb_pixels
-                .to_yuv_image(config.yuv_format.into())
-                .map_err(|e| format!("YUV画像変換エラー: {}", e))?;
-
-            encoder
-                .add_image(&image, info.scale as u64, Default::default())
-                .map_err(|e| format!("フレーム追加エラー: {}", e))?;
-        }
-
-        info.rest_time_disp(frame as i32, num_frames as i32);
+            .num_plays,
+            5
+        );
+        assert_eq!(
+            encoder_config(
+                &Config {
+                    repeat: 0,
+                    ..Config::default()
+                },
+                30
+            )
+            .num_plays,
+            0
+        );
     }
 
-    let data = encoder
-        .finish()
-        .map_err(|e| format!("エンコード完了エラー: {}", e))?;
+    /// 1フレームがscale / rate秒なので、rateが刻み数、scaleが1フレームの長さ
+    #[test]
+    fn the_rate_becomes_the_timescale_and_the_scale_becomes_the_duration() {
+        let sequence = Sequence::new(24, 1001, 30000);
+        assert_eq!(sequence.timescale, 30000);
+        assert_eq!(sequence.duration, 1001);
+    }
 
-    std::fs::write(&output_path, data.as_slice())
-        .map_err(|e| format!("ファイル保存エラー: {}", e))?;
+    #[test]
+    fn threads_are_passed_through_up_to_the_field_width() {
+        assert_eq!(
+            encoder_config(
+                &Config {
+                    threads: NonZeroUsize::new(4).unwrap(),
+                    ..Config::default()
+                },
+                30
+            )
+            .max_threads,
+            4
+        );
+        assert_eq!(
+            encoder_config(
+                &Config {
+                    threads: NonZeroUsize::MAX,
+                    ..Config::default()
+                },
+                30
+            )
+            .max_threads,
+            u32::MAX
+        );
+    }
 
-    Ok(())
-}
+    /// speedから解決された動作点は、speedの値と用途の両方を含む
+    #[test]
+    fn the_operating_point_message_names_the_speed_and_the_usage() {
+        let config = encoder_config(
+            &Config {
+                speed: 8,
+                ..Config::default()
+            },
+            30,
+        );
 
-extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
-    unsafe {
-        let info = match oip.as_ref() {
-            Some(info) => info,
-            None => return false,
-        };
+        let message = operating_point_message(&config, &Sequence::new(24, 1, 30));
+        assert!(message.contains("speed 8"), "{message}");
+        assert!(message.contains("realtime"), "{message}");
+    }
 
-        let config = Config::load();
+    /// 1枚だけの素材は、動きを持つ素材とは別の動作点へ解決される
+    #[test]
+    fn a_lone_frame_resolves_to_all_intra() {
+        let config = encoder_config(
+            &Config {
+                speed: 8,
+                ..Config::default()
+            },
+            30,
+        );
 
-        let result = match create_avif_from_video(info, &config) {
-            Ok(_) => true,
-            Err(e) => {
-                let error_msg = format!("AVIF出力エラー: {}", e);
-                MessageBox::error(None, &error_msg, "エラー");
-                false
+        let single = operating_point_message(&config, &Sequence::new(1, 1, 30));
+        assert!(single.contains("all-intra"), "{single}");
+
+        let pair = operating_point_message(&config, &Sequence::new(2, 1, 30));
+        assert!(!pair.contains("all-intra"), "{pair}");
+    }
+
+    /// 画素ごとに値の違う不透明なRGBA
+    fn frame_of(seed: u8, width: u32, height: u32) -> Vec<u8> {
+        (0..height)
+            .flat_map(|y| (0..width).flat_map(move |x| [(x * 7) as u8, (y * 11) as u8, seed, 0xFF]))
+            .collect()
+    }
+
+    /// フレームを`declared`枚宣言し、`frames`枚だけ投入して閉じる
+    fn write_animation(path: &Path, declared: u32, frames: u32) -> Result<(), String> {
+        let width = 16;
+        let height = 16;
+        let config = encoder_config(
+            &Config {
+                color_format: ColorFormat::Rgba32,
+                ..Config::default()
+            },
+            30,
+        );
+
+        write_frames(path, width, height, declared, config, |encoder| {
+            for seed in 0..frames {
+                encoder
+                    .add_frame(&frame_of(seed as u8, width, height), 1)
+                    .map_err(|e| e.to_string())?;
             }
-        };
-
-        result
+            Ok(())
+        })
     }
-}
 
-extern "C" fn config_func(hwnd: HWND, _dll_hinst: HINSTANCE) -> bool {
-    let default_config = Config::load();
+    /// 書き出しはISOBMFFの `ftyp` から始まる
+    #[test]
+    fn a_written_file_starts_with_the_ftyp_box() {
+        let path = temp_path("avif");
 
-    if let Ok(result) = show_config_dialog(hwnd, default_config) {
-        match result {
-            Some(config) => {
-                // 設定を保存
-                if let Err(e) = config.save() {
-                    let error_msg = format!("設定保存エラー: {}", e);
-                    MessageBox::warning(Some(hwnd), &error_msg, "警告");
-                }
-                true
-            }
-            None => false,
-        }
-    } else {
-        MessageBox::error(Some(hwnd), "設定の取得に失敗しました。", "エラー");
-        false
+        write_animation(&path, 4, 4).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(&bytes[4..8], b"ftyp");
     }
-}
 
-const PLUGIN_NAME: &Utf16Str = utf16str!("AVIF出力プラグイン\0");
-const FILE_FILTER: &Utf16Str = utf16str!("AVIF Files (*.avif)\0*.avif\0All Files (*)\0*\0\0");
-const PLUGIN_INFO: &Utf16Str = utf16str!(concat!(
-    "AVIF出力プラグイン v",
-    env!("CARGO_PKG_VERSION"),
-    " by yu7400ki\0"
-));
+    /// 失敗した書き出しは、書きかけのファイルを残さない
+    #[test]
+    fn a_failed_write_leaves_no_file() {
+        let path = temp_path("avif");
 
-const fn init_plugin_table() -> OutputPluginTable {
-    OutputPluginTable {
-        flag: OutputPluginTable::FLAG_VIDEO,
-        name: PLUGIN_NAME.as_ptr(),
-        filefilter: FILE_FILTER.as_ptr(),
-        information: PLUGIN_INFO.as_ptr(),
-        func_output: Some(output_func),
-        func_config: Some(config_func),
-        func_get_config_text: None,
+        write_animation(&path, 4, 3).expect_err("宣言より少ないので閉じられない");
+
+        assert!(!path.exists(), "{}", path.display());
     }
-}
-
-const OUTPUT_PLUGIN_TABLE: OutputPluginTable = init_plugin_table();
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn DllMain(_hinst: HINSTANCE, _reason: u32, _reserved: *mut c_void) -> BOOL {
-    TRUE
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn GetOutputPluginTable() -> *mut OutputPluginTable {
-    &OUTPUT_PLUGIN_TABLE as *const OutputPluginTable as *mut OutputPluginTable
 }

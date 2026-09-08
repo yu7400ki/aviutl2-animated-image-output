@@ -1,192 +1,15 @@
-use ini::Ini;
-use std::path::PathBuf;
-use std::str::FromStr;
-use windows::Win32::Foundation::{HMODULE, MAX_PATH};
-use windows::Win32::System::LibraryLoader::{
-    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GetModuleFileNameW, GetModuleHandleExW,
-};
-use windows::core::PCWSTR;
-
-#[derive(Copy, Clone, PartialEq)]
-pub enum ColorFormat {
-    Rgb24,
-    Rgba32,
-}
-
-impl Default for ColorFormat {
-    fn default() -> Self {
-        ColorFormat::Rgb24
-    }
-}
-
-impl Into<png::ColorType> for ColorFormat {
-    fn into(self) -> png::ColorType {
-        match self {
-            ColorFormat::Rgb24 => png::ColorType::Rgb,
-            ColorFormat::Rgba32 => png::ColorType::Rgba,
-        }
-    }
-}
-
-impl Into<&'static str> for ColorFormat {
-    fn into(self) -> &'static str {
-        match self {
-            ColorFormat::Rgb24 => "透過無し",
-            ColorFormat::Rgba32 => "透過付き",
-        }
-    }
-}
-
-impl FromStr for ColorFormat {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.parse::<u32>() {
-            Ok(0) => Ok(ColorFormat::Rgb24),
-            Ok(1) => Ok(ColorFormat::Rgba32),
-            _ => Err(()),
-        }
-    }
-}
-
-impl ColorFormat {
-    fn to_index(&self) -> u32 {
-        match self {
-            ColorFormat::Rgb24 => 0,
-            ColorFormat::Rgba32 => 1,
-        }
-    }
-}
-
-#[derive(Copy, Clone, PartialEq)]
-pub enum CompressionType {
-    Default,
-    Fast,
-    Best,
-}
-
-impl Default for CompressionType {
-    fn default() -> Self {
-        CompressionType::Default
-    }
-}
-
-impl Into<png::Compression> for CompressionType {
-    fn into(self) -> png::Compression {
-        match self {
-            CompressionType::Default => png::Compression::Default,
-            CompressionType::Fast => png::Compression::Fast,
-            CompressionType::Best => png::Compression::Best,
-        }
-    }
-}
-
-impl Into<&'static str> for CompressionType {
-    fn into(self) -> &'static str {
-        match self {
-            CompressionType::Default => "標準",
-            CompressionType::Fast => "高速",
-            CompressionType::Best => "最高",
-        }
-    }
-}
-
-impl FromStr for CompressionType {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.parse::<u32>() {
-            Ok(0) => Ok(CompressionType::Default),
-            Ok(1) => Ok(CompressionType::Fast),
-            Ok(2) => Ok(CompressionType::Best),
-            _ => Err(()),
-        }
-    }
-}
-
-impl CompressionType {
-    fn to_index(&self) -> u32 {
-        match self {
-            CompressionType::Default => 0,
-            CompressionType::Fast => 1,
-            CompressionType::Best => 2,
-        }
-    }
-}
-
-#[derive(Copy, Clone, PartialEq)]
-pub enum FilterType {
-    None,
-    Sub,
-    Up,
-    Average,
-    Paeth,
-}
-
-impl Default for FilterType {
-    fn default() -> Self {
-        FilterType::Sub
-    }
-}
-
-impl Into<png::FilterType> for FilterType {
-    fn into(self) -> png::FilterType {
-        match self {
-            FilterType::None => png::FilterType::NoFilter,
-            FilterType::Sub => png::FilterType::Sub,
-            FilterType::Up => png::FilterType::Up,
-            FilterType::Average => png::FilterType::Avg,
-            FilterType::Paeth => png::FilterType::Paeth,
-        }
-    }
-}
-
-impl Into<&'static str> for FilterType {
-    fn into(self) -> &'static str {
-        match self {
-            FilterType::None => "なし",
-            FilterType::Sub => "Sub",
-            FilterType::Up => "Up",
-            FilterType::Average => "Average",
-            FilterType::Paeth => "Paeth",
-        }
-    }
-}
-
-impl FromStr for FilterType {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.parse::<u32>() {
-            Ok(0) => Ok(FilterType::None),
-            Ok(1) => Ok(FilterType::Sub),
-            Ok(2) => Ok(FilterType::Up),
-            Ok(3) => Ok(FilterType::Average),
-            Ok(4) => Ok(FilterType::Paeth),
-            _ => Err(()),
-        }
-    }
-}
-
-impl FilterType {
-    fn to_index(&self) -> u32 {
-        match self {
-            FilterType::None => 0,
-            FilterType::Sub => 1,
-            FilterType::Up => 2,
-            FilterType::Average => 3,
-            FilterType::Paeth => 4,
-        }
-    }
-}
+use apng_encoder::COMPRESSION_LEVELS;
+pub use aviutl2::ColorFormat;
+use aviutl2::ini::{Ini, Properties};
+use aviutl2::{IniConfig, MAX_REPEAT, default_threads, read, read_clamped, read_threads};
+use std::num::NonZeroUsize;
 
 #[derive(Clone)]
 pub struct Config {
     pub repeat: u32,
     pub color_format: ColorFormat,
-    pub compression_type: CompressionType,
-    pub filter_type: FilterType,
-    pub adaptive_filter: bool,
+    pub compression_level: u32,
+    pub threads: NonZeroUsize,
 }
 
 impl Default for Config {
@@ -194,107 +17,137 @@ impl Default for Config {
         Self {
             repeat: 0,
             color_format: ColorFormat::default(),
-            compression_type: CompressionType::default(),
-            filter_type: FilterType::default(),
-            adaptive_filter: true,
+            compression_level: 6,
+            threads: default_threads(),
         }
     }
 }
 
-impl Config {
-    fn config_file_path() -> Result<PathBuf, String> {
-        let (buffer, len) = unsafe {
-            let mut hmodule: HMODULE = HMODULE::default();
-            GetModuleHandleExW(
-                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-                PCWSTR(Self::config_file_path as *const () as *const u16),
-                &mut hmodule as *mut HMODULE,
-            )
-            .map_err(|e| format!("GetModuleHandleExW failed: {}", e))?;
+impl IniConfig for Config {
+    const FILE_NAME: &'static str = concat!(env!("CARGO_PKG_NAME"), ".ini");
 
-            let mut buffer = [0u16; MAX_PATH as usize];
-            let len = GetModuleFileNameW(Some(hmodule), &mut buffer);
-
-            (buffer, len)
-        };
-
-        if len > 0 {
-            let dll_path = String::from_utf16_lossy(&buffer[..len as usize]);
-            let dll_path = PathBuf::from(&dll_path);
-            let dll_dir = dll_path
-                .parent()
-                .ok_or("プラグインのディレクトリが取得できません")?;
-            Ok(dll_dir.join(concat!(env!("CARGO_PKG_NAME"), ".ini")))
-        } else {
-            Err("GetModuleFileNameW failed".to_string())
-        }
-    }
-
-    pub fn load() -> Self {
+    fn load_from(section: Option<&Properties>) -> Self {
         let default = Self::default();
 
-        let config_path = match Self::config_file_path() {
-            Ok(path) => path,
-            Err(_) => return default,
-        };
+        let repeat = read_clamped(section, "repeat", 0..=MAX_REPEAT, default.repeat);
+        let color_format = read(section, "color_format", default.color_format);
+        let compression_level = read_clamped(
+            section,
+            "compression_level",
+            COMPRESSION_LEVELS,
+            default.compression_level,
+        );
+        let threads = read_threads(section, default.threads);
 
-        if let Ok(ini) = Ini::load_from_file(&config_path) {
-            if let Some(section) = ini.section(Some("Config")) {
-                let repeat = section
-                    .get("repeat")
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(default.repeat);
-
-                let color_format = section
-                    .get("color_format")
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(default.color_format);
-
-                let compression_type = section
-                    .get("compression_type")
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(default.compression_type);
-
-                let filter_type = section
-                    .get("filter_type")
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(default.filter_type);
-
-                let adaptive_filter = section
-                    .get("adaptive_filter")
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .map(|v| v != 0)
-                    .unwrap_or(default.adaptive_filter);
-
-                Config {
-                    repeat,
-                    color_format,
-                    compression_type,
-                    filter_type,
-                    adaptive_filter,
-                }
-            } else {
-                default
-            }
-        } else {
-            default
+        Self {
+            repeat,
+            color_format,
+            compression_level,
+            threads,
         }
     }
 
-    pub fn save(&self) -> Result<(), String> {
-        let mut ini = Ini::new();
-
-        ini.with_section(Some("Config"))
+    fn save_to(&self, ini: &mut Ini) {
+        ini.with_section(Some(Self::SECTION))
             .set("repeat", self.repeat.to_string())
             .set("color_format", self.color_format.to_index().to_string())
-            .set(
-                "compression_type",
-                self.compression_type.to_index().to_string(),
-            )
-            .set("filter_type", self.filter_type.to_index().to_string())
-            .set("adaptive_filter", (self.adaptive_filter as u32).to_string());
+            .set("compression_level", self.compression_level.to_string())
+            .set("threads", self.threads.to_string());
+    }
+}
 
-        let config_path = Self::config_file_path()?;
-        ini.write_to_file(&config_path).map_err(|e| e.to_string())
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aviutl2::max_threads;
+
+    fn load(entries: &[(&str, &str)]) -> Config {
+        let mut ini = Ini::new();
+        let mut section = ini.with_section(Some(Config::SECTION));
+        for (key, value) in entries {
+            section.set(*key, *value);
+        }
+        Config::load_from(ini.section(Some(Config::SECTION)))
+    }
+
+    #[test]
+    fn missing_section_falls_back_to_default() {
+        let default = Config::default();
+        assert_eq!(default.repeat, 0);
+        assert!(default.color_format == ColorFormat::Rgb24);
+        assert_eq!(default.compression_level, 6);
+
+        let config = Config::load_from(None);
+        assert_eq!(config.repeat, default.repeat);
+        assert!(config.color_format == default.color_format);
+        assert_eq!(config.compression_level, default.compression_level);
+        assert_eq!(config.threads, default.threads);
+    }
+
+    #[test]
+    fn saved_values_round_trip() {
+        let saved = Config {
+            repeat: 3,
+            color_format: ColorFormat::Rgba32,
+            compression_level: 9,
+            threads: NonZeroUsize::new(max_threads()).unwrap(),
+        };
+
+        let mut ini = Ini::new();
+        saved.save_to(&mut ini);
+        let loaded = Config::load_from(ini.section(Some(Config::SECTION)));
+
+        assert_eq!(loaded.repeat, saved.repeat);
+        assert!(loaded.color_format == saved.color_format);
+        assert_eq!(loaded.compression_level, saved.compression_level);
+        assert_eq!(loaded.threads, saved.threads);
+    }
+
+    /// 値域の外の圧縮レベルは、エンコーダが受け取れる範囲へ収まる
+    #[test]
+    fn out_of_range_compression_level_is_clamped() {
+        assert_eq!(
+            load(&[("compression_level", "10")]).compression_level,
+            *COMPRESSION_LEVELS.end()
+        );
+        for value in ["0", "-1"] {
+            assert_eq!(
+                load(&[("compression_level", value)]).compression_level,
+                *COMPRESSION_LEVELS.start(),
+                "{value}"
+            );
+        }
+    }
+
+    /// 読めない圧縮レベルは既定値へ落ちる
+    #[test]
+    fn an_unreadable_compression_level_falls_back_to_default() {
+        let default = Config::default().compression_level;
+        for value in ["high", "6.5", ""] {
+            assert_eq!(
+                load(&[("compression_level", value)]).compression_level,
+                default
+            );
+        }
+    }
+
+    /// 入力欄が扱えないループ回数は、扱える上限へ収まる
+    ///
+    /// i32へ折り返す値をそのまま持つと、ダイアログの初期値が負になる。
+    #[test]
+    fn out_of_range_num_plays_are_clamped() {
+        assert_eq!(load(&[("repeat", "3000000000")]).repeat, MAX_REPEAT);
+        assert_eq!(load(&[("repeat", "3")]).repeat, 3);
+    }
+
+    /// 値域の外のスレッド数は、走らせる機械の並列度の内側へ収まる
+    ///
+    /// 別の機械で書いた ini をそのまま読んでも、この機械で意味のある数になる。
+    #[test]
+    fn out_of_range_threads_are_clamped() {
+        let over = (max_threads() + 1).to_string();
+
+        assert_eq!(load(&[("threads", "0")]).threads.get(), 1);
+        assert_eq!(load(&[("threads", &over)]).threads.get(), max_threads());
     }
 }

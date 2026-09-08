@@ -1,6 +1,6 @@
 [package]
 name = "webp_output"
-version = "1.1.2"
+version.workspace = true
 edition = "2024"
 
 [lib]
@@ -8,12 +8,14 @@ name = "webp_output"
 crate-type = ["cdylib"]
 
 [dependencies]
-aviutl = { path = "../../libs/aviutl" }
-win32_dialog = { path = "../../libs/dialog" }
-rust-ini = { workspace = true }
-libwebp-sys = { version = "0.12" }
-widestring = { workspace = true }
+aviutl2 = { path = "../../libs/aviutl2" }
+webp_encoder = { path = "../../libs/webp-encoder" }
+win32-ui = { workspace = true }
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[dev-dependencies]
+aviutl2_host = { path = "../../libs/aviutl2-host" }
+image-webp = "0.2"

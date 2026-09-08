@@ -38,13 +38,7 @@ const alertStyles = {
   },
 };
 
-export function Alert({
-  type,
-  title,
-  description,
-  children,
-  className = "",
-}: AlertProps) {
+export function Alert({ type, title, description, children, className = "" }: AlertProps) {
   const styles = alertStyles[type];
 
   return (

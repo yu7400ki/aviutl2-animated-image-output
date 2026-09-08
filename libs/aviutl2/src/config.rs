@@ -1,0 +1,262 @@
+//! プラグイン設定の読み書きと、設定値の既定・上限
+
+use ini::{Ini, Properties};
+use std::num::NonZeroUsize;
+use std::ops::RangeInclusive;
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::thread::available_parallelism;
+
+/// 設定が採れるループ回数の上限
+///
+/// ダイアログの数値欄が扱える上限。
+pub const MAX_REPEAT: u32 = i32::MAX as u32;
+
+/// 設定が採れるスレッド数の上限
+///
+/// 走らせる機械の論理CPU数。読めなければ1を返す。
+pub fn max_threads() -> usize {
+    available_parallelism().map_or(1, NonZeroUsize::get)
+}
+
+/// 既定で使うスレッド数
+///
+/// 上限の半分。上限が1の機械では1になる。
+pub fn default_threads() -> NonZeroUsize {
+    NonZeroUsize::new(max_threads() / 2).unwrap_or(NonZeroUsize::MIN)
+}
+
+/// セクションからキーを読み、`FromStr` で解釈する
+///
+/// セクションが無い・キーが無い・値が解釈できない場合は `default` を返す。
+pub fn read<T: FromStr>(section: Option<&Properties>, key: &str, default: T) -> T {
+    section
+        .and_then(|s| s.get(key))
+        .and_then(|s| s.parse::<T>().ok())
+        .unwrap_or(default)
+}
+
+/// セクションからキーを整数として読み、`range` の内側へ収める
+///
+/// セクションが無い・キーが無い・整数として解釈できない場合は `default` を返す。
+/// 値域の外の値は近い端へ収める。
+pub fn read_clamped<T>(
+    section: Option<&Properties>,
+    key: &str,
+    range: RangeInclusive<T>,
+    default: T,
+) -> T
+where
+    T: Copy + TryFrom<i64>,
+    i64: TryFrom<T>,
+{
+    let (Ok(min), Ok(max)) = (i64::try_from(*range.start()), i64::try_from(*range.end())) else {
+        return default;
+    };
+    let Some(value) = section
+        .and_then(|s| s.get(key))
+        .and_then(|s| s.parse::<i64>().ok())
+    else {
+        return default;
+    };
+    T::try_from(value.max(min).min(max)).unwrap_or(default)
+}
+
+/// セクションから `threads` を読み、1以上・`max_threads()` 以下に収める
+///
+/// セクションが無い・キーが無い・整数として解釈できない場合は `default` を返す。
+/// 値域の外の値は近い端へ収める。
+pub fn read_threads(section: Option<&Properties>, default: NonZeroUsize) -> NonZeroUsize {
+    let threads = read_clamped(section, "threads", 0..=max_threads(), default.get());
+    NonZeroUsize::new(threads).unwrap_or(NonZeroUsize::MIN)
+}
+
+/// セクションからキーを読み、`0` を偽・`1` を真として解釈する
+///
+/// セクションが無い・キーが無い・`0` と `1` のどちらでもない場合は `default` を返す。
+pub fn read_flag(section: Option<&Properties>, key: &str, default: bool) -> bool {
+    match read(section, key, u32::from(default)) {
+        0 => false,
+        1 => true,
+        _ => default,
+    }
+}
+
+/// プラグイン設定のini永続化
+///
+/// `load_from` / `save_to` でフィールドの読み書きだけを実装すれば、
+/// ファイルパス解決・読み込み失敗時のフォールバックは既定実装が行う。
+///
+/// ```ignore
+/// impl IniConfig for Config {
+///     const FILE_NAME: &'static str = concat!(env!("CARGO_PKG_NAME"), ".ini");
+///
+///     fn load_from(section: Option<&ini::Properties>) -> Self { ... }
+///     fn save_to(&self, ini: &mut ini::Ini) { ... }
+/// }
+/// ```
+pub trait IniConfig: Default + Sized {
+    /// iniファイル名 (プラグイン側で `concat!(env!("CARGO_PKG_NAME"), ".ini")` を指定する)
+    const FILE_NAME: &'static str;
+    /// セクション名
+    const SECTION: &'static str = "Config";
+
+    /// セクションから設定を読み込む (ファイルやセクションが無い場合は `None` が渡される)
+    fn load_from(section: Option<&ini::Properties>) -> Self;
+
+    /// iniへ設定を書き込む (`ini.with_section(Some(Self::SECTION)).set(...)` を行う)
+    fn save_to(&self, ini: &mut Ini);
+
+    /// 設定ファイルのパスを取得する
+    fn config_path() -> Result<PathBuf, String> {
+        Ok(crate::module::dll_dir()?.join(Self::FILE_NAME))
+    }
+
+    /// 設定を読み込む (失敗時は `Self::default()`)
+    fn load() -> Self {
+        let config_path = match Self::config_path() {
+            Ok(path) => path,
+            Err(_) => return Self::default(),
+        };
+
+        if !config_path.exists() {
+            return Self::default();
+        }
+
+        let ini = match Ini::load_from_file(&config_path) {
+            Ok(ini) => ini,
+            Err(_) => return Self::default(),
+        };
+
+        Self::load_from(ini.section(Some(Self::SECTION)))
+    }
+
+    /// 設定を保存する
+    fn save(&self) -> Result<(), String> {
+        let config_path = Self::config_path()?;
+        let mut ini = Ini::new();
+        self.save_to(&mut ini);
+        ini.write_to_file(&config_path).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn properties(entries: &[(&str, &str)]) -> Properties {
+        let mut properties = Properties::new();
+        for (key, value) in entries {
+            properties.insert(*key, *value);
+        }
+        properties
+    }
+
+    #[test]
+    fn missing_section_falls_back_to_default() {
+        let value: u32 = read(None, "repeat", 5);
+        assert_eq!(value, 5);
+    }
+
+    #[test]
+    fn missing_key_falls_back_to_default() {
+        let properties = properties(&[("other", "1")]);
+        let value: u32 = read(Some(&properties), "repeat", 5);
+        assert_eq!(value, 5);
+    }
+
+    #[test]
+    fn unparseable_value_falls_back_to_default() {
+        let properties = properties(&[("repeat", "many")]);
+        let value: u32 = read(Some(&properties), "repeat", 5);
+        assert_eq!(value, 5);
+    }
+
+    #[test]
+    fn parseable_value_is_read() {
+        let properties = properties(&[("repeat", "3")]);
+        let value: u32 = read(Some(&properties), "repeat", 5);
+        assert_eq!(value, 3);
+    }
+
+    /// 値域の外の値は近い端へ収まる
+    ///
+    /// 目的の型に収まらない大きさでも、上限まで読めれば端へ落ちる。
+    #[test]
+    fn a_value_outside_the_range_is_clamped() {
+        for (written, clamped) in [("1000", 100u8), ("-1", 0), ("100", 100), ("0", 0)] {
+            let properties = properties(&[("quality", written)]);
+            assert_eq!(
+                read_clamped(Some(&properties), "quality", 0..=100, 75),
+                clamped,
+                "{written}"
+            );
+        }
+    }
+
+    /// 整数として読めない値は既定値へ落ちる
+    #[test]
+    fn a_value_that_is_not_a_whole_number_falls_back_to_default() {
+        for written in ["nan", "inf", "87.5", "high", ""] {
+            let properties = properties(&[("quality", written)]);
+            assert_eq!(
+                read_clamped(Some(&properties), "quality", 0..=100, 75),
+                75,
+                "{written}"
+            );
+        }
+        assert_eq!(read_clamped(None, "quality", 0..=100u8, 75), 75);
+        assert_eq!(
+            read_clamped(
+                Some(&properties(&[("other", "1")])),
+                "quality",
+                0..=100u8,
+                75
+            ),
+            75
+        );
+    }
+
+    /// 真偽値は0と1で読む
+    #[test]
+    fn a_flag_is_read_as_zero_or_one() {
+        assert!(read_flag(
+            Some(&properties(&[("lossless", "1")])),
+            "lossless",
+            false
+        ));
+        assert!(!read_flag(
+            Some(&properties(&[("lossless", "0")])),
+            "lossless",
+            true
+        ));
+    }
+
+    /// 0と1のどちらでもない真偽値は既定値へ落ちる
+    #[test]
+    fn an_unreadable_flag_falls_back_to_default() {
+        for value in ["true", "false", "2", "-1", ""] {
+            let properties = properties(&[("lossless", value)]);
+            assert!(read_flag(Some(&properties), "lossless", true), "{value}");
+            assert!(!read_flag(Some(&properties), "lossless", false), "{value}");
+        }
+        assert!(read_flag(None, "lossless", true));
+    }
+
+    /// 既定のスレッド数は上限の内側で控えめに採る
+    ///
+    /// 上限が1の機械では1つしか採れないので、そこだけ上限と一致する。
+    #[test]
+    fn default_threads_stay_inside_the_ceiling() {
+        let default = default_threads().get();
+        let ceiling = max_threads();
+
+        assert!(default <= ceiling, "{default} / {ceiling}");
+        if ceiling >= 2 {
+            assert!(
+                default < ceiling,
+                "上限をそのまま採っている: {default} / {ceiling}"
+            );
+        }
+    }
+}

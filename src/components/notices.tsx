@@ -3,14 +3,14 @@ import { Alert } from "./ui/alert";
 const notices = [
   {
     type: "warning" as const,
-    title: "処理時間について",
-    description:
-      "圧縮設定や動画サイズによっては処理時間が極端に長くなる場合があります",
+    title: "ファイルサイズについて",
+    description: "動画に比べてファイルサイズが大きくなる傾向があります",
   },
   {
     type: "warning" as const,
-    title: "ファイルサイズについて",
-    description: "動画に比べてファイルサイズが大きくなる傾向があります",
+    title: "パッケージの混在について",
+    description:
+      "全部入りと形式ごとのパッケージは同じプラグインファイルをインストールします。両方を入れた状態で片方をアンインストールすると、もう片方が使うファイルも削除されます。どちらか一方だけを入れてください",
   },
 ];
 
@@ -21,7 +21,7 @@ export function Notices() {
       <div className="space-y-4">
         {notices.map((notice, index) => (
           <Alert
-            // biome-ignore lint/suspicious/noArrayIndexKey: Using index as key for static content
+            // oxlint-disable-next-line react/no-array-index-key -- 静的な一覧なので添字を key にする
             key={index}
             type={notice.type}
             title={notice.title}

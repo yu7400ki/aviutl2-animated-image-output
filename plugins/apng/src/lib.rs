@@ -1,151 +1,272 @@
 mod config;
 mod dialog;
+#[cfg(test)]
+mod encode_tests;
 
-use aviutl::output2::{OutputInfo, OutputPluginTable};
+use apng_encoder::{ColorType, Config as EncoderConfig, Encoder};
+use aviutl2::{
+    ConfigDialog, FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo, register_logger,
+    register_output_plugin, write_or_discard,
+};
 use config::{ColorFormat, Config};
-use dialog::show_config_dialog;
-use png::{BitDepth, ColorType, Encoder};
-use std::ffi::c_void;
-use widestring::{U16CStr, Utf16Str, utf16str};
-use win32_dialog::MessageBox;
-use windows::{Win32::Foundation::*, core::*};
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::Path;
+use windows::Win32::Foundation::HWND;
 
-fn create_apng_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
-    let output_path = unsafe { U16CStr::from_ptr_str(info.savefile).to_string_lossy() };
-
-    let output_file =
-        std::fs::File::create(&output_path).map_err(|e| format!("ファイル作成エラー: {}", e))?;
-    let mut encoder = Encoder::new(output_file, info.w as u32, info.h as u32);
-
-    let color_type = if config.color_format == ColorFormat::Rgba32 {
-        ColorType::Rgba
-    } else {
-        ColorType::Rgb
-    };
-
-    encoder.set_color(color_type);
-    encoder.set_depth(BitDepth::Eight);
-    encoder.set_compression(config.compression_type.into());
-
-    if config.adaptive_filter {
-        encoder.set_adaptive_filter(png::AdaptiveFilterType::Adaptive);
-    } else {
-        encoder.set_filter(config.filter_type.into());
-        encoder.set_adaptive_filter(png::AdaptiveFilterType::NonAdaptive);
+/// プラグイン設定をエンコーダの設定へ対応付ける
+fn encoder_config(config: &Config) -> EncoderConfig {
+    EncoderConfig {
+        color_type: match config.color_format {
+            ColorFormat::Rgb24 => ColorType::Rgb8,
+            ColorFormat::Rgba32 => ColorType::Rgba8,
+        },
+        compression_level: config.compression_level,
+        num_plays: config.repeat,
     }
+}
 
-    // APNG設定
-    encoder
-        .set_animated(info.n as u32, config.repeat)
-        .map_err(|e| format!("APNG設定エラー: {}", e))?;
+/// 設定のとおりのエンコーダを `writer` へ組む
+///
+/// 起こすワーカー数は設定のスレッド数になる。
+fn new_encoder<W: Write>(
+    writer: W,
+    width: u32,
+    height: u32,
+    num_frames: u32,
+    config: &Config,
+) -> Result<Encoder<W>, apng_encoder::Error> {
+    Encoder::with_workers(
+        writer,
+        width,
+        height,
+        num_frames,
+        encoder_config(config),
+        config.threads,
+    )
+}
 
-    encoder
-        .set_frame_delay(info.scale as u16, info.rate as u16)
-        .map_err(|e| format!("フレームレート設定エラー: {}", e))?;
-
-    let mut writer = encoder
-        .write_header()
+/// `path` へ書き出し、`frames` が投入したフレームを閉じる
+///
+/// 途中で失敗したときは書きかけのファイルを残さない。
+fn write_frames<F>(
+    path: &Path,
+    width: u32,
+    height: u32,
+    num_frames: u32,
+    config: &Config,
+    frames: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&mut Encoder<BufWriter<File>>) -> Result<(), String>,
+{
+    write_or_discard(path, |output_file| {
+        let mut encoder = new_encoder(
+            BufWriter::new(output_file),
+            width,
+            height,
+            num_frames,
+            config,
+        )
         .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
 
-    for frame in 0..info.n {
-        if info.is_abort() {
-            return Err("処理が中断されました".into());
-        }
-        // カラーフォーマットに応じてフレームデータを取得
-        let frame_data = if config.color_format == ColorFormat::Rgba32 {
-            info.get_video_rgba(frame)
-        } else {
-            info.get_video_rgb(frame)
-        };
+        frames(&mut encoder)?;
 
-        if let Some(data) = frame_data {
-            // フレームデータを書き込み
-            writer
-                .write_image_data(&data)
-                .map_err(|e| format!("フレーム書き込みエラー: {}", e))?;
-        }
+        encoder
+            .finish()
+            .map_err(|e| format!("エンコーダー終了エラー: {}", e))?
+            .into_inner()
+            .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
 
-        info.rest_time_disp(frame, info.n);
-    }
-
-    writer
-        .finish()
-        .map_err(|e| format!("エンコーダー終了エラー: {}", e))?;
-    Ok(())
+        Ok(())
+    })
 }
 
-extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
-    unsafe {
-        let info = match oip.as_ref() {
-            Some(info) => info,
-            None => return false,
-        };
+struct ApngOutputPlugin;
 
-        // 設定を読み込み
-        let config = Config::load();
+impl OutputPlugin for ApngOutputPlugin {
+    type Config = Config;
 
-        let result = match create_apng_from_video(info, &config) {
-            Ok(_) => true,
-            Err(e) => {
-                let error_msg = format!("APNG出力エラー: {}", e);
-                MessageBox::error(Some(HWND::default()), &error_msg, "エラー");
-                false
+    const FORMAT_NAME: &'static str = "APNG";
+
+    const HAS_CONFIG_DIALOG: bool = true;
+
+    fn info() -> PluginInfo {
+        PluginInfo {
+            flags: PluginFlags::VIDEO,
+            name: "APNG出力プラグイン".into(),
+            file_filter: FileFilter::new()
+                .add("PNG Files (*.png)", "*.png")
+                .add("All Files (*)", "*"),
+            information: format!(
+                "APNG出力プラグイン v{} by yu7400ki",
+                env!("CARGO_PKG_VERSION")
+            ),
+        }
+    }
+
+    fn encode(info: &OutputInfo, config: &Config) -> Result<(), String> {
+        let delay = info.frame_delay()?;
+        let video = info.video()?;
+        let (width, height) = (video.width(), video.height());
+        let num_frames = info.num_frames()?;
+
+        write_frames(
+            &info.savefile(),
+            width,
+            height,
+            num_frames,
+            config,
+            |encoder| {
+                video
+                    .encode_frames(config.color_format, |frame_data| {
+                        encoder.add_frame(frame_data, delay)
+                    })
+                    .map_err(|e| e.to_string())
+            },
+        )
+    }
+
+    fn show_config_dialog(hwnd: HWND, config: Config) -> ConfigDialog<Config> {
+        aviutl2::dialog::show_config_dialog(hwnd, Self::FORMAT_NAME, dialog::Inputs::new(&config))
+    }
+}
+
+register_output_plugin!(ApngOutputPlugin);
+register_logger!();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apng_encoder::{Error as EncoderError, FrameDelay};
+    use aviutl2_host::temp_path;
+    use std::fs::File;
+    use std::num::NonZeroUsize;
+
+    /// 指定したバイト数までしか書き出せないファイル
+    ///
+    /// 受け付けた範囲は実ファイルへそのまま書き出し、超えた書き出しは
+    /// `std::io::Error::other` で失敗する。
+    struct FailingWriter {
+        file: File,
+        remaining: usize,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf.len() > self.remaining {
+                self.remaining = 0;
+                return Err(std::io::Error::other("書き出し失敗"));
             }
-        };
-
-        result
-    }
-}
-
-extern "C" fn config_func(hwnd: HWND, _dll_hinst: HINSTANCE) -> bool {
-    let default_config = Config::load();
-
-    if let Ok(result) = show_config_dialog(hwnd, default_config) {
-        match result {
-            Some(config) => {
-                // 設定を保存
-                if let Err(e) = config.save() {
-                    let error_msg = format!("設定保存エラー: {}", e);
-                    MessageBox::warning(Some(hwnd), &error_msg, "警告");
-                }
-                true
-            }
-            None => false,
+            self.remaining -= buf.len();
+            self.file.write_all(buf)?;
+            Ok(buf.len())
         }
-    } else {
-        MessageBox::error(Some(hwnd), "設定の取得に失敗しました。", "エラー");
-        false
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.file.flush()
+        }
     }
-}
 
-const PLUGIN_NAME: &Utf16Str = utf16str!("APNG出力プラグイン\0");
-const FILE_FILTER: &Utf16Str = utf16str!("PNG Files (*.png)\0*.png\0All Files (*)\0*\0\0");
-const PLUGIN_INFO: &Utf16Str = utf16str!(concat!(
-    "APNG出力プラグイン v",
-    env!("CARGO_PKG_VERSION"),
-    " by yu7400ki\0"
-));
+    /// Ioエラーで失敗した書き出しは、書きかけのファイルを残さない
+    ///
+    /// 先頭フレームは決定と書き出しの列を抜けるまで書き出されないため、
+    /// シグネチャ・IHDR・acTL・fcTLちょうどの長さで受け付けを止めると、先頭フレームが
+    /// 列を抜けたところで`add_frame`がそのIDATの書き出しでIoエラーを返す。失敗する
+    /// までに実ファイルへ書き出されたバイト数も確かめ、書きかけの状態を経ることを示す。
+    #[test]
+    fn an_io_failure_while_writing_a_frame_leaves_no_file() {
+        /// 先頭フレームの書き出しまで届くフレーム数
+        ///
+        /// 列を抜けるのに要る数より余裕を持たせている。ワーカー数は列の深さを決めるので
+        /// 1つに固定する。
+        const COUNT: u32 = 8;
+        // シグネチャ(8) + IHDR(25) + acTL(20) + fcTL(38)
+        const BUDGET: usize = 8 + 25 + 20 + 38;
 
-const fn init_plugin_table() -> OutputPluginTable {
-    OutputPluginTable {
-        flag: OutputPluginTable::FLAG_VIDEO,
-        name: PLUGIN_NAME.as_ptr(),
-        filefilter: FILE_FILTER.as_ptr(),
-        information: PLUGIN_INFO.as_ptr(),
-        func_output: Some(output_func),
-        func_config: Some(config_func),
-        func_get_config_text: None,
+        let path = temp_path("png");
+        let delay = FrameDelay::new(1, 30).unwrap();
+        let frame = vec![0u8; 8 * 8 * 4];
+
+        let result: Result<(), String> = write_or_discard(&path, |file| {
+            let probe = file.try_clone().map_err(|e| e.to_string())?;
+
+            let mut encoder = new_encoder(
+                FailingWriter {
+                    file,
+                    remaining: BUDGET,
+                },
+                8,
+                8,
+                COUNT,
+                &Config {
+                    color_format: ColorFormat::Rgba32,
+                    threads: NonZeroUsize::MIN,
+                    ..Config::default()
+                },
+            )
+            .map_err(|e| e.to_string())?;
+
+            let error = (0..COUNT)
+                .find_map(|_| encoder.add_frame(frame.clone(), delay).err())
+                .expect("バッファを使い切るのでIoエラーになる");
+            assert!(matches!(error, EncoderError::Io(_)), "{error}");
+
+            let written = probe.metadata().map_err(|e| e.to_string())?.len();
+            assert_eq!(written, BUDGET as u64, "失敗するまでに書き出したバイト数");
+
+            Err(error.to_string())
+        });
+
+        result.expect_err("書き出しが失敗するので残らない");
+        assert!(!path.exists(), "{}", path.display());
     }
-}
 
-const OUTPUT_PLUGIN_TABLE: OutputPluginTable = init_plugin_table();
+    #[test]
+    fn color_format_maps_to_the_matching_color_type() {
+        let rgb = encoder_config(&Config {
+            color_format: ColorFormat::Rgb24,
+            ..Config::default()
+        });
+        assert_eq!(rgb.color_type, ColorType::Rgb8);
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn DllMain(_hinst: HINSTANCE, _reason: u32, _reserved: *mut c_void) -> BOOL {
-    TRUE
-}
+        let rgba = encoder_config(&Config {
+            color_format: ColorFormat::Rgba32,
+            ..Config::default()
+        });
+        assert_eq!(rgba.color_type, ColorType::Rgba8);
+    }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn GetOutputPluginTable() -> *mut OutputPluginTable {
-    &OUTPUT_PLUGIN_TABLE as *const OutputPluginTable as *mut OutputPluginTable
+    /// 設定のスレッド数が、エンコーダの起こすワーカー数になる
+    #[test]
+    fn workers_are_passed_through_as_the_number_to_wake() {
+        for threads in [1, 3, 7] {
+            let threads = NonZeroUsize::new(threads).unwrap();
+
+            let encoder = new_encoder(
+                std::io::sink(),
+                8,
+                8,
+                4,
+                &Config {
+                    threads,
+                    ..Config::default()
+                },
+            )
+            .expect("寸法もフレーム数も値域の内側");
+
+            assert_eq!(encoder.workers(), threads, "起こしたワーカー数");
+        }
+    }
+
+    #[test]
+    fn repeat_and_compression_level_are_passed_through() {
+        let encoder_config = encoder_config(&Config {
+            repeat: 5,
+            compression_level: 3,
+            ..Config::default()
+        });
+        assert_eq!(encoder_config.num_plays, 5);
+        assert_eq!(encoder_config.compression_level, 3);
+    }
 }

@@ -1,0 +1,14 @@
+[package]
+name = "aviutl2_host"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "aviutl2_host"
+
+[dependencies]
+aviutl2 = { path = "../aviutl2" }
+widestring = { workspace = true }
+
+[dev-dependencies]
+windows = { workspace = true, features = ["Win32_Foundation"] }

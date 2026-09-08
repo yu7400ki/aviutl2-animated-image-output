@@ -1,146 +1,101 @@
 use crate::config::{ColorFormat, Config};
-use std::sync::{Arc, Mutex};
-use win32_dialog::widget::ComboBox;
-use win32_dialog::{
-    Dialog, MessageBox,
-    layout::{FlexLayout, JustifyContent, SizeValue},
-    widget::{Button, ButtonEvent, Label, Number},
+use aviutl2::dialog::{ConfigInputs, RangedInput, repeat_input};
+use win32_ui::{
+    layout::{FlexLayout, SizeValue, labeled},
+    widget::ComboBox,
 };
-use windows::Win32::Foundation::*;
 
-pub fn show_config_dialog(
-    parent_hwnd: HWND,
-    default_config: Config,
-) -> std::result::Result<Option<Config>, ()> {
-    let result = Arc::new(Mutex::new(None::<Config>));
+/// ダイアログの入力欄
+#[derive(Clone)]
+pub(crate) struct Inputs {
+    repeat: RangedInput,
+    color: ComboBox,
+}
 
-    // Create widgets
-    let repeat_label = Label::new("ループ回数 (0=無限ループ)");
-    let repeat_input = Number::new()
-        .value(default_config.repeat as i32)
-        .range(0, u16::MAX as i32);
+impl Inputs {
+    /// 既定の設定を初期値として入力欄を組む
+    pub(crate) fn new(default_config: &Config) -> Self {
+        Inputs {
+            repeat: repeat_input(Some(u32::from(u16::MAX)), u32::from(default_config.repeat)),
+            color: ComboBox::new(vec![
+                ColorFormat::Rgb24.label(),
+                ColorFormat::Rgba32.label(),
+            ])
+            .selected(match default_config.color_format {
+                ColorFormat::Rgb24 => 0,
+                ColorFormat::Rgba32 => 1,
+            }),
+        }
+    }
+}
 
-    let speed_label = Label::new("エンコード速度 (1-30)");
-    let speed_input = Number::new()
-        .value(default_config.speed as i32)
-        .range(1, 30);
+impl ConfigInputs for Inputs {
+    type Config = Config;
 
-    let color_label = Label::new("カラーフォーマット");
-    let color_options = vec![ColorFormat::Rgb24.into(), ColorFormat::Rgba32.into()];
-    let color_combobox = ComboBox::new(color_options).selected(match default_config.color_format {
-        ColorFormat::Rgb24 => 0,
-        ColorFormat::Rgba32 => 1,
-    });
+    fn layout(&self) -> FlexLayout {
+        FlexLayout::column()
+            .with_width(SizeValue::Points(300.0))
+            .with_padding(15.0)
+            .with_gap(10.0)
+            .with_layout(labeled(self.repeat.label(), self.repeat.input().clone()))
+            .with_layout(labeled("カラーフォーマット", self.color.clone()))
+    }
 
-    let mut dialog = Dialog::new("GIF出力設定");
+    fn collect(&self) -> Result<Config, String> {
+        let repeat = self.repeat.read()?;
 
-    let ok_button = Button::primary("OK").add_event_handler({
-        let result = Arc::clone(&result);
-        let repeat_input = repeat_input.clone();
-        let speed_input = speed_input.clone();
-        let color_combobox = color_combobox.clone();
-        let dialog = dialog.clone();
-        move |_: ButtonEvent| {
-            let repeat = match repeat_input.get_value::<u16>() {
-                Ok(value) => value,
-                Err(_) => {
-                    MessageBox::error(
-                        Some(parent_hwnd),
-                        "ループ回数の値が無効です。正しい数値を入力してください。",
-                        "エラー",
-                    );
-                    return;
-                }
-            };
-
-            let speed = match speed_input.get_value::<i32>() {
-                Ok(value) => value,
-                Err(_) => {
-                    MessageBox::error(
-                        Some(parent_hwnd),
-                        "エンコード速度の値が無効です。1-30の値を入力してください。",
-                        "エラー",
-                    );
-                    return;
-                }
-            };
-
-            let color_format = match color_combobox.get_selected_index() {
+        Ok(Config {
+            repeat: repeat as u16,
+            color_format: match self.color.selected_index() {
                 0 => ColorFormat::Rgb24,
                 1 => ColorFormat::Rgba32,
                 _ => Default::default(),
+            },
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inputs() -> Inputs {
+        Inputs::new(&Config::default())
+    }
+
+    /// ループ回数の欄は、GIFが持てる回数の外を文言付きで弾く
+    #[test]
+    fn the_repeat_field_refuses_values_outside_its_range() {
+        let inputs = inputs();
+        // 入力欄が実際に検める値域は、NETSCAPE拡張の欄が持てる回数そのもの
+        let (min, max) = inputs
+            .repeat
+            .input()
+            .range_bounds()
+            .expect("値域を持つ入力欄");
+        assert_eq!((min, max), (0, i32::from(u16::MAX)));
+
+        for value in [min - 1, max + 1] {
+            inputs.repeat.input().set_value(value);
+            let Err(refused) = inputs.collect() else {
+                panic!("{value}: 値域の外なので弾かれる");
             };
-
-            if let Ok(mut guard) = result.lock() {
-                *guard = Some(Config {
-                    repeat,
-                    color_format,
-                    speed,
-                });
-                dialog.close();
-            } else {
-                MessageBox::error(
-                    Some(parent_hwnd),
-                    "内部エラー: 設定の保存に失敗しました。",
-                    "エラー",
-                );
-            }
+            assert_eq!(
+                refused,
+                format!("ループ回数の値が無効です。{min}-{max}の値を入力してください。")
+            );
         }
-    });
 
-    let cancel_button = Button::secondary("キャンセル").add_event_handler({
-        let dialog = dialog.clone();
-        move |_| {
-            dialog.close();
-        }
-    });
+        inputs.repeat.input().set_value(max);
+        assert_eq!(inputs.collect().expect("上限そのもの").repeat, u16::MAX);
+    }
 
-    // Create layout with sections
-    let mut layout = FlexLayout::column()
-        .with_width(SizeValue::Points(300.0))
-        .with_padding(15.0)
-        .with_gap(10.0);
+    /// ループ回数の欄は、前後に空白のある入力を受け取る
+    #[test]
+    fn the_repeat_field_accepts_surrounding_whitespace() {
+        let inputs = inputs();
+        inputs.repeat.input().set_text(" 12 ");
 
-    // Basic Settings Section
-    layout = layout
-        .with_layout(
-            FlexLayout::column()
-                .with_gap(5.0)
-                .with_widget(repeat_label)
-                .with_widget(repeat_input),
-        )
-        .with_layout(
-            FlexLayout::column()
-                .with_gap(5.0)
-                .with_widget(speed_label)
-                .with_widget(speed_input),
-        );
-
-    // Color Format Section (only if RGBA feature is enabled)
-    layout = layout.with_layout(
-        FlexLayout::column()
-            .with_gap(5.0)
-            .with_widget(color_label)
-            .with_widget(color_combobox),
-    );
-
-    // Buttons Section
-    let buttons_section = FlexLayout::row()
-        .with_gap(10.0)
-        .with_padding_rect(0.0, 0.0, 5.0, 0.0)
-        .with_justify_content(JustifyContent::End)
-        .with_widget(ok_button)
-        .with_widget(cancel_button);
-
-    layout = layout.with_layout(buttons_section);
-
-    dialog = dialog.with_layout(layout);
-
-    match dialog.open(parent_hwnd) {
-        Ok(()) => match result.lock() {
-            Ok(guard) => Ok(guard.clone()),
-            Err(_) => Err(()),
-        },
-        Err(_) => Err(()),
+        assert_eq!(inputs.collect().expect("前後の空白").repeat, 12);
     }
 }

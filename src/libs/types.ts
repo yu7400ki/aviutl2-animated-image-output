@@ -1,11 +1,10 @@
+export const PLUGINS = ["png", "gif", "webp", "avif", "jxl"] as const;
+
+export type Plugin = (typeof PLUGINS)[number];
+
 export type Release = {
   version: string;
   date: string;
-  url: string;
-};
-
-export type Plugin = "png" | "gif" | "webp" | "avif";
-
-export type PluginRelease = {
-  [key in Plugin]?: Release;
+  bundle: string;
+  assets: Record<Plugin, string>;
 };

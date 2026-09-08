@@ -1,143 +1,471 @@
 mod config;
 mod dialog;
+#[cfg(test)]
+mod encode_tests;
 
-use aviutl::output2::{OutputInfo, OutputPluginTable};
-use gif::{Encoder, Frame, Repeat};
-use std::ffi::c_void;
-use std::fs::File;
-use widestring::{U16CStr, Utf16Str, utf16str};
-use win32_dialog::MessageBox;
-use windows::{Win32::Foundation::*, core::*};
-
+use aviutl2::{
+    ConfigDialog, FileFilter, OutputInfo, OutputPlugin, PluginFlags, PluginInfo,
+    logger::{self, Severity},
+    register_logger, register_output_plugin, write_or_discard,
+};
 use config::{ColorFormat, Config};
-use dialog::show_config_dialog;
+use gif_encoder::{ColorType, Config as EncoderConfig, Encoder, PaletteKind, Report};
+use std::fs::File;
+use std::io::BufWriter;
+use std::path::Path;
+use windows::Win32::Foundation::HWND;
 
-fn create_gif_from_video(info: &OutputInfo, config: &Config) -> std::result::Result<(), String> {
-    let output_path = unsafe { U16CStr::from_ptr_str(info.savefile).to_string_lossy() };
+/// プラグイン設定をエンコーダの設定へ対応付ける
+fn encoder_config(config: &Config) -> EncoderConfig {
+    EncoderConfig {
+        color_type: match config.color_format {
+            ColorFormat::Rgb24 => ColorType::Rgb8,
+            ColorFormat::Rgba32 => ColorType::Rgba8,
+        },
+        num_plays: config.repeat as u32,
+    }
+}
 
-    let output_file =
-        File::create(&output_path).map_err(|e| format!("ファイル作成エラー: {}", e))?;
-    let mut encoder = Encoder::new(output_file, info.w as u16, info.h as u16, &[])
+/// 3桁ごとに区切った延べ画素数と、全画素に対する割合
+///
+/// レポートの画素数はフレームをまたいだ延べ数なので、分母を添えないと
+/// 多いのか少ないのか読めない。
+fn pixel_share(pixels: u64, total_pixels: u64) -> String {
+    let digits = pixels.to_string();
+    let mut grouped = String::with_capacity(digits.len() * 4 / 3);
+    for (index, digit) in digits.char_indices() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+
+    if total_pixels == 0 {
+        return format!("{}画素", grouped);
+    }
+
+    let percent = pixels as f64 * 100.0 / total_pixels as f64;
+    if percent < 0.1 {
+        format!("{}画素、全体の0.1%未満", grouped)
+    } else {
+        format!("{}画素、全体の{:.1}%", grouped, percent)
+    }
+}
+
+/// カラーテーブルの据え方の説明。全フレームの色が載ったなら `None`
+fn palette_message(palette: PaletteKind) -> Option<String> {
+    match palette {
+        PaletteKind::Exact { .. } => None,
+        PaletteKind::Quantized { colors } => Some(format!("パレット: 減色しました ({}色)", colors)),
+    }
+}
+
+/// 透過を2値へ寄せたときに動いた画素の説明
+///
+/// 向きごとに失うものが違う。薄い側は見えていたものが消え、濃い側は
+/// 透けていたものが透けなくなる。
+fn binarization_messages(report: &Report, total_pixels: u64) -> Vec<(Severity, String)> {
+    let mut messages = Vec::new();
+
+    if report.binarized_to_transparent > 0 {
+        messages.push((
+            Severity::Info,
+            format!(
+                "透過: 完全な透過にしました ({})",
+                pixel_share(report.binarized_to_transparent, total_pixels)
+            ),
+        ));
+    }
+
+    if report.binarized_to_opaque > 0 {
+        messages.push((
+            Severity::Info,
+            format!(
+                "透過: 不透明にしました ({})",
+                pixel_share(report.binarized_to_opaque, total_pixels)
+            ),
+        ));
+    }
+
+    messages
+}
+
+/// 据えたカラーテーブルが素材の色を覆えなかったところの説明
+///
+/// 近似と代替は失うものが違う。近似は色がずれるだけだが、代替は写す先が
+/// 無かった画素で、素材の色が画面に残らない。
+fn color_messages(report: &Report, total_pixels: u64) -> Vec<(Severity, String)> {
+    let mut messages = Vec::new();
+
+    if report.approximated_pixels > 0 {
+        messages.push((
+            Severity::Info,
+            format!(
+                "色の再現: 近い色へ置き換えました ({})",
+                pixel_share(report.approximated_pixels, total_pixels)
+            ),
+        ));
+    }
+
+    if report.substituted_pixels > 0 {
+        messages.push((
+            Severity::Warn,
+            format!(
+                "色の再現: 表せない色を黒にしました ({})",
+                pixel_share(report.substituted_pixels, total_pixels)
+            ),
+        ));
+    }
+
+    messages
+}
+
+/// 出力の見え方が入力と変わったところを並べる
+///
+/// 何も起きなければ1行も出さない。可逆で不透明でレートに収まる書き出しは
+/// 報せるところが無く、無言になる。画素数の割合は、全フレームの延べ画素数を
+/// 分母にする。
+///
+/// 透過の2値化は色を決めるより前に起きるので、色の再現より先に出す。
+fn report_messages(
+    report: &Report,
+    width: u32,
+    height: u32,
+    num_frames: u32,
+) -> Vec<(Severity, String)> {
+    let total_pixels = u64::from(width) * u64::from(height) * u64::from(num_frames);
+    let mut messages: Vec<(Severity, String)> = palette_message(report.palette)
+        .map(|message| (Severity::Info, message))
+        .into_iter()
+        .collect();
+    messages.extend(binarization_messages(report, total_pixels));
+    messages.extend(color_messages(report, total_pixels));
+
+    if report.delay_clamped {
+        messages.push((
+            Severity::Warn,
+            "表示時間: 素材より遅く再生されます (2/100秒へ引き上げ)".into(),
+        ));
+    }
+
+    messages
+}
+
+/// `path` へ書き出し、`frames` が投入したフレームを閉じて、書き出しのレポートを返す
+///
+/// 途中で失敗したときは書きかけのファイルを残さない。
+fn write_frames<F>(
+    path: &Path,
+    width: u32,
+    height: u32,
+    num_frames: u32,
+    config: &Config,
+    frames: F,
+) -> Result<Report, String>
+where
+    F: FnOnce(&mut Encoder<BufWriter<File>>) -> Result<(), String>,
+{
+    write_or_discard(path, |output_file| {
+        let mut encoder = Encoder::new(
+            BufWriter::new(output_file),
+            width,
+            height,
+            num_frames,
+            encoder_config(config),
+        )
         .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
-    // 設定を取得
-    let repeat_setting = if config.repeat == 0 {
-        Repeat::Infinite
-    } else {
-        Repeat::Finite(config.repeat - 1)
-    };
 
-    encoder
-        .set_repeat(repeat_setting)
-        .map_err(|e| format!("ループ設定エラー: {}", e))?;
+        frames(&mut encoder)?;
 
-    for frame in 0..info.n {
-        if info.is_abort() {
-            return Err("処理が中断されました".into());
+        let (writer, report) = encoder
+            .finish()
+            .map_err(|e| format!("エンコーダー終了エラー: {}", e))?;
+
+        writer
+            .into_inner()
+            .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
+
+        Ok(report)
+    })
+}
+
+struct GifOutputPlugin;
+
+impl OutputPlugin for GifOutputPlugin {
+    type Config = Config;
+
+    const FORMAT_NAME: &'static str = "GIF";
+
+    const HAS_CONFIG_DIALOG: bool = true;
+
+    fn info() -> PluginInfo {
+        PluginInfo {
+            flags: PluginFlags::VIDEO,
+            name: "GIF出力プラグイン".into(),
+            file_filter: FileFilter::new()
+                .add("GIF Files (*.gif)", "*.gif")
+                .add("All Files (*)", "*"),
+            information: format!(
+                "GIF出力プラグイン v{} by yu7400ki",
+                env!("CARGO_PKG_VERSION")
+            ),
         }
+    }
 
-        let image_data = match config.color_format {
-            ColorFormat::Rgb24 => info.get_video_rgb(frame),
-            ColorFormat::Rgba32 => info.get_video_rgba(frame),
+    fn encode(info: &OutputInfo, config: &Config) -> Result<(), String> {
+        let delay = info.frame_delay()?;
+
+        let video = info.video()?;
+        let (width, height) = (video.width(), video.height());
+        let num_frames = info.num_frames()?;
+
+        let report = write_frames(
+            &info.savefile(),
+            width,
+            height,
+            num_frames,
+            config,
+            |encoder| {
+                video
+                    .encode_frames(config.color_format, |frame_data| {
+                        encoder.add_frame(frame_data, delay)
+                    })
+                    .map_err(|e| e.to_string())
+            },
+        )?;
+
+        logger::report(report_messages(&report, width, height, num_frames));
+        Ok(())
+    }
+
+    fn show_config_dialog(hwnd: HWND, config: Config) -> ConfigDialog<Config> {
+        aviutl2::dialog::show_config_dialog(hwnd, Self::FORMAT_NAME, dialog::Inputs::new(&config))
+    }
+}
+
+register_output_plugin!(GifOutputPlugin);
+register_logger!();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// テストで使う寸法と枚数。延べ画素数が割合の読みやすい丸い数になる
+    const WIDTH: u32 = 1000;
+    const HEIGHT: u32 = 1000;
+    const NUM_FRAMES: u32 = 1;
+
+    /// テストで使う延べ画素数
+    const TOTAL_PIXELS: u64 = WIDTH as u64 * HEIGHT as u64 * NUM_FRAMES as u64;
+
+    /// 何も起きなかったときのレポート
+    fn clean_report() -> Report {
+        Report {
+            palette: PaletteKind::Exact { colors: 128 },
+            local_tables: 0,
+            approximated_pixels: 0,
+            substituted_pixels: 0,
+            black_fallback: false,
+            binarized_to_transparent: 0,
+            binarized_to_opaque: 0,
+            delay_clamped: false,
+        }
+    }
+
+    fn messages(report: &Report) -> Vec<String> {
+        report_messages(report, WIDTH, HEIGHT, NUM_FRAMES)
+            .into_iter()
+            .map(|(_, message)| message)
+            .collect()
+    }
+
+    #[test]
+    fn color_format_maps_to_the_matching_color_type() {
+        let rgb = encoder_config(&Config {
+            color_format: ColorFormat::Rgb24,
+            ..Config::default()
+        });
+        assert_eq!(rgb.color_type, ColorType::Rgb8);
+
+        let rgba = encoder_config(&Config {
+            color_format: ColorFormat::Rgba32,
+            ..Config::default()
+        });
+        assert_eq!(rgba.color_type, ColorType::Rgba8);
+    }
+
+    #[test]
+    fn repeat_is_passed_through_as_the_number_of_plays() {
+        assert_eq!(
+            encoder_config(&Config {
+                repeat: 5,
+                ..Config::default()
+            })
+            .num_plays,
+            5
+        );
+        assert_eq!(
+            encoder_config(&Config {
+                repeat: 0,
+                ..Config::default()
+            })
+            .num_plays,
+            0
+        );
+    }
+
+    /// 延べ画素数には桁区切りと分母が付く
+    #[test]
+    fn a_pixel_count_carries_its_share_of_the_whole() {
+        assert_eq!(
+            pixel_share(1_234_567, 10_000_000),
+            "1,234,567画素、全体の12.3%"
+        );
+        assert_eq!(pixel_share(123, 1000), "123画素、全体の12.3%");
+        assert_eq!(pixel_share(1, 1_000_000), "1画素、全体の0.1%未満");
+        assert_eq!(pixel_share(4096, 0), "4,096画素");
+    }
+
+    /// 全フレームの色がそのまま載ったなら、パレットの説明は出ない
+    #[test]
+    fn a_palette_that_holds_every_color_is_not_reported() {
+        assert_eq!(palette_message(PaletteKind::Exact { colors: 198 }), None);
+    }
+
+    /// 減色したことは、色数を添えて出る
+    #[test]
+    fn a_quantized_palette_is_reported_with_its_color_count() {
+        let report = Report {
+            palette: PaletteKind::Quantized { colors: 64 },
+            ..clean_report()
         };
 
-        if let Some(image_data) = image_data {
-            let mut gif_frame = match config.color_format {
-                ColorFormat::Rgb24 => {
-                    Frame::from_rgb_speed(info.w as u16, info.h as u16, &image_data, config.speed)
-                }
-                ColorFormat::Rgba32 => Frame::from_rgba_speed(
-                    info.w as u16,
-                    info.h as u16,
-                    &mut image_data.clone(),
-                    config.speed,
-                ),
-            };
-
-            gif_frame.dispose = gif::DisposalMethod::Background;
-            let delay = (100.0 * info.scale as f64 / info.rate as f64).round() as u16;
-            gif_frame.delay = delay.max(1);
-
-            encoder
-                .write_frame(&gif_frame)
-                .map_err(|e| format!("フレーム書き込みエラー: {}", e))?;
-        }
-
-        info.rest_time_disp(frame, info.n);
+        assert_eq!(
+            report_messages(&report, WIDTH, HEIGHT, NUM_FRAMES),
+            vec![(Severity::Info, "パレット: 減色しました (64色)".into())]
+        );
     }
-    Ok(())
-}
 
-extern "C" fn config_func(hwnd: HWND, _dll_hinst: HINSTANCE) -> bool {
-    let default_config = Config::load();
-
-    if let Ok(result) = show_config_dialog(hwnd, default_config) {
-        match result {
-            Some(config) => {
-                // 設定を保存
-                if let Err(e) = config.save() {
-                    let error_msg = format!("設定保存エラー: {}", e);
-                    MessageBox::warning(Some(hwnd), &error_msg, "警告");
-                }
-                true
-            }
-            None => false,
-        }
-    } else {
-        MessageBox::error(Some(hwnd), "設定の取得に失敗しました。", "エラー");
-        false
-    }
-}
-
-extern "C" fn output_func(oip: *mut OutputInfo) -> bool {
-    unsafe {
-        let info = match oip.as_ref() {
-            Some(info) => info,
-            None => return false,
+    /// 近似した画素は、深刻さの無い1行になる
+    #[test]
+    fn approximated_pixels_are_reported_without_a_warning() {
+        let report = Report {
+            palette: PaletteKind::Quantized { colors: 256 },
+            approximated_pixels: 4096,
+            ..clean_report()
         };
 
-        let config = Config::load();
+        let colors = color_messages(&report, TOTAL_PIXELS);
+        assert_eq!(
+            colors,
+            vec![(
+                Severity::Info,
+                "色の再現: 近い色へ置き換えました (4,096画素、全体の0.4%)".into()
+            )]
+        );
+    }
 
-        let result = match create_gif_from_video(info, &config) {
-            Ok(_) => true,
-            Err(e) => {
-                let error_msg = format!("GIF出力エラー: {}", e);
-                MessageBox::error(None, &error_msg, "エラー");
-                false
-            }
+    /// 代替した画素は、近似と別の行で警告になる
+    ///
+    /// 近い色へ寄せたのではなく、写す先が無くて色を失っている。
+    #[test]
+    fn substituted_pixels_are_warned_apart_from_the_approximated_ones() {
+        let report = Report {
+            approximated_pixels: 4096,
+            substituted_pixels: 8192,
+            ..clean_report()
         };
 
-        result
+        let colors = color_messages(&report, TOTAL_PIXELS);
+        assert_eq!(colors.len(), 2);
+        assert_eq!(colors[0].0, Severity::Info);
+        assert_eq!(colors[1].0, Severity::Warn);
+        assert!(colors[1].1.contains("8,192画素"), "{colors:?}");
+        assert!(colors[1].1.contains("黒"), "{colors:?}");
+        assert!(!colors[1].1.contains("近い色"), "{colors:?}");
     }
-}
 
-const PLUGIN_NAME: &Utf16Str = utf16str!("GIF出力プラグイン\0");
-const FILE_FILTER: &Utf16Str = utf16str!("GIF Files (*.gif)\0*.gif\0All Files (*)\0*\0\0");
-const PLUGIN_INFO: &Utf16Str = utf16str!(concat!(
-    "GIF出力プラグイン v",
-    env!("CARGO_PKG_VERSION"),
-    " by yu7400ki\0"
-));
+    /// 写す先の黒を足しただけで、そこへ写した画素が無ければ何も出ない
+    #[test]
+    fn a_black_fallback_without_substituted_pixels_says_nothing() {
+        let report = Report {
+            black_fallback: true,
+            ..clean_report()
+        };
 
-const fn init_plugin_table() -> OutputPluginTable {
-    OutputPluginTable {
-        flag: OutputPluginTable::FLAG_VIDEO,
-        name: PLUGIN_NAME.as_ptr(),
-        filefilter: FILE_FILTER.as_ptr(),
-        information: PLUGIN_INFO.as_ptr(),
-        func_output: Some(output_func),
-        func_config: Some(config_func),
-        func_get_config_text: None,
+        assert!(color_messages(&report, TOTAL_PIXELS).is_empty());
     }
-}
 
-const OUTPUT_PLUGIN_TABLE: OutputPluginTable = init_plugin_table();
+    /// 2値化の向きごとに別の行が出る
+    #[test]
+    fn the_two_directions_of_binarization_are_reported_apart() {
+        let report = Report {
+            binarized_to_transparent: 4096,
+            binarized_to_opaque: 8192,
+            ..clean_report()
+        };
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn DllMain(_hinst: HINSTANCE, _reason: u32, _reserved: *mut c_void) -> BOOL {
-    TRUE
-}
+        let lines = binarization_messages(&report, TOTAL_PIXELS);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].1.contains("4,096画素"), "{lines:?}");
+        assert!(lines[0].1.contains("完全な透過"), "{lines:?}");
+        assert!(lines[1].1.contains("8,192画素"), "{lines:?}");
+        assert!(lines[1].1.contains("不透明"), "{lines:?}");
+    }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn GetOutputPluginTable() -> *mut OutputPluginTable {
-    &OUTPUT_PLUGIN_TABLE as *const OutputPluginTable as *mut OutputPluginTable
+    /// 2値化の説明は、それを前提にする色の再現より先に出る
+    #[test]
+    fn the_binarization_is_explained_before_the_colors() {
+        let report = Report {
+            binarized_to_transparent: 4096,
+            approximated_pixels: 4096,
+            ..clean_report()
+        };
+
+        let messages = messages(&report);
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].starts_with("透過:"), "{messages:?}");
+        assert!(messages[1].starts_with("色の再現:"), "{messages:?}");
+    }
+
+    /// 何も起きなければ1行も出さない
+    ///
+    /// 可逆で不透明でレートに収まる書き出しは、報せるところが無い。
+    #[test]
+    fn a_clean_run_says_nothing() {
+        assert!(report_messages(&clean_report(), WIDTH, HEIGHT, NUM_FRAMES).is_empty());
+    }
+
+    /// 遅延の切り上げは、再生が遅くなることまで書いた警告になる
+    #[test]
+    fn a_clamped_delay_warns_that_playback_slows_down() {
+        let report = Report {
+            delay_clamped: true,
+            ..clean_report()
+        };
+
+        let clamped = report_messages(&report, WIDTH, HEIGHT, NUM_FRAMES);
+        assert_eq!(clamped.len(), 1);
+        assert_eq!(clamped[0].0, Severity::Warn);
+        assert!(clamped[0].1.starts_with("表示時間:"), "{}", clamped[0].1);
+        assert!(
+            clamped[0].1.contains("遅く再生されます"),
+            "{}",
+            clamped[0].1
+        );
+    }
+
+    /// 出さないと決めた列はログに現れない
+    #[test]
+    fn the_internal_counters_stay_out_of_the_log() {
+        let report = Report {
+            local_tables: 41,
+            approximated_pixels: 4096,
+            ..clean_report()
+        };
+
+        for message in messages(&report) {
+            assert!(!message.contains("41"), "{message}");
+        }
+    }
 }

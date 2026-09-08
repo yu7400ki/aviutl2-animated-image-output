@@ -1,75 +1,16 @@
-use ini::Ini;
-use std::path::{Path, PathBuf};
+use avif_encoder::{QUALITY_RANGE, SPEED_RANGE};
+pub use aviutl2::ColorFormat;
+use aviutl2::ini::{Ini, Properties};
+use aviutl2::{IniConfig, MAX_REPEAT, default_threads, read, read_clamped, read_threads};
+use std::num::NonZeroUsize;
 use std::str::FromStr;
-use windows::Win32::Foundation::{HMODULE, MAX_PATH};
-use windows::Win32::System::LibraryLoader::{
-    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GetModuleFileNameW, GetModuleHandleExW,
-};
-use windows::core::PCWSTR;
 
-#[derive(Copy, Clone, PartialEq)]
-pub enum ColorFormat {
-    Rgb24,
-    Rgba32,
-}
-
-impl Default for ColorFormat {
-    fn default() -> Self {
-        ColorFormat::Rgb24
-    }
-}
-
-impl Into<&'static str> for ColorFormat {
-    fn into(self) -> &'static str {
-        match self {
-            ColorFormat::Rgb24 => "透過無し",
-            ColorFormat::Rgba32 => "透過付き",
-        }
-    }
-}
-
-impl FromStr for ColorFormat {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.parse::<u32>() {
-            Ok(0) => Ok(ColorFormat::Rgb24),
-            Ok(1) => Ok(ColorFormat::Rgba32),
-            _ => Err(()),
-        }
-    }
-}
-
-impl ColorFormat {
-    fn to_index(&self) -> u32 {
-        match self {
-            ColorFormat::Rgb24 => 0,
-            ColorFormat::Rgba32 => 1,
-        }
-    }
-}
-
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Default)]
 pub enum YuvFormat {
+    #[default]
     Yuv420,
     Yuv422,
     Yuv444,
-}
-
-impl Default for YuvFormat {
-    fn default() -> Self {
-        YuvFormat::Yuv420
-    }
-}
-
-impl Into<&'static str> for YuvFormat {
-    fn into(self) -> &'static str {
-        match self {
-            YuvFormat::Yuv420 => "YUV420",
-            YuvFormat::Yuv422 => "YUV422",
-            YuvFormat::Yuv444 => "YUV444",
-        }
-    }
 }
 
 impl FromStr for YuvFormat {
@@ -85,22 +26,31 @@ impl FromStr for YuvFormat {
     }
 }
 
-impl Into<rustavif::PixelFormat> for YuvFormat {
-    fn into(self) -> rustavif::PixelFormat {
-        match self {
-            YuvFormat::Yuv420 => rustavif::PixelFormat::Yuv420,
-            YuvFormat::Yuv422 => rustavif::PixelFormat::Yuv422,
-            YuvFormat::Yuv444 => rustavif::PixelFormat::Yuv444,
+impl From<YuvFormat> for avif_encoder::YuvFormat {
+    fn from(value: YuvFormat) -> Self {
+        match value {
+            YuvFormat::Yuv420 => avif_encoder::YuvFormat::Yuv420,
+            YuvFormat::Yuv422 => avif_encoder::YuvFormat::Yuv422,
+            YuvFormat::Yuv444 => avif_encoder::YuvFormat::Yuv444,
         }
     }
 }
 
 impl YuvFormat {
-    fn to_index(&self) -> u32 {
+    fn to_index(self) -> u32 {
         match self {
             YuvFormat::Yuv420 => 0,
             YuvFormat::Yuv422 => 1,
             YuvFormat::Yuv444 => 2,
+        }
+    }
+
+    /// 画面へ出す項目名
+    pub fn label(self) -> &'static str {
+        match self {
+            YuvFormat::Yuv420 => "YUV420",
+            YuvFormat::Yuv422 => "YUV422",
+            YuvFormat::Yuv444 => "YUV444",
         }
     }
 }
@@ -112,7 +62,7 @@ pub struct Config {
     pub speed: u8,
     pub color_format: ColorFormat,
     pub yuv_format: YuvFormat,
-    pub threads: usize,
+    pub threads: NonZeroUsize,
 }
 
 impl Default for Config {
@@ -120,93 +70,26 @@ impl Default for Config {
         Self {
             repeat: 0,
             quality: 75,
-            speed: 10,
+            speed: 6,
             color_format: ColorFormat::default(),
             yuv_format: YuvFormat::default(),
-            threads: std::thread::available_parallelism().map_or(1, |p| p.get()),
+            threads: default_threads(),
         }
     }
 }
 
-impl Config {
-    fn config_file_path() -> Result<PathBuf, String> {
-        let (buffer, len) = unsafe {
-            let mut hmodule: HMODULE = HMODULE::default();
-            GetModuleHandleExW(
-                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-                PCWSTR(Self::config_file_path as *const () as *const u16),
-                &mut hmodule as *mut HMODULE,
-            )
-            .map_err(|e| format!("GetModuleHandleExW failed: {}", e))?;
+impl IniConfig for Config {
+    const FILE_NAME: &'static str = concat!(env!("CARGO_PKG_NAME"), ".ini");
 
-            let mut buffer = [0u16; MAX_PATH as usize];
-            let len = GetModuleFileNameW(Some(hmodule), &mut buffer);
-
-            (buffer, len)
-        };
-
-        if len > 0 {
-            let dll_path = String::from_utf16_lossy(&buffer[..len as usize]);
-            let dll_path = PathBuf::from(&dll_path);
-            let dll_dir = dll_path
-                .parent()
-                .ok_or("プラグインのディレクトリが取得できません")?;
-            Ok(dll_dir.join(concat!(env!("CARGO_PKG_NAME"), ".ini")))
-        } else {
-            Err("GetModuleFileNameW failed".to_string())
-        }
-    }
-
-    pub fn load() -> Self {
+    fn load_from(section: Option<&Properties>) -> Self {
         let default = Self::default();
 
-        let config_path = match Self::config_file_path() {
-            Ok(path) => path,
-            Err(_) => return default,
-        };
-
-        if !Path::new(&config_path).exists() {
-            return default;
-        }
-
-        let ini = match Ini::load_from_file(&config_path) {
-            Ok(ini) => ini,
-            Err(_) => return default,
-        };
-
-        let section = ini.section(Some("Config"));
-
-        let repeat = section
-            .and_then(|s| s.get("repeat"))
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(default.repeat);
-
-        let quality = section
-            .and_then(|s| s.get("quality"))
-            .and_then(|s| s.parse::<u8>().ok())
-            .unwrap_or(default.quality)
-            .clamp(0, 100);
-
-        let speed = section
-            .and_then(|s| s.get("speed"))
-            .and_then(|s| s.parse::<u8>().ok())
-            .unwrap_or(default.speed)
-            .clamp(0, 10);
-
-        let color_format = section
-            .and_then(|s| s.get("color_format"))
-            .and_then(|s| s.parse::<ColorFormat>().ok())
-            .unwrap_or_default();
-
-        let yuv_format = section
-            .and_then(|s| s.get("yuv_format"))
-            .and_then(|s| s.parse::<YuvFormat>().ok())
-            .unwrap_or_default();
-
-        let threads = section
-            .and_then(|s| s.get("threads"))
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(default.threads);
+        let repeat = read_clamped(section, "repeat", 0..=MAX_REPEAT, default.repeat);
+        let quality = read_clamped(section, "quality", QUALITY_RANGE, default.quality);
+        let speed = read_clamped(section, "speed", SPEED_RANGE, default.speed);
+        let color_format = read(section, "color_format", default.color_format);
+        let yuv_format = read(section, "yuv_format", default.yuv_format);
+        let threads = read_threads(section, default.threads);
 
         Self {
             repeat,
@@ -218,18 +101,125 @@ impl Config {
         }
     }
 
-    pub fn save(&self) -> Result<(), String> {
-        let config_path = Self::config_file_path()?;
-        let mut ini = Ini::new();
-
-        ini.with_section(Some("Config"))
+    fn save_to(&self, ini: &mut Ini) {
+        ini.with_section(Some(Self::SECTION))
             .set("repeat", self.repeat.to_string())
             .set("quality", self.quality.to_string())
             .set("speed", self.speed.to_string())
             .set("color_format", self.color_format.to_index().to_string())
             .set("yuv_format", self.yuv_format.to_index().to_string())
             .set("threads", self.threads.to_string());
+    }
+}
 
-        ini.write_to_file(&config_path).map_err(|e| e.to_string())
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aviutl2::max_threads;
+
+    fn load(entries: &[(&str, &str)]) -> Config {
+        let mut ini = Ini::new();
+        let mut section = ini.with_section(Some(Config::SECTION));
+        for (key, value) in entries {
+            section.set(*key, *value);
+        }
+        Config::load_from(ini.section(Some(Config::SECTION)))
+    }
+
+    /// YUVフォーマットがiniへ書くインデックスは、そのまま読み戻せる
+    #[test]
+    fn the_yuv_index_written_to_the_ini_reads_back() {
+        for format in [YuvFormat::Yuv420, YuvFormat::Yuv422, YuvFormat::Yuv444] {
+            let written = format.to_index().to_string();
+            assert!(written.parse::<YuvFormat>() == Ok(format), "{written}");
+        }
+    }
+
+    /// 画面へ出す項目名は、iniの値と別のアルファベットを持つ
+    #[test]
+    fn the_yuv_label_is_not_an_ini_value() {
+        for format in [YuvFormat::Yuv420, YuvFormat::Yuv422, YuvFormat::Yuv444] {
+            let label = format.label();
+            assert!(label.parse::<YuvFormat>().is_err(), "{label}");
+        }
+    }
+
+    #[test]
+    fn missing_section_falls_back_to_default() {
+        let config = Config::load_from(None);
+        let default = Config::default();
+
+        assert_eq!(config.repeat, default.repeat);
+        assert_eq!(config.quality, default.quality);
+        assert_eq!(config.speed, default.speed);
+        assert!(config.color_format == default.color_format);
+        assert!(config.yuv_format == default.yuv_format);
+        assert_eq!(config.threads, default.threads);
+    }
+
+    #[test]
+    fn a_saved_config_loads_back_unchanged() {
+        let saved = Config {
+            repeat: 3,
+            quality: 90,
+            speed: 9,
+            color_format: ColorFormat::Rgba32,
+            yuv_format: YuvFormat::Yuv444,
+            // 既定は論理CPU数の半分なので、値域の上端を採る
+            threads: NonZeroUsize::new(max_threads()).unwrap(),
+        };
+
+        let mut ini = Ini::new();
+        saved.save_to(&mut ini);
+        let loaded = Config::load_from(ini.section(Some(Config::SECTION)));
+
+        assert_eq!(loaded.repeat, saved.repeat);
+        assert_eq!(loaded.quality, saved.quality);
+        assert_eq!(loaded.speed, saved.speed);
+        assert!(loaded.color_format == saved.color_format);
+        assert!(loaded.yuv_format == saved.yuv_format);
+        assert_eq!(loaded.threads, saved.threads);
+    }
+
+    /// 値域の外の品質と速度は、エンコーダが受け取れる範囲へ収まる
+    #[test]
+    fn out_of_range_quality_and_speed_are_clamped() {
+        let config = load(&[("quality", "1000"), ("speed", "99")]);
+
+        assert_eq!(config.quality, *QUALITY_RANGE.end());
+        assert_eq!(config.speed, *SPEED_RANGE.end());
+    }
+
+    /// 入力欄が扱えないループ回数は、扱える上限へ収まる
+    ///
+    /// i32へ折り返す値をそのまま持つと、ダイアログの初期値が負になる。
+    #[test]
+    fn out_of_range_num_plays_are_clamped() {
+        assert_eq!(load(&[("repeat", "3000000000")]).repeat, MAX_REPEAT);
+        assert_eq!(load(&[("repeat", "3")]).repeat, 3);
+    }
+
+    /// 値域の外のスレッド数は、ダイアログが扱える範囲へ収まる
+    ///
+    /// 下限を割ると並列化が効かず、上限を超えるとダイアログが開いたときに弾かれる。
+    #[test]
+    fn out_of_range_threads_are_clamped() {
+        assert_eq!(load(&[("threads", "0")]).threads.get(), 1);
+        assert_eq!(
+            load(&[("threads", &(max_threads() + 1).to_string())])
+                .threads
+                .get(),
+            max_threads()
+        );
+    }
+
+    /// 読めない値の項目だけが既定値へ落ちる
+    #[test]
+    fn an_unreadable_value_falls_back_on_its_own() {
+        let config = load(&[("repeat", "many"), ("speed", "3")]);
+        let default = Config::default();
+
+        assert_eq!(config.repeat, default.repeat);
+        assert_eq!(config.speed, 3);
     }
 }

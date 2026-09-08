@@ -1,150 +1,113 @@
-use ini::Ini;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
-use windows::Win32::Foundation::{HMODULE, MAX_PATH};
-use windows::Win32::System::LibraryLoader::{
-    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GetModuleFileNameW, GetModuleHandleExW,
-};
-use windows::core::PCWSTR;
+pub use aviutl2::ColorFormat;
+use aviutl2::ini::{Ini, Properties};
+use aviutl2::{IniConfig, read, read_clamped};
 
-#[derive(Copy, Clone, PartialEq)]
-pub enum ColorFormat {
-    Rgb24,
-    Rgba32,
-}
-
-impl Default for ColorFormat {
-    fn default() -> Self {
-        ColorFormat::Rgb24
-    }
-}
-
-impl Into<&'static str> for ColorFormat {
-    fn into(self) -> &'static str {
-        match self {
-            ColorFormat::Rgb24 => "透過無し",
-            ColorFormat::Rgba32 => "透過付き",
-        }
-    }
-}
-
-impl FromStr for ColorFormat {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.parse::<u32>() {
-            Ok(0) => Ok(ColorFormat::Rgb24),
-            Ok(1) => Ok(ColorFormat::Rgba32),
-            _ => Err(()),
-        }
-    }
-}
-
-impl ColorFormat {
-    fn to_index(&self) -> u32 {
-        match self {
-            ColorFormat::Rgb24 => 0,
-            ColorFormat::Rgba32 => 1,
-        }
-    }
-}
-
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Config {
     pub repeat: u16,
     pub color_format: ColorFormat,
-    pub speed: i32,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            repeat: 0,
-            color_format: ColorFormat::default(),
-            speed: 10,
-        }
-    }
-}
+impl IniConfig for Config {
+    const FILE_NAME: &'static str = concat!(env!("CARGO_PKG_NAME"), ".ini");
 
-impl Config {
-    fn config_file_path() -> Result<PathBuf, String> {
-        let (buffer, len) = unsafe {
-            let mut hmodule: HMODULE = HMODULE::default();
-            GetModuleHandleExW(
-                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-                PCWSTR(Self::config_file_path as *const () as *const u16),
-                &mut hmodule as *mut HMODULE,
-            )
-            .map_err(|e| format!("GetModuleHandleExW failed: {}", e))?;
-
-            let mut buffer = [0u16; MAX_PATH as usize];
-            let len = GetModuleFileNameW(Some(hmodule), &mut buffer);
-
-            (buffer, len)
-        };
-
-        if len > 0 {
-            let dll_path = String::from_utf16_lossy(&buffer[..len as usize]);
-            let dll_path = PathBuf::from(&dll_path);
-            let dll_dir = dll_path
-                .parent()
-                .ok_or("プラグインのディレクトリが取得できません")?;
-            Ok(dll_dir.join(concat!(env!("CARGO_PKG_NAME"), ".ini")))
-        } else {
-            Err("GetModuleFileNameW failed".to_string())
-        }
-    }
-
-    pub fn load() -> Self {
+    fn load_from(section: Option<&Properties>) -> Self {
         let default = Self::default();
 
-        let config_path = match Self::config_file_path() {
-            Ok(path) => path,
-            Err(_) => return default,
-        };
-
-        if !Path::new(&config_path).exists() {
-            return default;
-        }
-
-        let ini = match Ini::load_from_file(&config_path) {
-            Ok(ini) => ini,
-            Err(_) => return default,
-        };
-
-        let section = ini.section(Some("Config"));
-
-        let repeat = section
-            .and_then(|s| s.get("repeat"))
-            .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(default.repeat);
-
-        let color_format = section
-            .and_then(|s| s.get("color_format"))
-            .and_then(|s| s.parse::<ColorFormat>().ok())
-            .unwrap_or_default();
-
-        let speed = section
-            .and_then(|s| s.get("speed"))
-            .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(default.speed);
+        let repeat = read_clamped(section, "repeat", 0..=u16::MAX, default.repeat);
+        let color_format = read(section, "color_format", default.color_format);
 
         Self {
             repeat,
             color_format,
-            speed,
         }
     }
 
-    pub fn save(&self) -> Result<(), String> {
-        let config_path = Self::config_file_path()?;
-        let mut ini = Ini::new();
-
-        ini.with_section(Some("Config"))
+    fn save_to(&self, ini: &mut Ini) {
+        ini.with_section(Some(Self::SECTION))
             .set("repeat", self.repeat.to_string())
-            .set("color_format", self.color_format.to_index().to_string())
-            .set("speed", self.speed.to_string());
+            .set("color_format", self.color_format.to_index().to_string());
+    }
+}
 
-        ini.write_to_file(&config_path).map_err(|e| e.to_string())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load(entries: &[(&str, &str)]) -> Config {
+        let mut ini = Ini::new();
+        let mut section = ini.with_section(Some(Config::SECTION));
+        for (key, value) in entries {
+            section.set(*key, *value);
+        }
+        Config::load_from(ini.section(Some(Config::SECTION)))
+    }
+
+    #[test]
+    fn missing_section_falls_back_to_default() {
+        let default = Config::default();
+        assert_eq!(default.repeat, 0);
+        assert!(default.color_format == ColorFormat::Rgb24);
+
+        let config = Config::load_from(None);
+        assert_eq!(config.repeat, default.repeat);
+        assert!(config.color_format == default.color_format);
+    }
+
+    #[test]
+    fn a_saved_config_loads_back_unchanged() {
+        let saved = Config {
+            repeat: 3,
+            color_format: ColorFormat::Rgba32,
+        };
+
+        let mut ini = Ini::new();
+        saved.save_to(&mut ini);
+        let loaded = Config::load_from(ini.section(Some(Config::SECTION)));
+
+        assert_eq!(loaded.repeat, saved.repeat);
+        assert!(loaded.color_format == saved.color_format);
+    }
+
+    /// 書き出した設定ファイルにエンコード速度の項目は残らない
+    #[test]
+    fn a_saved_config_has_no_speed_key() {
+        let mut ini = Ini::new();
+        Config::default().save_to(&mut ini);
+
+        let section = ini.section(Some(Config::SECTION)).unwrap();
+        assert!(section.get("speed").is_none());
+        assert!(section.get("repeat").is_some());
+        assert!(section.get("color_format").is_some());
+    }
+
+    /// 以前のバージョンが書いたエンコード速度は、他の項目を妨げずに無視される
+    #[test]
+    fn a_leftover_speed_key_is_ignored() {
+        let config = load(&[("repeat", "5"), ("color_format", "1"), ("speed", "30")]);
+
+        assert_eq!(config.repeat, 5);
+        assert!(config.color_format == ColorFormat::Rgba32);
+    }
+
+    /// 読めないループ回数は既定値になる
+    #[test]
+    fn an_unreadable_repeat_falls_back_to_default() {
+        let default = Config::default().repeat;
+        for value in ["many", "1.5", ""] {
+            assert_eq!(load(&[("repeat", value)]).repeat, default);
+        }
+    }
+
+    /// NETSCAPE拡張が持てる回数の外のループ回数は、近い端へ収まる
+    ///
+    /// 既定は0で、GIFでは0が無限ループを指す。超過値をそこへ落とすと意味が反転する。
+    #[test]
+    fn out_of_range_repeat_is_clamped() {
+        assert_eq!(load(&[("repeat", "70000")]).repeat, u16::MAX);
+        assert_eq!(load(&[("repeat", "65536")]).repeat, u16::MAX);
+        assert_eq!(load(&[("repeat", "65535")]).repeat, u16::MAX);
+        assert_eq!(load(&[("repeat", "-1")]).repeat, 0);
+        assert_eq!(load(&[("repeat", "3")]).repeat, 3);
     }
 }

@@ -1,61 +1,23 @@
-use ini::Ini;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
-use windows::Win32::Foundation::{HMODULE, MAX_PATH};
-use windows::Win32::System::LibraryLoader::{
-    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GetModuleFileNameW, GetModuleHandleExW,
-};
-use windows::core::PCWSTR;
+pub use aviutl2::ColorFormat;
+use aviutl2::ini::{Ini, Properties};
+use aviutl2::{IniConfig, default_threads, read, read_clamped, read_flag, read_threads};
+use std::num::NonZeroUsize;
+use std::ops::RangeInclusive;
+use webp_encoder::{MAX_NUM_PLAYS, METHOD_RANGE, QUALITY_RANGE};
 
-#[derive(Copy, Clone, PartialEq)]
-pub enum ColorFormat {
-    Rgb24,
-    Rgba32,
-}
-
-impl Default for ColorFormat {
-    fn default() -> Self {
-        ColorFormat::Rgb24
-    }
-}
-
-impl Into<&'static str> for ColorFormat {
-    fn into(self) -> &'static str {
-        match self {
-            ColorFormat::Rgb24 => "透過無し",
-            ColorFormat::Rgba32 => "透過付き",
-        }
-    }
-}
-
-impl FromStr for ColorFormat {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.parse::<u32>() {
-            Ok(0) => Ok(ColorFormat::Rgb24),
-            Ok(1) => Ok(ColorFormat::Rgba32),
-            _ => Err(()),
-        }
-    }
-}
-
-impl ColorFormat {
-    fn to_index(&self) -> u32 {
-        match self {
-            ColorFormat::Rgb24 => 0,
-            ColorFormat::Rgba32 => 1,
-        }
-    }
+/// iniが採る品質の値域
+fn quality_range() -> RangeInclusive<u8> {
+    *QUALITY_RANGE.start() as u8..=*QUALITY_RANGE.end() as u8
 }
 
 #[derive(Clone)]
 pub struct Config {
-    pub repeat: i32,
+    pub repeat: u32,
     pub color_format: ColorFormat,
     pub lossless: bool,
-    pub quality: f32,
+    pub quality: u8,
     pub method: u8,
+    pub threads: NonZeroUsize,
 }
 
 impl Default for Config {
@@ -64,96 +26,25 @@ impl Default for Config {
             repeat: 0,
             color_format: ColorFormat::default(),
             lossless: false,
-            quality: 75.0,
+            quality: 75,
             method: 4,
+            threads: default_threads(),
         }
     }
 }
 
-impl Config {
-    pub const fn default() -> Self {
-        Self {
-            repeat: 0,
-            color_format: ColorFormat::Rgb24,
-            lossless: false,
-            quality: 75.0,
-            method: 4,
-        }
-    }
+impl IniConfig for Config {
+    const FILE_NAME: &'static str = concat!(env!("CARGO_PKG_NAME"), ".ini");
 
-    fn config_file_path() -> Result<PathBuf, String> {
-        let (buffer, len) = unsafe {
-            let mut hmodule: HMODULE = HMODULE::default();
-            GetModuleHandleExW(
-                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-                PCWSTR(Self::config_file_path as *const () as *const u16),
-                &mut hmodule as *mut HMODULE,
-            )
-            .map_err(|e| format!("GetModuleHandleExW failed: {}", e))?;
-
-            let mut buffer = [0u16; MAX_PATH as usize];
-            let len = GetModuleFileNameW(Some(hmodule), &mut buffer);
-
-            (buffer, len)
-        };
-
-        if len > 0 {
-            let dll_path = String::from_utf16_lossy(&buffer[..len as usize]);
-            let dll_path = PathBuf::from(&dll_path);
-            let dll_dir = dll_path
-                .parent()
-                .ok_or("プラグインのディレクトリが取得できません")?;
-            Ok(dll_dir.join(concat!(env!("CARGO_PKG_NAME"), ".ini")))
-        } else {
-            Err("GetModuleFileNameW failed".to_string())
-        }
-    }
-
-    pub fn load() -> Self {
+    fn load_from(section: Option<&Properties>) -> Self {
         let default = Self::default();
 
-        let config_path = match Self::config_file_path() {
-            Ok(path) => path,
-            Err(_) => return default,
-        };
-
-        if !Path::new(&config_path).exists() {
-            return default;
-        }
-
-        let ini = match Ini::load_from_file(&config_path) {
-            Ok(ini) => ini,
-            Err(_) => return default,
-        };
-
-        let section = ini.section(Some("Config"));
-
-        let repeat = section
-            .and_then(|s| s.get("repeat"))
-            .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(default.repeat);
-
-        let color_format = section
-            .and_then(|s| s.get("color_format"))
-            .and_then(|s| s.parse::<ColorFormat>().ok())
-            .unwrap_or_default();
-
-        let lossless = section
-            .and_then(|s| s.get("lossless"))
-            .and_then(|s| s.parse::<bool>().ok())
-            .unwrap_or(default.lossless);
-
-        let quality = section
-            .and_then(|s| s.get("quality"))
-            .and_then(|s| s.parse::<f32>().ok())
-            .unwrap_or(default.quality)
-            .clamp(0.0, 100.0);
-
-        let method = section
-            .and_then(|s| s.get("method"))
-            .and_then(|s| s.parse::<u8>().ok())
-            .unwrap_or(default.method)
-            .clamp(0, 6);
+        let repeat = read_clamped(section, "repeat", 0..=MAX_NUM_PLAYS, default.repeat);
+        let color_format = read(section, "color_format", default.color_format);
+        let lossless = read_flag(section, "lossless", default.lossless);
+        let quality = read_clamped(section, "quality", quality_range(), default.quality);
+        let method = read_clamped(section, "method", METHOD_RANGE, default.method);
+        let threads = read_threads(section, default.threads);
 
         Self {
             repeat,
@@ -161,20 +52,174 @@ impl Config {
             lossless,
             quality,
             method,
+            threads,
         }
     }
 
-    pub fn save(&self) -> Result<(), String> {
-        let config_path = Self::config_file_path()?;
-        let mut ini = Ini::new();
-
-        ini.with_section(Some("Config"))
+    fn save_to(&self, ini: &mut Ini) {
+        ini.with_section(Some(Self::SECTION))
             .set("repeat", self.repeat.to_string())
             .set("color_format", self.color_format.to_index().to_string())
-            .set("lossless", self.lossless.to_string())
+            .set("lossless", u32::from(self.lossless).to_string())
             .set("quality", self.quality.to_string())
-            .set("method", self.method.to_string());
+            .set("method", self.method.to_string())
+            .set("threads", self.threads.to_string());
+    }
+}
 
-        ini.write_to_file(&config_path).map_err(|e| e.to_string())
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aviutl2::max_threads;
+
+    fn load(entries: &[(&str, &str)]) -> Config {
+        let mut ini = Ini::new();
+        let mut section = ini.with_section(Some(Config::SECTION));
+        for (key, value) in entries {
+            section.set(*key, *value);
+        }
+        Config::load_from(ini.section(Some(Config::SECTION)))
+    }
+
+    #[test]
+    fn missing_section_falls_back_to_default() {
+        let config = Config::load_from(None);
+        let default = Config::default();
+
+        assert_eq!(config.repeat, default.repeat);
+        assert!(config.color_format == default.color_format);
+        assert_eq!(config.lossless, default.lossless);
+        assert_eq!(config.quality, default.quality);
+        assert_eq!(config.method, default.method);
+        assert_eq!(config.threads, default.threads);
+    }
+
+    #[test]
+    fn a_saved_config_loads_back_unchanged() {
+        let saved = Config {
+            repeat: 3,
+            color_format: ColorFormat::Rgba32,
+            lossless: true,
+            quality: 100,
+            method: 6,
+            threads: NonZeroUsize::new(max_threads()).unwrap(),
+        };
+
+        let mut ini = Ini::new();
+        saved.save_to(&mut ini);
+        let loaded = Config::load_from(ini.section(Some(Config::SECTION)));
+
+        assert_eq!(loaded.repeat, saved.repeat);
+        assert!(loaded.color_format == saved.color_format);
+        assert_eq!(loaded.lossless, saved.lossless);
+        assert_eq!(loaded.quality, saved.quality);
+        assert_eq!(loaded.method, saved.method);
+        assert_eq!(loaded.threads, saved.threads);
+    }
+
+    /// 設定ファイルの中身をそのまま読み、セクション名と項目名まで含めて確かめる
+    #[test]
+    fn a_config_file_written_before_still_loads() {
+        let text = "\
+[Config]
+repeat=5
+color_format=1
+lossless=1
+quality=90
+method=3
+";
+        let ini = Ini::load_from_str(text).unwrap();
+        let config = Config::load_from(ini.section(Some(Config::SECTION)));
+
+        assert_eq!(config.repeat, 5);
+        assert!(config.color_format == ColorFormat::Rgba32);
+        assert!(config.lossless);
+        assert_eq!(config.quality, 90);
+        assert_eq!(config.method, 3);
+    }
+
+    /// 可逆の指定は、iniでは0と1で表す
+    #[test]
+    fn the_lossless_flag_is_read_as_zero_or_one() {
+        assert!(load(&[("lossless", "1")]).lossless);
+        assert!(!load(&[("lossless", "0")]).lossless);
+    }
+
+    /// 0でも1でもない可逆の指定は既定値へ落ちる
+    #[test]
+    fn an_unreadable_lossless_flag_falls_back_to_default() {
+        let default = Config::default().lossless;
+        for value in ["true", "True", "yes", "2", "-1", ""] {
+            assert_eq!(load(&[("lossless", value)]).lossless, default, "{value}");
+        }
+    }
+
+    /// 書き出した可逆の指定は、他の項目と同じ0と1の表現になる
+    #[test]
+    fn the_lossless_flag_is_written_as_zero_or_one() {
+        for (lossless, written) in [(true, "1"), (false, "0")] {
+            let mut ini = Ini::new();
+            Config {
+                lossless,
+                ..Config::default()
+            }
+            .save_to(&mut ini);
+
+            let section = ini.section(Some(Config::SECTION)).unwrap();
+            assert_eq!(section.get("lossless"), Some(written));
+        }
+    }
+
+    /// 値域の外の品質とメソッドは、エンコーダが受け取れる範囲へ収まる
+    #[test]
+    fn out_of_range_quality_and_method_are_clamped() {
+        let over = load(&[("quality", "1000"), ("method", "99")]);
+        assert_eq!(over.quality, *QUALITY_RANGE.end() as u8);
+        assert_eq!(over.method, *METHOD_RANGE.end());
+
+        let under = load(&[("quality", "-1"), ("method", "-1")]);
+        assert_eq!(under.quality, *QUALITY_RANGE.start() as u8);
+        assert_eq!(under.method, *METHOD_RANGE.start());
+    }
+
+    /// 0から100の整数として読めない品質は既定値へ落ちる
+    ///
+    /// ダイアログは整数しか受け取らないので、iniもそこへ揃える。
+    #[test]
+    fn a_quality_the_ini_cannot_read_falls_back_to_default() {
+        let default = Config::default().quality;
+        for value in ["nan", "inf", "87.5", "-1.5"] {
+            assert_eq!(load(&[("quality", value)]).quality, default, "{value}");
+        }
+    }
+
+    /// ANIMのループ数欄に収まらないループ回数は、収まる上限へ丸められる
+    #[test]
+    fn out_of_range_num_plays_are_clamped() {
+        assert_eq!(load(&[("repeat", "3000000000")]).repeat, MAX_NUM_PLAYS);
+        assert_eq!(load(&[("repeat", "70000")]).repeat, MAX_NUM_PLAYS);
+        assert_eq!(load(&[("repeat", "-5")]).repeat, 0);
+        assert_eq!(load(&[("repeat", "3")]).repeat, 3);
+    }
+
+    /// 値域の外のスレッド数は、走らせる機械の並列度の内側へ収まる
+    ///
+    /// 別の機械で書いた ini をそのまま読んでも、この機械で意味のある数になる。
+    #[test]
+    fn out_of_range_threads_are_clamped() {
+        let over = (max_threads() + 1).to_string();
+
+        assert_eq!(load(&[("threads", "0")]).threads.get(), 1);
+        assert_eq!(load(&[("threads", &over)]).threads.get(), max_threads());
+    }
+
+    /// 読めない値の項目だけが既定値へ落ちる
+    #[test]
+    fn an_unreadable_value_falls_back_on_its_own() {
+        let config = load(&[("repeat", "many"), ("lossless", "1")]);
+        let default = Config::default();
+
+        assert_eq!(config.repeat, default.repeat);
+        assert!(config.lossless);
     }
 }

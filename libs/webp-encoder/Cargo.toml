@@ -1,0 +1,11 @@
+[package]
+name = "webp_encoder"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anim_core = { path = "../anim-core" }
+webp-sys = { path = "../webp-sys" }
+
+[dev-dependencies]
+image-webp = "0.2"
