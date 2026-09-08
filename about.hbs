@@ -1,15 +1,6 @@
-{{#each overview}}
-{{{name}}} ({{{id}}}) - {{count}} クレート
-{{/each}}
-
 {{#each licenses}}
 --------------------------------------------------------------------------------
-{{{name}}} ({{{id}}})
-
-対象:
-{{#each used_by}}
-  - {{{crate.name}}} {{{crate.version}}}
-{{/each}}
+{{#each used_by}}{{{crate.name}}} {{{crate.version}}}{{#unless @last}}, {{/unless}}{{/each}}
 
 {{{text}}}
 

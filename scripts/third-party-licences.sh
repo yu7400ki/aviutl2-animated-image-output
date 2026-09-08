@@ -47,33 +47,21 @@ tmp="$out.tmp"
 rust="$out_dir/rust.tmp"
 trap 'rm -f "$tmp" "$rust"' EXIT
 
-rule="$(printf '=%.0s' {1..80})"
-thin="$(printf -- '-%.0s' {1..80})"
+sep="$(printf -- '-%.0s' {1..80})"
 
 cargo about generate --workspace --locked -o "$rust" about.hbs
 
 {
-    echo "AviUtl2 アニメーション画像出力 第三者ライセンス集"
-    echo
-    echo "$rule"
-    echo "1. Rust クレート"
-    echo "$rule"
-    echo
     cat "$rust"
-    echo
-    echo "$rule"
-    echo "2. C ライブラリと AviUtl2 SDK"
-    echo "$rule"
     for entry in "${vendored[@]}"; do
         path="${entry#*|}"
-        echo
-        echo "$thin"
+        echo "$sep"
         echo "${entry%%|*} - $(basename "$path")"
-        echo "$thin"
         echo
         cat "$path"
+        echo
     done
-} | tr -d '\r' >"$tmp"
+} | tr -d '\015' | cat -s >"$tmp"
 
 mv "$tmp" "$out"
 echo "$root/$out"
