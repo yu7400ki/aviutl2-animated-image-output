@@ -10,7 +10,9 @@ use aviutl2::{
 };
 use config::{ColorFormat, Config};
 use gif_encoder::{ColorType, Config as EncoderConfig, Encoder, PaletteKind, Report};
+use std::fs::File;
 use std::io::BufWriter;
+use std::path::Path;
 use windows::Win32::Foundation::HWND;
 
 /// プラグイン設定をエンコーダの設定へ対応付ける
@@ -121,10 +123,17 @@ fn color_messages(report: &Report, total_pixels: u64) -> Vec<(Severity, String)>
 /// 出力の見え方が入力と変わったところを並べる
 ///
 /// 何も起きなければ1行も出さない。可逆で不透明でレートに収まる書き出しは
-/// 報せるところが無く、無言になる。
+/// 報せるところが無く、無言になる。画素数の割合は、全フレームの延べ画素数を
+/// 分母にする。
 ///
 /// 透過の2値化は色を決めるより前に起きるので、色の再現より先に出す。
-fn report_messages(report: &Report, total_pixels: u64) -> Vec<(Severity, String)> {
+fn report_messages(
+    report: &Report,
+    width: u32,
+    height: u32,
+    num_frames: u32,
+) -> Vec<(Severity, String)> {
+    let total_pixels = u64::from(width) * u64::from(height) * u64::from(num_frames);
     let mut messages: Vec<(Severity, String)> = palette_message(report.palette)
         .map(|message| (Severity::Info, message))
         .into_iter()
@@ -140,6 +149,44 @@ fn report_messages(report: &Report, total_pixels: u64) -> Vec<(Severity, String)
     }
 
     messages
+}
+
+/// `path` へ書き出し、`frames` が投入したフレームを閉じて、書き出しのレポートを返す
+///
+/// 途中で失敗したときは書きかけのファイルを残さない。
+fn write_frames<F>(
+    path: &Path,
+    width: u32,
+    height: u32,
+    num_frames: u32,
+    config: &Config,
+    frames: F,
+) -> Result<Report, String>
+where
+    F: FnOnce(&mut Encoder<BufWriter<File>>) -> Result<(), String>,
+{
+    write_or_discard(path, |output_file| {
+        let mut encoder = Encoder::new(
+            BufWriter::new(output_file),
+            width,
+            height,
+            num_frames,
+            encoder_config(config),
+        )
+        .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
+
+        frames(&mut encoder)?;
+
+        let (writer, report) = encoder
+            .finish()
+            .map_err(|e| format!("エンコーダー終了エラー: {}", e))?;
+
+        writer
+            .into_inner()
+            .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
+
+        Ok(report)
+    })
 }
 
 struct GifOutputPlugin;
@@ -171,35 +218,24 @@ impl OutputPlugin for GifOutputPlugin {
         let video = info.video()?;
         let (width, height) = (video.width(), video.height());
         let num_frames = info.num_frames()?;
-        let total_pixels = u64::from(width) * u64::from(height) * u64::from(num_frames);
 
-        write_or_discard(&info.savefile(), |output_file| {
-            let mut encoder = Encoder::new(
-                BufWriter::new(output_file),
-                width,
-                height,
-                num_frames,
-                encoder_config(config),
-            )
-            .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
+        let report = write_frames(
+            &info.savefile(),
+            width,
+            height,
+            num_frames,
+            config,
+            |encoder| {
+                video
+                    .encode_frames(config.color_format, |frame_data| {
+                        encoder.add_frame(frame_data, delay)
+                    })
+                    .map_err(|e| e.to_string())
+            },
+        )?;
 
-            video
-                .encode_frames(config.color_format, |frame_data| {
-                    encoder.add_frame(frame_data, delay)
-                })
-                .map_err(|e| e.to_string())?;
-
-            let (writer, report) = encoder
-                .finish()
-                .map_err(|e| format!("エンコーダー終了エラー: {}", e))?;
-
-            writer
-                .into_inner()
-                .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
-
-            logger::report(report_messages(&report, total_pixels));
-            Ok(())
-        })
+        logger::report(report_messages(&report, width, height, num_frames));
+        Ok(())
     }
 
     fn show_config_dialog(hwnd: HWND, config: Config) -> ConfigDialog<Config> {
@@ -214,8 +250,13 @@ register_logger!();
 mod tests {
     use super::*;
 
-    /// テストで使う延べ画素数 (割合が読みやすい丸い数)
-    const TOTAL_PIXELS: u64 = 1_000_000;
+    /// テストで使う寸法と枚数。延べ画素数が割合の読みやすい丸い数になる
+    const WIDTH: u32 = 1000;
+    const HEIGHT: u32 = 1000;
+    const NUM_FRAMES: u32 = 1;
+
+    /// テストで使う延べ画素数
+    const TOTAL_PIXELS: u64 = WIDTH as u64 * HEIGHT as u64 * NUM_FRAMES as u64;
 
     /// 何も起きなかったときのレポート
     fn clean_report() -> Report {
@@ -232,7 +273,7 @@ mod tests {
     }
 
     fn messages(report: &Report) -> Vec<String> {
-        report_messages(report, TOTAL_PIXELS)
+        report_messages(report, WIDTH, HEIGHT, NUM_FRAMES)
             .into_iter()
             .map(|(_, message)| message)
             .collect()
@@ -300,7 +341,7 @@ mod tests {
         };
 
         assert_eq!(
-            report_messages(&report, TOTAL_PIXELS),
+            report_messages(&report, WIDTH, HEIGHT, NUM_FRAMES),
             vec![(Severity::Info, "パレット: 減色しました (64色)".into())]
         );
     }
@@ -392,7 +433,7 @@ mod tests {
     /// 可逆で不透明でレートに収まる書き出しは、報せるところが無い。
     #[test]
     fn a_clean_run_says_nothing() {
-        assert!(report_messages(&clean_report(), TOTAL_PIXELS).is_empty());
+        assert!(report_messages(&clean_report(), WIDTH, HEIGHT, NUM_FRAMES).is_empty());
     }
 
     /// 遅延の切り上げは、再生が遅くなることまで書いた警告になる
@@ -403,7 +444,7 @@ mod tests {
             ..clean_report()
         };
 
-        let clamped = report_messages(&report, TOTAL_PIXELS);
+        let clamped = report_messages(&report, WIDTH, HEIGHT, NUM_FRAMES);
         assert_eq!(clamped.len(), 1);
         assert_eq!(clamped[0].0, Severity::Warn);
         assert!(clamped[0].1.starts_with("表示時間:"), "{}", clamped[0].1);
