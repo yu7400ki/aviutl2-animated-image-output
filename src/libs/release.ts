@@ -30,7 +30,7 @@ const DEFAULT_CONFIG: Config = {
   repo: "aviutl2-animated-image-output",
 };
 
-const octokit = new Octokit();
+const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
 
 export function getConfig(): Config {
   const owner = process.env.GITHUB_REPOSITORY_OWNER ?? DEFAULT_CONFIG.owner;
