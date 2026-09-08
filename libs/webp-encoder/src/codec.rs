@@ -192,8 +192,8 @@ fn substitute(cropped: &mut [u8], base: &[u8], rect: Rect, stride: usize) {
     let head = rect.y as usize * stride + rect.x as usize * PIXEL;
     for (y, row) in cropped.chunks_exact_mut(row_len).enumerate() {
         let at = head + y * stride;
-        let base = base[at..at + row_len].chunks_exact(PIXEL);
-        for (pixel, base) in row.chunks_exact_mut(PIXEL).zip(base) {
+        let base = base[at..at + row_len].as_chunks::<PIXEL>().0;
+        for (pixel, base) in row.as_chunks_mut::<PIXEL>().0.iter_mut().zip(base) {
             if pixel == base {
                 pixel.fill(0);
             }
@@ -380,7 +380,7 @@ mod tests {
         let layout = Layout::new(width, height, color_type).unwrap();
         let mut data = noise(layout.frame_len, 0x5EED);
         if color_type == ColorType::Rgba8 {
-            for pixel in data.chunks_exact_mut(4) {
+            for pixel in data.as_chunks_mut::<4>().0 {
                 pixel[3] = alpha;
             }
         }
@@ -420,7 +420,7 @@ mod tests {
     fn a_lossy_frame_with_alpha_comes_back_as_an_alpha_and_a_vp8_chunk() {
         let layout = Layout::new(24, 18, ColorType::Rgba8).unwrap();
         let mut data = noise(layout.frame_len, 0x5EED);
-        for (index, pixel) in data.chunks_exact_mut(4).enumerate() {
+        for (index, pixel) in data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             if index % 5 == 0 {
                 pixel.fill(0);
             }
@@ -581,7 +581,9 @@ mod tests {
             buffer
         } else {
             buffer
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 0xFF])
                 .collect()
         }

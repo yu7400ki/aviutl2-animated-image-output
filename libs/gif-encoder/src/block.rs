@@ -219,7 +219,11 @@ mod tests {
         let table = &bytes[GLOBAL_TABLE_OFFSET as usize..];
         assert_eq!(table.len(), 768);
         assert!(
-            table.chunks_exact(3).all(|entry| entry == MAGENTA),
+            table
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .all(|entry| *entry == MAGENTA),
             "確保しただけのエントリがマゼンタでない"
         );
     }

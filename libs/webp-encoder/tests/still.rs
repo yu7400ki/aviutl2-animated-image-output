@@ -21,7 +21,7 @@ fn noise(len: usize, seed: u32) -> Vec<u8> {
 /// 完全透過の画素を `0x00000000` へ潰したRGBA
 fn normalized_rgba(width: u32, height: u32, seed: u32) -> Vec<u8> {
     let mut rgba = noise((width * height * 4) as usize, seed);
-    for (index, pixel) in rgba.chunks_exact_mut(4).enumerate() {
+    for (index, pixel) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         pixel[3] = if index % 5 == 0 { 0 } else { 255 };
         if pixel[3] == 0 {
             pixel.fill(0);
@@ -45,7 +45,9 @@ fn gradient_rgb(width: u32, height: u32) -> Vec<u8> {
 
 /// RGBをα = 255 のRGBAへ広げる
 fn opaque_rgba(rgb: &[u8]) -> Vec<u8> {
-    rgb.chunks_exact(3)
+    rgb.as_chunks::<3>()
+        .0
+        .iter()
         .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
         .collect()
 }
@@ -146,7 +148,9 @@ fn a_lossless_still_collapses_the_color_under_transparent_pixels() {
     let (bytes, _) = encode(width, height, &rgba, config(ColorType::Rgba8, true)).unwrap();
 
     let expected: Vec<u8> = rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|pixel| {
             if pixel[3] == 0 {
                 [0, 0, 0, 0]

@@ -91,7 +91,9 @@ mod tests {
         append_pixels(&pixels, 4, 3, &mut out);
 
         let expected: Vec<u8> = pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|p| p[..3].to_vec())
             .collect();
         assert_eq!(out, expected);

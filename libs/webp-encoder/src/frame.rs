@@ -64,8 +64,10 @@ impl Sheets<'_> {
         (0..rect.height as usize).all(|y| {
             let at = head + y * self.stride;
             self.staged[at..at + row_len]
-                .chunks_exact(PIXEL)
-                .zip(base[at..at + row_len].chunks_exact(PIXEL))
+                .as_chunks::<PIXEL>()
+                .0
+                .iter()
+                .zip(base[at..at + row_len].as_chunks::<PIXEL>().0)
                 .all(|(staged, base)| staged[3] == OPAQUE || mixes(staged, base))
         })
     }
@@ -212,7 +214,7 @@ impl Canvas {
     pub(crate) fn expand(&mut self, data: &[u8]) {
         self.staged.clear();
         self.staged.reserve(data.len() / 3 * PIXEL);
-        for pixel in data.chunks_exact(3) {
+        for pixel in data.as_chunks::<3>().0 {
             self.staged
                 .extend_from_slice(&[pixel[0], pixel[1], pixel[2], OPAQUE]);
         }
@@ -704,7 +706,9 @@ mod tests {
         canvas.expand(&data);
 
         let expected: Vec<u8> = data
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 0xFF])
             .collect();
         assert_eq!(canvas.staged(), expected);

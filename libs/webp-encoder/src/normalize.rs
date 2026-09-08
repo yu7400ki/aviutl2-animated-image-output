@@ -5,7 +5,7 @@
 /// α = 0 の画素を `0x00000000` へ潰す。半透明 (0 < α < 255) は触らない。
 /// `pixels` は1画素4バイトが隙間なく並んでいること。
 pub(crate) fn normalize(pixels: &mut [u8]) {
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         if pixel[3] == 0 {
             pixel.fill(0);
         }

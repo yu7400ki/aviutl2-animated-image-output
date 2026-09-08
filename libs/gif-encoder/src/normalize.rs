@@ -43,7 +43,7 @@ pub(crate) fn pack(pixel: &[u8], bpp: usize) -> u32 {
 /// `pixels` は1画素4バイトが隙間なく並んでいること。
 pub(crate) fn binarize(pixels: &mut [u8]) -> Binarized {
     let mut changed = Binarized::default();
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         let alpha = pixel[3];
         if alpha < ALPHA_THRESHOLD {
             changed.to_transparent += u64::from(alpha != 0);

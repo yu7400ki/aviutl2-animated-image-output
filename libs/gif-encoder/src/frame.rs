@@ -1209,8 +1209,10 @@ mod tests {
             .map(|&at| {
                 palette
                     .global_bytes()
-                    .chunks_exact(3)
-                    .position(|color| color == [at, 0x20, 0x10])
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .position(|color| *color == [at, 0x20, 0x10])
                     .unwrap() as u8
             })
             .collect();

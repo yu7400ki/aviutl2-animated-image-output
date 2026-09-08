@@ -518,7 +518,10 @@ mod tests {
     fn draw(frame: &mut [u8], width: u32, at: (u32, u32)) {
         for y in at.1..at.1 + SQUARE {
             let head = (y * width + at.0) as usize * 4;
-            for pixel in frame[head..head + SQUARE as usize * 4].chunks_exact_mut(4) {
+            for pixel in frame[head..head + SQUARE as usize * 4]
+                .as_chunks_mut::<4>()
+                .0
+            {
                 pixel.copy_from_slice(&SQUARE_COLOR);
             }
         }
@@ -532,7 +535,7 @@ mod tests {
     /// 透過置換の経路も通る。
     fn skewed_frames(width: u32, height: u32, count: usize) -> Vec<Vec<u8>> {
         let mut base = noise((width * height * 4) as usize, 0x5EED);
-        for pixel in base.chunks_exact_mut(4) {
+        for pixel in base.as_chunks_mut::<4>().0 {
             pixel[3] = 0xFF;
         }
 

@@ -192,7 +192,9 @@ fn a_frame_comes_back_in_the_format_the_caller_asked_for() {
     assert_eq!(rgb, host.rgb(1));
     assert_eq!(
         rgb,
-        rgba.chunks_exact(4)
+        rgba.as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|pixel| &pixel[..3])
             .copied()
             .collect::<Vec<u8>>()

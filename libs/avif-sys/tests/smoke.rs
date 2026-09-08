@@ -28,7 +28,9 @@ fn gradient_rgb(width: u32, height: u32, phase: u32) -> Vec<u8> {
 /// `gradient_rgb` に、左から右へ薄れる α を足したもの
 fn gradient_rgba(width: u32, height: u32, phase: u32) -> Vec<u8> {
     gradient_rgb(width, height, phase)
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .enumerate()
         .flat_map(|(index, pixel)| {
             let x = (index as u32) % width;

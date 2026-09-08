@@ -57,7 +57,9 @@ pub fn gradient_rgb(phase: u32) -> Vec<u8> {
 /// `gradient_rgb` に、左から右へ薄れるαを足したもの
 pub fn gradient_rgba(phase: u32) -> Vec<u8> {
     gradient_rgb(phase)
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .enumerate()
         .flat_map(|(index, pixel)| {
             let x = (index as u32) % WIDTH;
@@ -268,12 +270,18 @@ pub fn decode(encoded: &[u8], color_type: ColorType) -> Decoded {
 
 /// インターリーブされた画素からαだけを取り出す
 pub fn alpha_channel(rgba: &[u8]) -> Vec<u8> {
-    rgba.chunks_exact(4).map(|pixel| pixel[3]).collect()
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|pixel| pixel[3])
+        .collect()
 }
 
 /// インターリーブされた画素から色だけを取り出す
 pub fn color_channels(rgba: &[u8]) -> Vec<u8> {
-    rgba.chunks_exact(4)
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
         .collect()
 }
@@ -552,7 +560,7 @@ pub fn lossy(color_type: ColorType, quality: f32) -> Config {
 pub fn flat(color_type: ColorType, value: u8) -> Vec<u8> {
     let mut frame = vec![value; (WIDTH * HEIGHT) as usize * color_type.bytes_per_pixel()];
     if color_type == ColorType::Rgba8 {
-        for pixel in frame.chunks_exact_mut(4) {
+        for pixel in frame.as_chunks_mut::<4>().0 {
             pixel[3] = 0xFF;
         }
     }

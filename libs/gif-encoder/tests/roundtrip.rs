@@ -75,11 +75,15 @@ fn encode_with(
 fn expected_rgba(data: &[u8], color_type: ColorType) -> Vec<u8> {
     match color_type {
         ColorType::Rgb8 => data
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
             .collect(),
         ColorType::Rgba8 => data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|pixel| {
                 if pixel[3] < 128 {
                     [0, 0, 0, 0]
@@ -254,8 +258,8 @@ fn decode_with_ffmpeg(bytes: &[u8]) -> Option<Vec<u8>> {
 /// (アルファ0の白) へ差し替えるため、そのままでは標識と突き合わせられない。
 /// 差し替え後のこの1色だけを戻すので、他の色はそのまま突き合わせに残る。
 fn restore_transparent_marker(rgba: &mut [u8]) {
-    for pixel in rgba.chunks_exact_mut(4) {
-        if pixel == [0xFF, 0xFF, 0xFF, 0x00] {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        if *pixel == [0xFF, 0xFF, 0xFF, 0x00] {
             pixel.fill(0);
         }
     }
@@ -370,8 +374,10 @@ fn assert_close(actual: &[u8], expected: &[u8], tolerance: u8, decoder: &str) {
     }
 
     for (at, (actual, expected)) in actual
-        .chunks_exact(4)
-        .zip(expected.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(expected.as_chunks::<4>().0)
         .enumerate()
     {
         if expected[3] == 0 {
@@ -394,7 +400,9 @@ fn assert_close(actual: &[u8], expected: &[u8], tolerance: u8, decoder: &str) {
 /// カラーテーブルの色の一致とは独立に落ちる。
 fn assert_transparency(actual: &[u8], expected: &[u8], decoder: &str) {
     let positions = |rgba: &[u8]| -> Vec<usize> {
-        rgba.chunks_exact(4)
+        rgba.as_chunks::<4>()
+            .0
+            .iter()
             .enumerate()
             .filter(|(_, pixel)| pixel[3] == 0)
             .map(|(at, _)| at)
@@ -604,7 +612,14 @@ fn a_frame_with_exactly_256_opaque_colors_survives_both_decoders() {
     // 透過標識が和集合に無いため、透過インデックスは置かない
     let decoded = decode_with_gif(&bytes);
     assert_eq!(decoded.frames[0].transparent, None);
-    assert!(decoded.frames[0].rgba.chunks_exact(4).all(|p| p[3] == 255));
+    assert!(
+        decoded.frames[0]
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| p[3] == 255)
+    );
 }
 
 /// 素材自身の透過画素が透過インデックスになる
@@ -647,7 +662,7 @@ fn partial_alpha_is_binarized_before_encoding() {
     let data: Vec<u8> = (0..64 * 8)
         .flat_map(|i| [(i % 200) as u8, 0x10, 0x20, (i % 256) as u8])
         .collect();
-    let alphas = || data.chunks_exact(4).map(|p| p[3]);
+    let alphas = || data.as_chunks::<4>().0.iter().map(|p| p[3]);
     let squashed = alphas().filter(|&a| (1..128).contains(&a)).count() as u64;
     let raised = alphas().filter(|&a| (128..255).contains(&a)).count() as u64;
     assert!(squashed > 0 && raised > 0, "両方が動く素材になっていない");
@@ -827,7 +842,9 @@ fn unchanged_pixels_inside_the_rect_are_written_as_transparent() {
     // 矩形の中で透過になった画素は、変えた2画素を除いた全部
     let opaque: Vec<usize> = decoded.frames[1]
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .enumerate()
         .filter(|(_, pixel)| pixel[3] != 0)
         .map(|(at, _)| at)
@@ -866,7 +883,12 @@ fn a_full_opaque_union_writes_every_pixel_of_the_rect() {
             "{index} 番目に透過インデックスが出た"
         );
         assert!(
-            frame.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255),
+            frame
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[3] == 255),
             "{index} 番目に透過画素が出た"
         );
     }
@@ -904,7 +926,9 @@ fn the_marker_entry_carries_both_kinds_of_transparency() {
     assert_eq!(decoded.frames[1].rect(), (1, 1, 4, 3));
     let opaque = decoded.frames[1]
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|pixel| pixel[3] != 0)
         .count();
     assert_eq!(opaque, 2, "透過ランが変わった画素まで覆っている");
@@ -1583,7 +1607,12 @@ fn a_material_with_exactly_256_opaque_colors_stays_lossless() {
         "色が揃う前のフレームが透過添字を持っていない"
     );
     assert!(
-        frame.rgba.chunks_exact(4).any(|pixel| pixel[3] == 0),
+        frame
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| pixel[3] == 0),
         "未変更画素を透過ランへ潰していない"
     );
     assert_eq!(
@@ -1867,7 +1896,9 @@ fn unchanged_pixels_inside_a_quantized_rect_are_written_as_transparent() {
 
     let transparent: Vec<usize> = frame
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .enumerate()
         .filter(|(_, pixel)| pixel[3] == 0)
         .map(|(at, _)| at)
@@ -2081,8 +2112,10 @@ fn a_table_that_was_never_written_back_stays_visible() {
     assert_eq!(bytes.len(), HEAD_BYTES + 19, "確保した先まで書けている");
     assert!(
         bytes[13..HEAD_BYTES]
-            .chunks_exact(3)
-            .all(|entry| entry == MAGENTA),
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .all(|entry| *entry == MAGENTA),
         "確保しただけのエントリが黙って読める色になっている"
     );
 }
@@ -2633,7 +2666,9 @@ fn global_colors(bytes: &[u8], colors: usize) -> Vec<[u8; 3]> {
 /// 落ちるため、割り当てた色だけを取る。
 fn table_colors(table: &[u8], colors: usize) -> Vec<[u8; 3]> {
     table
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .take(colors)
         .map(|entry| [entry[0], entry[1], entry[2]])
         .collect()
@@ -2712,7 +2747,13 @@ fn an_escaped_frame_whose_colors_fit_is_written_losslessly() {
     );
 
     let screen = &compose(&decode_with_gif(&bytes))[ESCAPE_AT];
-    for (at, pixel) in frames[ESCAPE_AT].chunks_exact(3).enumerate().skip(2) {
+    for (at, pixel) in frames[ESCAPE_AT]
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .enumerate()
+        .skip(2)
+    {
         assert_eq!(
             &screen[at * 4..at * 4 + 3],
             pixel,
@@ -2840,8 +2881,10 @@ fn a_minority_of_stray_pixels_escapes_where_a_larger_mean_spread_evenly_does_not
     // 動いたフレームは全画素が前フレームと変わり、平均も割合も全画素を分母に取る
     assert!(
         concentrated[ESCAPE_AT]
-            .chunks_exact(3)
-            .zip(concentrated[ESCAPE_AT - 1].chunks_exact(3))
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(concentrated[ESCAPE_AT - 1].as_chunks::<3>().0)
             .all(|(now, before)| now != before),
         "持ち越す画素が残っており、分母が全画素にならない"
     );
@@ -3001,7 +3044,7 @@ fn an_escaped_frame_with_too_many_colors_is_quantized_on_its_own() {
 
     let mut worst = 0;
     let mut exact = 0;
-    for (at, pixel) in input.chunks_exact(3).enumerate() {
+    for (at, pixel) in input.as_chunks::<3>().0.iter().enumerate() {
         let written = &screen[at * 4..at * 4 + 3];
         let difference = (0..3)
             .map(|axis| pixel[axis].abs_diff(written[axis]))
@@ -3049,7 +3092,9 @@ fn an_escaped_table_writes_the_unchanged_pixels_as_transparent() {
     // 矩形の中で透過になった画素は、変えた2画素を除いた全部
     let opaque: Vec<usize> = frame
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .enumerate()
         .filter(|(_, pixel)| pixel[3] != 0)
         .map(|(at, _)| at)

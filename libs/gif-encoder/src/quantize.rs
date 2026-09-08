@@ -54,7 +54,7 @@ pub(crate) fn material<'a>(layout: &Layout, window: impl Iterator<Item = &'a [u8
 fn material_bpp<'a, const BPP: usize>(window: impl Iterator<Item = &'a [u8]>) -> Histogram {
     let mut histogram = Histogram::new();
     for frame in window {
-        for pixel in frame.chunks_exact(BPP) {
+        for pixel in frame.as_chunks::<BPP>().0 {
             let color = pack(pixel, BPP);
             if color == TRANSPARENT {
                 continue;
@@ -757,13 +757,17 @@ mod tests {
     fn the_pruned_search_agrees_with_brute_force() {
         for seed in 1..=8u32 {
             let entries: Vec<u32> = noise(64 * 3, seed)
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|c| u32::from_le_bytes([c[0] & 0xE0, c[1] & 0xE0, c[2] & 0xE0, u8::MAX]))
                 .collect();
             let mut nearest = Nearest::new(&entries);
 
             let bins: Vec<usize> = noise(512 * 3, seed ^ 0x5A5A)
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|c| {
                     ((c[0] >> 2) as usize * BINS + (c[1] >> 2) as usize) * BINS
                         + (c[2] >> 2) as usize

@@ -34,7 +34,9 @@ pub(crate) fn pack_over(
         let row = head + y * stride;
         let prev_row = &prev[row..row + row_len];
         let curr_row = &curr[row..row + row_len];
-        for (p, c) in prev_row.chunks_exact(RGBA).zip(curr_row.chunks_exact(RGBA)) {
+        let prev_row = prev_row.as_chunks::<RGBA>().0;
+        let curr_row = curr_row.as_chunks::<RGBA>().0;
+        for (p, c) in prev_row.iter().zip(curr_row) {
             if p == c {
                 collapsed = true;
                 out.extend_from_slice(&TRANSPARENT);

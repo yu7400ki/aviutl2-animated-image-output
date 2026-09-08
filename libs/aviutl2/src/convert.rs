@@ -62,14 +62,14 @@ mod scalar {
         for y in (0..height).rev() {
             let row_start = y * input_stride;
             let row = &input[row_start..row_start + width * 3];
-            for bgr_pixel in row.chunks_exact(3) {
+            for bgr_pixel in row.as_chunks::<3>().0 {
                 out.extend_from_slice(&[bgr_pixel[2], bgr_pixel[1], bgr_pixel[0]]);
             }
         }
     }
 
     pub fn pa64_to_rgba8(input: &[u16], out: &mut Vec<u8>) {
-        for chunk in input.chunks_exact(4) {
+        for chunk in input.as_chunks::<4>().0 {
             out.extend_from_slice(&super::unmultiply_pixel(
                 chunk[0], chunk[1], chunk[2], chunk[3],
             ));

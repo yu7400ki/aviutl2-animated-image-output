@@ -313,16 +313,16 @@ mod avx2 {
         let zero = _mm256_setzero_si256();
         let mut acc = zero;
 
-        let mut chunks = bytes.chunks_exact(LANES);
-        for chunk in &mut chunks {
-            // SAFETY: chunks_exactが返すのはちょうどLANESバイト
+        let (chunks, rest) = bytes.as_chunks::<LANES>();
+        for chunk in chunks {
+            // SAFETY: chunkはちょうどLANESバイト
             let v = unsafe { _mm256_loadu_si256(chunk.as_ptr().cast()) };
             acc = _mm256_add_epi64(acc, _mm256_sad_epu8(_mm256_abs_epi8(v), zero));
         }
 
         // SAFETY: 呼び出し元がavx2の存在を確認している
         let sum = unsafe { horizontal_sum(acc) };
-        sum + scalar::abs_sum(chunks.remainder())
+        sum + scalar::abs_sum(rest)
     }
 
     /// [`scalar::apply`] のAVX2版

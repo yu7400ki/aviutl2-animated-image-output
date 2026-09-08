@@ -9,14 +9,13 @@ const ALPHA_MASK: u64 = 0xFF00_0000_FF00_0000;
 pub fn has_transparency(pixels: &[u8]) -> bool {
     // 論理積は255を保つので、全画素が不透明なときに限り累積値のアルファが255で残る
     let mut acc = u64::MAX;
-    let mut pairs = pixels.chunks_exact(8);
-    for pair in &mut pairs {
-        let bytes: [u8; 8] = pair.try_into().expect("chunks_exactが返すのは8バイト");
-        acc &= u64::from_le_bytes(bytes);
+    let (pairs, rest) = pixels.as_chunks::<8>();
+    for pair in pairs {
+        acc &= u64::from_le_bytes(*pair);
     }
 
     let mut opaque = (acc & ALPHA_MASK) == ALPHA_MASK;
-    for pixel in pairs.remainder().chunks_exact(4) {
+    for pixel in rest.as_chunks::<4>().0 {
         opaque &= pixel[3] == u8::MAX;
     }
     !opaque

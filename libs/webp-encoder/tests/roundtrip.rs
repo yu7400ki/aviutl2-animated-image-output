@@ -37,7 +37,7 @@ fn noise(len: usize, seed: u32) -> Vec<u8> {
 /// 下に前のフレームが残る合成を突き合わせの対象にする。
 fn normalized_rgba(width: u32, height: u32, seed: u32) -> Vec<u8> {
     let mut rgba = noise((width * height * 4) as usize, seed);
-    for (index, pixel) in rgba.chunks_exact_mut(4).enumerate() {
+    for (index, pixel) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         pixel[3] = if (index + seed as usize).is_multiple_of(5) {
             0
         } else {
@@ -130,7 +130,9 @@ fn rgb_frames(width: u32, height: u32, count: usize) -> Vec<Vec<u8>> {
 
 /// RGBをα = 255 のRGBAへ広げる
 fn opaque_rgba(rgb: &[u8]) -> Vec<u8> {
-    rgb.chunks_exact(3)
+    rgb.as_chunks::<3>()
+        .0
+        .iter()
         .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
         .collect()
 }
@@ -456,7 +458,9 @@ fn the_alpha_flag_is_filled_in_from_the_frames() {
         .iter()
         .map(|frame| {
             frame
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
                 .collect()
         })
@@ -582,7 +586,9 @@ fn a_frame_differing_only_under_transparent_pixels_is_merged() {
     let (width, height) = (24, 16);
     let base = windowed_rgba(width, height, (3, 3));
     let repainted: Vec<u8> = base
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|pixel| {
             if pixel[3] == 0 {
                 [9, 8, 7, 0]
@@ -739,7 +745,7 @@ fn substituting_transparency_raises_the_alpha_flag_of_an_opaque_material() {
     assert!(
         frames
             .iter()
-            .all(|frame| frame.chunks_exact(4).all(|pixel| pixel[3] == 255)),
+            .all(|frame| frame.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255)),
         "素材に透過画素がある"
     );
 
@@ -1338,7 +1344,7 @@ fn a_lossy_animation_composes_near_the_input() {
     assert!(
         frames
             .iter()
-            .all(|frame| frame.chunks_exact(4).all(|p| p[3] == 255)),
+            .all(|frame| frame.as_chunks::<4>().0.iter().all(|p| p[3] == 255)),
         "素材が透過を含んでいる"
     );
 
@@ -1397,7 +1403,7 @@ fn a_lossy_animation_that_clears_rects_composes_near_the_input() {
 /// 決定的な擬似乱数で埋めた不透明なRGBA
 fn noisy_rgba(width: u32, height: u32) -> Vec<u8> {
     let mut rgba = noise((width * height * 4) as usize, 0x5EED);
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         pixel[3] = 255;
     }
     rgba

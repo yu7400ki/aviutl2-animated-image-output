@@ -882,7 +882,9 @@ const BLEND_PIXELS: usize = BLEND_WIDTH as usize * BLEND_HEIGHT as usize;
 /// 隣り合う画素が揃わないため、そのまま書くとほとんど縮まない。
 fn blend_frame(seed: u32) -> Vec<u8> {
     frame_data(BLEND_PIXELS * 3, seed)
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .flat_map(|color| [color[0], color[1], color[2], 0xFF])
         .collect()
 }
@@ -1020,7 +1022,9 @@ fn a_semi_transparent_change_falls_back_to_source() {
 fn a_rect_without_an_unchanged_pixel_stays_on_source() {
     let base = blend_frame(1);
     let changed: Vec<u8> = base
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| [p[0] ^ 0xFF, p[1], p[2], 0xFF])
         .collect();
 
@@ -1145,7 +1149,9 @@ fn an_over_rect_after_a_disposal_keeps_what_the_restored_canvas_lacks() {
 #[test]
 fn an_output_without_alpha_is_never_written_with_over() {
     let base: Vec<u8> = blend_frame(1)
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| [p[0], p[1], p[2]])
         .collect();
     let mut changed = base.clone();

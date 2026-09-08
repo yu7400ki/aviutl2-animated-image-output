@@ -636,7 +636,9 @@ mod tests {
     /// RGB8のフレームに不透明なアルファを足す
     fn with_alpha(frame: &[u8]) -> Vec<u8> {
         frame
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2], 0xFF])
             .collect()
     }
@@ -890,7 +892,7 @@ mod tests {
         }
 
         let mut middle = last.clone();
-        for pixel in middle[..BAND * WIDTH as usize * 4].chunks_exact_mut(4) {
+        for pixel in middle[..BAND * WIDTH as usize * 4].as_chunks_mut::<4>().0 {
             pixel[..3].copy_from_slice(&[0x80, 0x80, 0x80]);
         }
 

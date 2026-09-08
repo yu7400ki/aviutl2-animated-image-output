@@ -288,8 +288,10 @@ impl Rewrite {
             let start = y as usize * stride;
             let end = start + stride;
             let row = src[start..end]
-                .chunks_exact(BPP)
-                .zip(against[start..end].chunks_exact(BPP));
+                .as_chunks::<BPP>()
+                .0
+                .iter()
+                .zip(against[start..end].as_chunks::<BPP>().0);
             for (column, (src, against)) in row.enumerate() {
                 if differs::<BPP>(src, against) {
                     triggers.mark(column as u32, y);

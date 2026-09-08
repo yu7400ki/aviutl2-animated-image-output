@@ -42,7 +42,7 @@ impl ColorTable {
         let reach = transparent.map_or(0, |index| usize::from(index) + 1);
         let entries = colors.len().max(reach).max(MIN_ENTRIES).next_power_of_two();
         let mut bytes = vec![0; entries * 3];
-        for (entry, color) in bytes.chunks_exact_mut(3).zip(colors) {
+        for (entry, color) in bytes.as_chunks_mut::<3>().0.iter_mut().zip(colors) {
             entry.copy_from_slice(&color.to_le_bytes()[..3]);
         }
         ColorTable { bytes }

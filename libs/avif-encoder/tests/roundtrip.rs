@@ -38,7 +38,9 @@ fn gradient_rgb(phase: u32) -> Vec<u8> {
 /// `gradient_rgb` に、左から右へ薄れる α を足したもの
 fn gradient_rgba(phase: u32) -> Vec<u8> {
     gradient_rgb(phase)
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .enumerate()
         .flat_map(|(index, pixel)| {
             let x = (index as u32) % WIDTH;
@@ -50,7 +52,9 @@ fn gradient_rgba(phase: u32) -> Vec<u8> {
 /// `gradient_rgb` に、全面不透明な α を足したもの
 fn opaque_rgba(phase: u32) -> Vec<u8> {
     gradient_rgb(phase)
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
         .collect()
 }
@@ -346,7 +350,9 @@ fn assert_frames_match(decoded: &[u8], frames: &[Vec<u8>]) {
             expected.clone()
         } else {
             expected
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .flat_map(|pixel| pixel[..3].to_vec())
                 .collect()
         };

@@ -37,7 +37,9 @@ fn scrolling_text(phase: u32) -> Vec<u8> {
 /// `scrolling_text` に、横へ流れる帯状の α を足したもの
 fn scrolling_text_rgba(phase: u32) -> Vec<u8> {
     scrolling_text(phase)
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .enumerate()
         .flat_map(|(index, pixel)| {
             let x = (index as u32) % WIDTH;
