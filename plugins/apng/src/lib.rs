@@ -9,7 +9,9 @@ use aviutl2::{
     register_output_plugin, write_or_discard,
 };
 use config::{ColorFormat, Config};
+use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::path::Path;
 use windows::Win32::Foundation::HWND;
 
 /// プラグイン設定をエンコーダの設定へ対応付ける
@@ -44,6 +46,42 @@ fn new_encoder<W: Write>(
     )
 }
 
+/// `path` へ書き出し、`frames` が投入したフレームを閉じる
+///
+/// 途中で失敗したときは書きかけのファイルを残さない。
+fn write_frames<F>(
+    path: &Path,
+    width: u32,
+    height: u32,
+    num_frames: u32,
+    config: &Config,
+    frames: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&mut Encoder<BufWriter<File>>) -> Result<(), String>,
+{
+    write_or_discard(path, |output_file| {
+        let mut encoder = new_encoder(
+            BufWriter::new(output_file),
+            width,
+            height,
+            num_frames,
+            config,
+        )
+        .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
+
+        frames(&mut encoder)?;
+
+        encoder
+            .finish()
+            .map_err(|e| format!("エンコーダー終了エラー: {}", e))?
+            .into_inner()
+            .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
+
+        Ok(())
+    })
+}
+
 struct ApngOutputPlugin;
 
 impl OutputPlugin for ApngOutputPlugin {
@@ -73,32 +111,20 @@ impl OutputPlugin for ApngOutputPlugin {
         let (width, height) = (video.width(), video.height());
         let num_frames = info.num_frames()?;
 
-        write_or_discard(&info.savefile(), |output_file| {
-            let mut encoder = new_encoder(
-                BufWriter::new(output_file),
-                width,
-                height,
-                num_frames,
-                config,
-            )
-            .map_err(|e| format!("エンコーダー初期化エラー: {}", e))?;
-
-            video
-                .encode_frames(config.color_format, |frame_data| {
-                    encoder
-                        .add_frame(frame_data, delay)
-                        .map_err(|e| e.to_string())
-                })
-                .map_err(|e| e.to_string())?;
-
-            encoder
-                .finish()
-                .map_err(|e| format!("エンコーダー終了エラー: {}", e))?
-                .into_inner()
-                .map_err(|e| format!("ファイル書き込みエラー: {}", e))?;
-
-            Ok(())
-        })
+        write_frames(
+            &info.savefile(),
+            width,
+            height,
+            num_frames,
+            config,
+            |encoder| {
+                video
+                    .encode_frames(config.color_format, |frame_data| {
+                        encoder.add_frame(frame_data, delay)
+                    })
+                    .map_err(|e| e.to_string())
+            },
+        )
     }
 
     fn show_config_dialog(hwnd: HWND, config: Config) -> ConfigDialog<Config> {
